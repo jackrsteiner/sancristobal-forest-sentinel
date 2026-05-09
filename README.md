@@ -1,4 +1,4 @@
-# Forest-Watch
+# Open Forest Sentinel 
 
 This project is a generalized, low-cost **forest disturbance monitoring system** for a configurable **Area of Interest (AOI)**. The initial deployment target is the **Solomon Islands**, but arbitrary AOI deployability is a first-class feature: the same system should work for other countries, regions, protected areas, watersheds, concessions, or custom polygons through configuration rather than code changes.
 
