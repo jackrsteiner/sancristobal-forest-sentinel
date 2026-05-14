@@ -1,28 +1,81 @@
-# Beads
+# Delivery model: epics, slices, and beads
 
-This project tracks work as **beads**: small, agent-sized units of work that can be picked up, implemented, tested, and shipped in a single agent run. Beads are strung together through epics and explicit dependencies so that progress is visible end-to-end on the GitHub issue tracker.
+This document defines how agentic work is organized in this repository. It is
+intentionally **project-agnostic**: the three-layer model, the workflow, and the
+definition of done below can be copied into any repository that adopts this
+agentic workflow. Project-specific content — the actual epics and slices — lives
+in `docs/work-plan.md`.
 
-## What a bead is
+## Three layers of work
 
-A bead is an issue that satisfies all of the following:
+Work is organized along three layers. **Epics** and **vertical slices** are
+*orthogonal axes*, not competitors: every bead belongs to exactly one epic *and*
+one slice.
 
-1. **Small enough for one agent run.** If a bead cannot be completed in one focused pass, split it.
-2. **Belongs to an epic.** Every bead is filed under exactly one epic issue. The architecture and work-plan documents describe the epics; see `docs/work-plan.md`.
-3. **Has explicit acceptance criteria.** Observable, testable outcomes. The bead is not done until every criterion is checked.
-4. **Has explicit dependencies.** Other beads it depends on are recorded with `Depends on #NNN`; beads it unblocks use `Blocks #NNN`. GitHub renders these cross-references automatically.
-5. **Ships with tests.** New and changed code is covered by tests, and all tests pass locally and in CI before the bead is closed.
+| Layer | Question it answers | Sliced by | Demonstrable on its own? | Lifespan |
+|-------|---------------------|-----------|--------------------------|----------|
+| **Epic** | *Where does this code live?* | System component / layer | No — a layer alone does nothing | Long-lived bucket |
+| **Vertical slice** | *What working capability did we just ship?* | End-to-end, user-visible behavior | **Yes — this is the unit of "is it functional yet"** | A delivery milestone |
+| **Bead** | *What can one agent do in one run?* | A single PR's worth of work | Part of a slice | One agent run |
 
-## How beads relate to epics
+### Epics
 
-- Epics are tracking issues. They are not implemented directly; they are decomposed into beads.
-- Prefer **GitHub native sub-issues** to attach a bead to its epic. If sub-issues are not appropriate (for example, when a bead spans two epics), reference the epic from the bead's body and add the bead to the epic's task list.
-- An epic is closed only when all of its beads are closed and its acceptance criteria are met.
+An epic is a **horizontal bucket** that groups related work by system component
+(for example: "database", "imagery access", "dashboard"). Epics organize the
+codebase; they are *not* implemented directly and a finished epic is not, by
+itself, a demonstrable capability. Epics are tracked as GitHub issues labelled
+`epic`, decomposed into beads attached as native sub-issues. An epic is closed
+only when all of its beads are closed and its acceptance criteria are met.
+
+### Vertical slices
+
+A vertical slice is a **thin thread that cuts through many epics** to deliver one
+small but *complete*, hallway-testable capability. A slice is the unit that
+answers "is the system functional yet?" — after a slice ships, you can run
+something and a person can try it. Slices are tracked as GitHub **milestones**;
+each bead is assigned to the milestone for its slice.
+
+The same bead can belong to epic "indices" *and* to slice "optical change
+detection". Epics organize; slices deliver. Prefer building the thinnest
+end-to-end slice first (a "walking skeleton") and deepening it with later slices,
+rather than completing one horizontal layer at a time.
+
+### Beads
+
+A bead is a **small, agent-sized unit of work** that can be picked up,
+implemented, tested, and shipped in a single agent run. A bead is an issue that
+satisfies all of the following:
+
+1. **Small enough for one agent run.** If a bead cannot be completed in one
+   focused pass, split it.
+2. **Belongs to exactly one epic and one slice.** The epic says where the code
+   lives; the slice says which delivery milestone it serves.
+3. **Has explicit acceptance criteria.** Observable, testable outcomes. The bead
+   is not done until every criterion is checked.
+4. **Has explicit dependencies.** Beads it depends on are recorded with
+   `Depends on #NNN`; beads it unblocks use `Blocks #NNN`. GitHub renders these
+   cross-references automatically.
+5. **Ships with tests.** New and changed code is covered by tests, and all tests
+   pass locally and in CI before the bead is closed.
+
+## How the layers relate
+
+- Epics are tracking issues; slices are milestones; beads are the issues that
+  actually get implemented.
+- Prefer **GitHub native sub-issues** to attach a bead to its epic. If sub-issues
+  are not appropriate (for example, when a bead spans two epics), reference the
+  epic from the bead's body and add the bead to the epic's task list.
+- Assign every bead to the **milestone** for its vertical slice.
+- A slice is "done" when every bead in its milestone is closed and the slice's
+  hallway test passes. An epic is "done" when every bead under it is closed.
 
 ## Filing a bead
 
-Open a new issue using the **Agent bead** template (`.github/ISSUE_TEMPLATE/agent-bead.yml`). The template enforces:
+Open a new issue using the **Agent bead** template
+(`.github/ISSUE_TEMPLATE/agent-bead.yml`). The template enforces:
 
 - a parent epic reference,
+- the vertical slice the bead serves,
 - in-scope and out-of-scope sections,
 - an acceptance-criteria checklist,
 - explicit `Depends on` / `Blocks` dependency references,
@@ -33,12 +86,16 @@ If a field does not apply, say so explicitly rather than leaving it blank.
 
 ## Dependencies
 
-Beads must record the issues they depend on using the GitHub issue tracker's native cross-reference syntax:
+Beads must record the issues they depend on using the GitHub issue tracker's
+native cross-reference syntax:
 
 - `Depends on #NNN` — this bead cannot ship until `#NNN` is merged.
 - `Blocks #NNN` — `#NNN` cannot ship until this bead is merged.
 
-GitHub renders these references in the timeline and in linked-issue panels, so dependency state is visible without leaving the tracker. A bead with no dependencies must say so explicitly (for example, "No upstream dependencies — foundational bead under epic #NN").
+GitHub renders these references in the timeline and in linked-issue panels, so
+dependency state is visible without leaving the tracker. A bead with no
+dependencies must say so explicitly (for example, "No upstream dependencies —
+foundational bead under epic #NN").
 
 ## Tests and coverage
 
@@ -48,19 +105,27 @@ A bead is not done unless:
 - those tests run in CI on the pull request that closes the bead, and
 - the full test suite passes.
 
-If tests cannot be added for a particular reason (for example, a bead that only edits documentation), the bead must justify it explicitly in its test plan. "I'll add tests later" is not acceptable; that work belongs in a follow-up bead linked with `Blocks`.
+If tests cannot be added for a particular reason (for example, a bead that only
+edits documentation), the bead must justify it explicitly in its test plan.
+"I'll add tests later" is not acceptable; that work belongs in a follow-up bead
+linked with `Blocks`.
 
 ## Definition of done
 
-The agent-bead template includes a definition-of-done checklist. Every box must be checked before the closing pull request is merged:
+The agent-bead template includes a definition-of-done checklist. Every box must
+be checked before the closing pull request is merged:
 
 - [ ] Acceptance criteria are all checked.
 - [ ] New and changed code is fully covered by tests.
 - [ ] All tests pass locally and in CI.
 - [ ] Linked to the parent epic via sub-issue or task list.
+- [ ] Assigned to the milestone for its vertical slice.
 - [ ] Bead dependencies are recorded with `Depends on` / `Blocks` references.
 - [ ] Documentation is updated where the change is user- or operator-visible.
 
 ## Sizing
 
-If a bead grows past a single agent run during implementation, stop and split it. The preferred split is along the natural seams of the pipeline (ingest, indices, change, candidates, events, dashboard), not arbitrary file boundaries. Each resulting bead must independently satisfy the definition of done.
+If a bead grows past a single agent run during implementation, stop and split it.
+The preferred split is along the natural seams of the pipeline, not arbitrary
+file boundaries. Each resulting bead must independently satisfy the definition of
+done and stay within a single vertical slice where possible.
