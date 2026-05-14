@@ -12,6 +12,9 @@ dependencies = [
     "shapely>=2.0",
 ]
 
+[project.scripts]
+forest-sentinel = "forest_sentinel.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

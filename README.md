@@ -170,6 +170,16 @@ The product value comes from turning free, openly available earth-observation da
 
 Its practical advantage depends not only on low cost, but also on **temporal currency** and **evidentiary usefulness**. Frequent sensor revisit and scheduled processing allow detections to be refreshed more often than weekly and kept close to real time for small-to-medium AOIs. Complementary radar observations can help preserve coverage when clouds interfere with optical imagery. Contextual layers such as concessions, protected areas, roads, rivers, mills, and ports help turn generic forest-disturbance detections into reviewable intelligence for illegal-logging monitoring.
 
+## Usage
+
+An AOI is a GeoJSON file containing a single `Feature` whose geometry is the area to monitor and whose `properties.name` identifies it — see `examples/aoi-sample.geojson`. Run the pipeline for a configured AOI with:
+
+```sh
+uv run forest-sentinel run --aoi examples/aoi-sample.geojson
+```
+
+This loads and validates the AOI, persists it to the database, and prints a summary. Slice 0 — the walking skeleton — stops here; later slices add imagery access, change detection, and the dashboard (see `docs/work-plan.md`).
+
 ## Development
 
 The project targets **Python 3.12** and uses [uv](https://docs.astral.sh/uv/) for dependency and environment management. Tests that touch the database need PostgreSQL + PostGIS running locally, provided by `docker compose`.
