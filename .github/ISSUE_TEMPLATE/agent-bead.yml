@@ -7,11 +7,12 @@ body:
     attributes:
       value: |
         A **bead** is a small, independently-shippable unit of work sized for a single agent run.
-        Every bead must belong to an **epic**, declare **acceptance criteria**, declare its **dependencies**
-        on other beads, and ship with **tests that cover the new behavior** and that **pass in CI**.
+        Every bead must belong to one **epic** and one **vertical slice**, declare **acceptance criteria**,
+        declare its **dependencies** on other beads, and ship with **tests that cover the new behavior**
+        and that **pass in CI**.
 
-        Use GitHub's native sub-issue feature to attach this bead to its parent epic when applicable.
-        See `docs/beads.md` for the full convention.
+        Use GitHub's native sub-issue feature to attach this bead to its parent epic, and assign it to the
+        milestone for its vertical slice. See `docs/beads.md` for the full convention.
 
   - type: input
     id: epic
@@ -19,6 +20,15 @@ body:
       label: Epic
       description: The epic issue this bead belongs to. Use a `#NNN` reference so GitHub links it.
       placeholder: "#42"
+    validations:
+      required: true
+
+  - type: input
+    id: vertical_slice
+    attributes:
+      label: Vertical slice
+      description: The vertical slice this bead serves. Name the slice and assign this issue to the matching GitHub milestone. See `docs/work-plan.md`.
+      placeholder: "Slice 0 — Walking skeleton"
     validations:
       required: true
 
@@ -119,6 +129,8 @@ body:
         - label: All tests pass locally and in CI
           required: true
         - label: Linked to its parent epic via sub-issue or task list
+          required: true
+        - label: Assigned to the milestone for its vertical slice
           required: true
         - label: Bead dependencies are recorded with `Depends on` / `Blocks` references
           required: true

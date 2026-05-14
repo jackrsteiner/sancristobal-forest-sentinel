@@ -38,12 +38,12 @@ The system tracks: `aoi`, `observation`, `index_raster`, `change_raster`, `distu
 
 ## How work is organized
 
-Work is tracked as **beads** (small, agent-sized issues) grouped under **epics**. See `docs/beads.md` and `docs/work-plan.md`.
+Work is organized along three layers: **epics** (horizontal buckets that say where code lives, tracked as GitHub issues), **vertical slices** (thin end-to-end threads that say what working capability shipped, tracked as GitHub milestones), and **beads** (small, agent-sized issues). Every bead belongs to exactly one epic and one slice. Prefer building the thinnest end-to-end slice first and deepening it, rather than completing one horizontal epic at a time. See `docs/beads.md` for the model and `docs/work-plan.md` for this project's epics and slices.
 
 When starting work as an agent:
 
 1. Find or open the bead you are implementing. Do not start work that is not represented by a bead.
-2. Confirm the bead's epic and dependencies. If a `Depends on` bead is not yet merged, stop and surface the conflict.
+2. Confirm the bead's epic, vertical slice, and dependencies. If a `Depends on` bead is not yet merged, stop and surface the conflict.
 3. Implement the bead's in-scope items only. Anything in the "Out of scope" section belongs in a separate bead.
 4. Add tests for every code path you add or change.
 5. Make sure the full test suite passes locally and in CI.
