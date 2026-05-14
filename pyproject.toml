@@ -16,7 +16,23 @@ packages = ["src/forest_sentinel"]
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "ruff>=0.9",
+    "mypy>=1.15",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+mypy_path = "src"
+explicit_package_bases = true

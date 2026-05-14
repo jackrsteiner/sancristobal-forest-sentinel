@@ -169,3 +169,17 @@ The project is a reusable template for deploying a lightweight satellite-derived
 The product value comes from turning free, openly available earth-observation data into timely, actionable dashboard views showing likely logging activity, detection timing, expansion rate, confidence, and supporting evidence.
 
 Its practical advantage depends not only on low cost, but also on **temporal currency** and **evidentiary usefulness**. Frequent sensor revisit and scheduled processing allow detections to be refreshed more often than weekly and kept close to real time for small-to-medium AOIs. Complementary radar observations can help preserve coverage when clouds interfere with optical imagery. Contextual layers such as concessions, protected areas, roads, rivers, mills, and ports help turn generic forest-disturbance detections into reviewable intelligence for illegal-logging monitoring.
+
+## Development
+
+The project targets **Python 3.12** and uses [uv](https://docs.astral.sh/uv/) for dependency and environment management.
+
+```sh
+uv sync                       # create the virtualenv and install dependencies
+uv run pytest                 # run the test suite
+uv run ruff check .           # lint
+uv run ruff format .          # format (use --check in CI)
+uv run mypy                   # type-check
+```
+
+Work is organized as epics, vertical slices, and beads — see `docs/work-plan.md` and `docs/beads.md`.
