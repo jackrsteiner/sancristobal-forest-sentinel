@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: forest_sentinel
+      POSTGRES_PASSWORD: forest_sentinel
+      POSTGRES_DB: forest_sentinel
+    ports:
+      - "5432:5432"
+    volumes:
+      - forest_sentinel_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forest_sentinel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  forest_sentinel_pgdata:
