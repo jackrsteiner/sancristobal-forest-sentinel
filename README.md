@@ -172,14 +172,17 @@ Its practical advantage depends not only on low cost, but also on **temporal cur
 
 ## Development
 
-The project targets **Python 3.12** and uses [uv](https://docs.astral.sh/uv/) for dependency and environment management.
+The project targets **Python 3.12** and uses [uv](https://docs.astral.sh/uv/) for dependency and environment management. Tests that touch the database need PostgreSQL + PostGIS running locally, provided by `docker compose`.
 
 ```sh
 uv sync                       # create the virtualenv and install dependencies
+docker compose up -d          # start PostgreSQL + PostGIS (for database-backed tests)
 uv run pytest                 # run the test suite
 uv run ruff check .           # lint
 uv run ruff format .          # format (use --check in CI)
 uv run mypy                   # type-check
 ```
+
+The database URL is read from `FOREST_SENTINEL_DATABASE_URL`, defaulting to the local `docker compose` instance. Apply schema migrations with `uv run alembic upgrade head`.
 
 Work is organized as epics, vertical slices, and beads — see `docs/work-plan.md` and `docs/beads.md`.

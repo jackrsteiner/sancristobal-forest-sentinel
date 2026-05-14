@@ -71,6 +71,7 @@ GCE VM ── load AOI ── fetch HLS ── compute indices (NBR, NDVI)
 | Scheduler / trigger           | GitHub Actions cron                                      | —                                              |
 | Compute                       | Google Compute Engine VM                                 | —                                              |
 | Database                      | PostgreSQL + PostGIS on the same Compute Engine VM       | Cloud SQL for PostgreSQL with PostGIS          |
+| Database access / migrations  | SQLAlchemy 2.0 ORM, GeoAlchemy2 spatial types, Alembic   | —                                              |
 | Language                      | Python                                                   | —                                              |
 | Raster processing             | rasterio, GDAL, numpy, rio-cogeo                         | —                                              |
 | Imagery source                | NASA HLS                                                 | —                                              |
@@ -80,6 +81,8 @@ GCE VM ── load AOI ── fetch HLS ── compute indices (NBR, NDVI)
 | Versioning / CI               | GitHub                                                   | —                                              |
 
 The prototype is co-located on a single GCE VM (compute + database + raster storage) for cost. The future path separates raster storage to GCS and the database to managed Cloud SQL.
+
+Schema changes are versioned with **Alembic**; each migration is reviewed and shipped in the bead that introduces the schema it depends on. A `docker-compose.yml` at the repository root runs PostgreSQL + PostGIS for local development, and the database URL is supplied through the `FOREST_SENTINEL_DATABASE_URL` environment variable.
 
 ## 5. Core domain objects
 

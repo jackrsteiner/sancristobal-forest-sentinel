@@ -4,7 +4,12 @@ version = "0.0.0"
 description = "Generalized, low-cost forest disturbance monitoring and evidence system for a configurable Area of Interest."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "sqlalchemy>=2.0",
+    "geoalchemy2>=0.15",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -36,3 +41,7 @@ strict = true
 files = ["src", "tests"]
 mypy_path = "src"
 explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = "geoalchemy2.*"
+ignore_missing_imports = true

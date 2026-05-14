@@ -211,6 +211,7 @@ These are points the README does not resolve. They should be answered inside the
 - Detection thresholds and the candidate-polygon extraction algorithm.
 - The polygon-tracking algorithm used to assemble events from candidates.
 - Dashboard framework and hosting.
-- Migration tooling for PostgreSQL + PostGIS.
 - Authentication / access model for the dashboard and review workflows.
 - Retention policy for COGs and observations.
+
+_Resolved: migration tooling for PostgreSQL + PostGIS — SQLAlchemy 2.0 + GeoAlchemy2 + Alembic (see `docs/architecture.md`, bead #22)._
