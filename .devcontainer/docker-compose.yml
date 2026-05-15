@@ -1,0 +1,16 @@
+# Adds the `app` service the devcontainer runs in; the `db` service is reused
+# from the repository-root docker-compose.yml so the database config is not
+# duplicated. Compose resolves relative paths against the project directory,
+# which is the repository root (the root compose file is listed first in
+# devcontainer.json), so `.` is the repository.
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/base:ubuntu
+    command: sleep infinity
+    volumes:
+      - .:/workspaces/Open-Forest-Sentinel:cached
+    environment:
+      FOREST_SENTINEL_DATABASE_URL: postgresql+psycopg://forest_sentinel:forest_sentinel@db:5432/forest_sentinel
+    depends_on:
+      db:
+        condition: service_healthy

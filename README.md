@@ -182,6 +182,8 @@ This loads and validates the AOI, persists it to the database, and prints a summ
 
 ## Development
 
+In **GitHub Codespaces**, opening the repository builds a devcontainer that installs dependencies and starts the database automatically, so `uv run forest-sentinel run --aoi examples/aoi-sample.geojson` works immediately. The steps below cover local development.
+
 The project targets **Python 3.12** and uses [uv](https://docs.astral.sh/uv/) for dependency and environment management. Tests that touch the database need PostgreSQL + PostGIS running locally, provided by `docker compose`.
 
 ```sh
