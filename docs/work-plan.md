@@ -189,7 +189,7 @@ This map is the *horizontal* view. The "Vertical slices" section below is the *d
 
 The epics above describe *where code lives*. Vertical slices describe *what working capability ships and when*. Each slice is a thin end-to-end thread across several epics and ends in a concrete hallway test. Build the thinnest slice first (a "walking skeleton") and deepen it; do not finish one horizontal epic at a time. Each slice is tracked as a GitHub milestone.
 
-Slices 0–3 are defined now. Slices 4–6 are sketched and will be firmed up when reached, because their algorithms and framework choices are still open (see "Open questions").
+Slice 0 is complete and Slice 1 is decomposed into filed beads (see "Slice bead breakdowns" below). Slices 2–3 have bead outlines that require a dedicated planning pass before implementation; Slices 4–6 are sketched at the table level only.
 
 | Slice | Capability delivered | Epics touched | Hallway test |
 |-------|----------------------|---------------|--------------|
@@ -203,15 +203,59 @@ Slices 0–3 are defined now. Slices 4–6 are sketched and will be firmed up wh
 
 Every epic appears in at least one slice. E1, E2, E11, E12, and E13 are touched by multiple slices because foundational and infrastructure epics are deepened incrementally rather than completed up front.
 
+## Slice bead breakdowns
+
+### Slice 1 — bead breakdown (filed)
+
+Slice 1 is decomposed into eight beads filed under the **Slice 1** milestone (issues #35–#42), each linked as a sub-issue of its epic:
+
+- **#35** — Methodology versioning: `methodology_version` table, model, helper (E9).
+- **#36** — Raster storage abstraction + COG writer, `storage.py` (E12).
+- **#37** — `observation` table + model (E13).
+- **#38** — HLS scene discovery → `observation` records, via `earthaccess` (E3). Depends on #37.
+- **#39** — `index_raster` table + NBR/NDVI computation → COGs (E4). Depends on #35, #36, #38.
+- **#40** — `change_raster` table + trailing-median baseline + ΔNBR/ΔNDVI (E5). Depends on #39.
+- **#41** — `disturbance_candidate` table + threshold/polygonize extraction (E6). Depends on #40.
+- **#42** — Wire the Slice 1 pipeline into `forest-sentinel run` end-to-end (E3–E6). Depends on #38–#41.
+
+Architectural decisions baked into these beads: HLS access via `earthaccess` (`HLSL30` / `HLSS30`); change product = ΔNBR/ΔNDVI against a per-pixel trailing-median baseline; candidate extraction = threshold + polygonize + configurable area filter; COGs written through a `storage.py` abstraction. Each bead records its decision in `docs/architecture.md`.
+
+### Slice 2 — bead outline
+
+> **OUTLINE ONLY — not ready for agentic work.** These beads are a sketch. Before any are implemented, this slice needs a dedicated planning pass that (a) resolves the open design questions below and (b) expands each into a full `agent-bead` issue. Do not file or start these as-is.
+
+Open questions to resolve first: the candidate→event **tracking algorithm**; the **dashboard framework** and hosting; the dashboard **auth / access model**.
+
+- `disturbance_event` + `event_observation` tables + models (E7, E13).
+- Candidate→event tracking algorithm (E7) — *needs design*.
+- Dashboard backend / API (E10) — *needs framework decision*.
+- Dashboard UI: map + timeline + event detail + AOI summary (E10).
+- Wire event tracking into the pipeline run (E7).
+
+### Slice 3 — bead outline
+
+> **OUTLINE ONLY — not ready for agentic work.** These beads are a sketch. Before any are implemented, this slice needs a dedicated planning pass that (a) resolves the open design questions below and (b) expands each into a full `agent-bead` issue. Do not file or start these as-is.
+
+Depends on Slice 2. Open questions to resolve first: the review UI shape (tied to the dashboard framework); the review **auth / access model**.
+
+- `manual_review` table + model (E8, E13).
+- Review actions surfaced in the dashboard (E8, E10).
+- GitHub Actions cron workflow + scheduled pipeline run (E11).
+- Run logging + failure handling (E11).
+
 ## Open questions
 
 These are points the README does not resolve. They should be answered inside the relevant epic and recorded in `docs/architecture.md` once decided.
 
-- Concrete table schemas for each domain object.
-- Detection thresholds and the candidate-polygon extraction algorithm.
-- The polygon-tracking algorithm used to assemble events from candidates.
-- Dashboard framework and hosting.
-- Authentication / access model for the dashboard and review workflows.
+- Concrete table schemas for the Slice 2–3 domain objects (`disturbance_event`, `event_observation`, `manual_review`).
+- The polygon-tracking algorithm used to assemble events from candidates (Slice 2).
+- Dashboard framework and hosting (Slice 2).
+- Authentication / access model for the dashboard and review workflows (Slices 2–3).
 - Retention policy for COGs and observations.
 
-_Resolved: migration tooling for PostgreSQL + PostGIS — SQLAlchemy 2.0 + GeoAlchemy2 + Alembic (see `docs/architecture.md`, bead #22)._
+**Resolved:**
+
+- Migration tooling for PostgreSQL + PostGIS — SQLAlchemy 2.0 + GeoAlchemy2 + Alembic (bead #22; see `docs/architecture.md`).
+- HLS imagery access — `earthaccess` against HLS v2.0 `HLSL30` / `HLSS30` (Slice 1 plan; recorded by bead #38).
+- Change products & detection — ΔNBR/ΔNDVI against a per-pixel trailing-median baseline; candidates by threshold + polygonize + configurable area filter (Slice 1 plan; recorded by beads #40, #41).
+- Raster storage layout — COGs written through a `storage.py` abstraction under a configurable root (Slice 1 plan; recorded by bead #36).
