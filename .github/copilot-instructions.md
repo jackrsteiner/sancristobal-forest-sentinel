@@ -26,7 +26,7 @@ Match the prototype stack described in the README. Do not swap components withou
 - **Local raster handling:** rasterio, GDAL, rio-cogeo (ingest / validate EE-exported COGs); numpy.
 - **Imagery source:** NASA HLS (`HLSL30` / `HLSS30`), accessed via Google Earth Engine.
 - **Raster output format:** Cloud Optimized GeoTIFF (written by EE export).
-- **Raster storage:** Google Cloud Storage (Earth Engine export target); isolate storage access and the export-task lifecycle behind an interface.
+- **Raster storage:** local VM filesystem (e.g. `/data/cogs/`) for $0 cost. EE exports to a transient GCS staging area, which the storage layer copies to local disk and then clears. Isolate storage access, the export-task lifecycle, and the copy-to-disk step behind one interface.
 - **Database:** PostgreSQL + PostGIS on the same Compute Engine VM (prototype). The future path is Cloud SQL for PostgreSQL with PostGIS.
 - **Compute:** Google Compute Engine VM (orchestrates Earth Engine and ingests results).
 - **Scheduler:** GitHub Actions cron.

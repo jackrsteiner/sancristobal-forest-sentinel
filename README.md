@@ -124,7 +124,7 @@ Additional weak signals, such as night-time lights anomalies or mill / port / ex
 10. Where available, complementary observation streams such as **Sentinel-1 SAR** can be used to fill cloud gaps, corroborate optical detections, or flag radar-only disturbance candidates.
 11. Contextual layers such as concessions, protected areas, roads, rivers, settlements, mills, and ports are joined to disturbance events.
 12. Outputs are exposed through a dashboard with maps, timelines, event detail views, confidence explanations, and AOI summary metrics.
-13. Earth Engine exports raster artifacts as **Cloud Optimized GeoTIFFs (COGs)** to **Google Cloud Storage**.
+13. Earth Engine exports raster artifacts as **Cloud Optimized GeoTIFFs (COGs)** to a transient Google Cloud Storage staging area; the VM copies them to its local disk (the canonical store) and clears the staging object, keeping raster storage at $0.
 14. Metadata, provenance, AOIs, detections, event histories, contextual overlays, and manual review records are stored in **PostgreSQL + PostGIS**.
 
 ## Prototype Technology Stack
@@ -140,7 +140,8 @@ Additional weak signals, such as night-time lights anomalies or mill / port / ex
 - **Planned radar augmentation:** Sentinel-1 SAR, starting with GRD backscatter / intensity change detection
 - **Possible future reference layers:** GEDI / canopy structure products, ALOS / PALSAR-derived products, night-time lights, infrastructure and legal boundary datasets
 - **Raster output format:** Cloud Optimized GeoTIFF (written by Earth Engine export)
-- **Raster storage:** Google Cloud Storage (Earth Engine export target)
+- **Raster storage:** local VM filesystem, e.g. `/data/cogs/` (canonical); GCS used only as a transient EE-export staging area, then cleared
+- **Future raster storage:** Google Cloud Storage (when COG volume outgrows the free VM disk)
 - **Dashboard:** lightweight web application backed by PostGIS
 - **Versioning / CI:** GitHub
 

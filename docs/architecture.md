@@ -38,7 +38,7 @@ The pipeline runs on a schedule end-to-end. **Imagery access and raster computat
 7. Change signals are converted into candidate disturbance polygons server-side (threshold + `reduceToVectors`).
 8. Candidate polygons are tracked over time as disturbance events.
 9. Outputs are exposed through a dashboard with maps, timelines, event detail views, and AOI summary metrics.
-10. Earth Engine **exports** raster artifacts as **Cloud Optimized GeoTIFFs (COGs)** directly to **Google Cloud Storage** (`Export.image.toCloudStorage`). Exports are asynchronous batch tasks: the pipeline submits a task, polls until it is `COMPLETED`, then ingests the resulting COG reference and metadata.
+10. Earth Engine **exports** raster artifacts as **Cloud Optimized GeoTIFFs (COGs)** to a transient **Google Cloud Storage** staging area (`Export.image.toCloudStorage`). Exports are asynchronous batch tasks: the pipeline submits a task and polls until it is `COMPLETED`. On completion the VM **copies the COG to its local disk** — the canonical store — records the local path, and **deletes the GCS staging object**, so bulk raster storage stays on the VM's always-free disk and GCS stays inside its free tier. See [§4b — Cost model: the $0 path](#4b-cost-model-the-0-path).
 11. Metadata, provenance, AOIs, detections, and event histories live in **PostgreSQL + PostGIS**.
 
 ```
@@ -52,18 +52,19 @@ GCE VM ── load AOI ──▶ submit Earth Engine work ───────�
    │                   vs. trailing-median ▸ threshold ▸ polygonize   │
    │                                      │                           │
    │                                      ▼                           │
-   │                     Export.image.toCloudStorage (COG → GCS)      │
+   │              Export.image.toCloudStorage (COG → GCS staging)     │
    │                                      │                           │
    └──── poll task ── COMPLETED ──────────┘                           │
                 │                                                     │
                 ▼                                                     ▼
-   ingest COG refs + metadata                              candidate polygons
+   copy COG → VM disk, delete GCS staging,                  candidate polygons
+   record local path + metadata                                      │
                 │                                                     │
                 └──────────────────────┬──────────────────────────────┘
                                        ▼
                 ┌──────────────────────┴──────────────────────┐
                 ▼                                              ▼
-        COGs in Google Cloud Storage                  PostgreSQL + PostGIS
+  COGs on VM local disk (GCS = transient staging)     PostgreSQL + PostGIS
                                                                │
                                                                ▼
                                                            Dashboard
@@ -82,11 +83,11 @@ GCE VM ── load AOI ──▶ submit Earth Engine work ───────�
 | Local raster handling         | rasterio, GDAL, rio-cogeo (ingest / validate EE-exported COGs); numpy | —                                 |
 | Imagery source                | NASA HLS (`HLSL30` / `HLSS30` v2.0), accessed via Google Earth Engine | —                                 |
 | Raster output format          | Cloud Optimized GeoTIFF (written by EE export)           | —                                              |
-| Raster storage                | Google Cloud Storage (Earth Engine export target)        | —                                              |
+| Raster storage                | Local VM filesystem, e.g. `/data/cogs/` (canonical). GCS used only as a transient EE-export staging area, then cleared | Google Cloud Storage (when COG volume outgrows the free VM disk) |
 | Dashboard                     | Lightweight web application backed by PostGIS            | —                                              |
 | Versioning / CI               | GitHub                                                   | —                                              |
 
-The prototype co-locates **compute (orchestration) and the database** on a single GCE VM for cost. Raster storage is **Google Cloud Storage from the start**, because Earth Engine exports COGs directly to GCS — the earlier "local filesystem now, GCS later" split no longer applies. The future path separates the database to managed Cloud SQL.
+The prototype co-locates **compute (orchestration), the database, and raster storage** on a single always-free GCE VM for $0 cost. Earth Engine exports COGs to a transient GCS staging area; the VM copies each COG to its local disk and clears the staging object, so bulk storage lives on the free 30 GB disk rather than in (metered) GCS. The future path separates raster storage to GCS once COG volume outgrows the free disk, and the database to managed Cloud SQL.
 
 Schema changes are versioned with **Alembic**; each migration is reviewed and shipped in the bead that introduces the schema it depends on. A `docker-compose.yml` at the repository root runs PostgreSQL + PostGIS for local development, and the database URL is supplied through the `FOREST_SENTINEL_DATABASE_URL` environment variable.
 
@@ -96,9 +97,9 @@ Schema changes are versioned with **Alembic**; each migration is reviewed and sh
 
 **Rationale.**
 
-- **Server-side compute.** NBR / NDVI, the trailing-median baseline, ΔNBR / ΔNDVI, and threshold-plus-polygonize all map to EE primitives (`normalizedDifference`, `ImageCollection.median()`, `gt()` + `reduceToVectors`), removing local raster loops.
-- **No raw-scene egress.** Inputs stay inside Google's network; only the finished COGs are exported to our GCS bucket.
-- **GCS-native storage.** EE writes COGs straight to GCS, so the README's "future" GCS storage becomes the prototype storage with no migration step.
+- **Server-side compute keeps the VM tiny.** NBR / NDVI, the trailing-median baseline, ΔNBR / ΔNDVI, and threshold-plus-polygonize all map to EE primitives (`normalizedDifference`, `ImageCollection.median()`, `gt()` + `reduceToVectors`), removing local raster loops. Because EE does the heavy compute (free under the noncommercial tier), the VM only orchestrates and hosts a small Postgres — which fits the **always-free `e2-micro`** instance. See [§4b](#4b-cost-model-the-0-path).
+- **No raw-scene egress.** Inputs stay inside Google's network; only the finished COGs leave EE, into a transient GCS staging area.
+- **EE produces the COGs.** No local rio-cogeo write path is needed; the VM only copies finished COGs to its free local disk (the canonical store), keeping bulk storage at $0.
 - **Cloud / shadow / haze masking is built in.** The `Fmask` QA band ships with both HLS collections, so QA masking (E14) can be satisfied inside Slice 1.
 - **Cheaper future slices.** Sentinel-1 GRD (E16), Hansen Global Forest Change, GEDI, ESA WorldCover, and other context layers (E17) already exist in the EE catalog.
 
@@ -111,6 +112,22 @@ Schema changes are versioned with **Alembic**; each migration is reviewed and sh
 - **Auth surface.** Requires a GCP service account with Earth Engine access, an EE-registered Cloud project, and a GCS bucket.
 
 This decision is validated by the Option C verification plan (EE-vs-LP-DAAC ingestion lag, per-run EECU benchmark, and a GCE VM service-account smoke test) before Slice 1 implementation begins.
+
+### 4b. Cost model: the $0 path
+
+The prototype targets **$0/month** for a reasonably small AOI by staying inside always-free tiers. Free-tier limits change and are region-specific — verify against current GCP / Earth Engine docs before relying on them.
+
+| Component | $0 mechanism | Watch-out |
+|-----------|--------------|-----------|
+| Scheduler | GitHub Actions cron (free minutes; unlimited for public repos) | Heavy/long jobs can exhaust private-repo minutes |
+| Raster compute | Earth Engine **noncommercial** tier (free EECU-hours) | Must stay noncommercial; tier quota (working assumption: Contributor) is confirmed by verification V2 |
+| Orchestrator + database | Always-free **`e2-micro`** VM (2 shared vCPU, 1 GB RAM), 24/7, in `us-west1` / `us-central1` / `us-east1` | 1 GB RAM is tight — keep the AOI small and tune Postgres |
+| Raster storage | COGs on the VM's **30 GB free disk** (shared with Postgres) | Disk is finite — needs a retention policy; serving COGs later comes from the VM, not a CDN |
+| Export staging | GCS used only as a **transient** EE-export hop, cleared after each copy-to-disk | Keep staging well under the 5 GB-month GCS free tier by deleting promptly |
+
+**Why COGs land on the VM disk, not GCS:** Earth Engine can only export to GCS (not to a VM), but GCS storage is free only up to 5 GB-month, whereas the VM's 30 GB disk is always-free. So the pipeline treats GCS as a short-lived staging area and copies each finished COG to local disk, then deletes the staging object. This keeps bulk raster storage at $0 at the cost of one extra copy per export. The trade-off accepted: a finite local disk (retention policy required) and, later, dashboard COG serving from the VM rather than from object storage / CDN.
+
+**Residual cost risks:** internet **egress** (e.g. a public dashboard reading from the VM), exceeding the free disk and spilling to GCS, or any shift to **commercial** Earth Engine use. None apply to a small-AOI prototype kept within the limits above.
 
 ## 5. Core domain objects
 
@@ -140,7 +157,7 @@ Relationships implied by the pipeline:
 ## 6. Cross-cutting properties
 
 - **AOI-first configurability.** Switching deployment to a new AOI is a configuration change, not a code change.
-- **Cost discipline.** Compute, database, and raster storage choices are bounded by free-tier / low-cost envelopes for reasonably sized AOIs. With Earth Engine as the compute substrate, the primary cost dimension is **EECU-hours per run** (bounded by the chosen noncommercial tier); cost otherwise scales with AOI size, processing frequency, output retention, GCS storage volume, and dashboard usage.
+- **Cost discipline.** The prototype targets **$0/month** within always-free tiers; see [§4b](#4b-cost-model-the-0-path). With Earth Engine as the compute substrate, the primary compute cost dimension is **EECU-hours per run** (bounded by the chosen noncommercial tier); cost otherwise scales with AOI size, processing frequency, output retention, local-disk volume, and dashboard egress.
 - **Temporal currency.** Scheduling and sensor revisit cadence are designed so detections refresh more often than weekly for small-to-medium AOIs.
 - **Provenance.** Every derived artifact is traceable to its source observations and to the `methodology_version` that produced it.
 
