@@ -65,6 +65,29 @@ def export_task_state(task: Any) -> str:
     return state
 
 
+def list_image_properties(
+    collection_id: str,
+    region: Any,
+    since: str,
+    until: str,
+) -> list[dict[str, Any]]:
+    """Enumerate images in ``collection_id`` intersecting ``region`` over [since, until).
+
+    ``region`` is a GeoJSON geometry dict. Returns one ``{"id", "properties"}`` dict per
+    image (``getInfo`` over the filtered collection) — plain Python the caller turns into
+    ``observation`` rows.
+    """
+    collection = (
+        ee.ImageCollection(collection_id).filterBounds(ee.Geometry(region)).filterDate(since, until)
+    )
+    info = collection.getInfo() or {}
+    features = info.get("features", [])
+    return [
+        {"id": feature.get("id"), "properties": feature.get("properties", {})}
+        for feature in features
+    ]
+
+
 def is_terminal_failure(state: str) -> bool:
     """True if a task state is a terminal failure (no point polling further)."""
     return state in _TASK_STATES_TERMINAL_FAILURE

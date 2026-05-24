@@ -218,6 +218,25 @@ canonical store to GCS later is a swap behind the `Storage` protocol — pipelin
 touches GCS or EE directly, only `export_image`. The EE client and the GCS bucket are injected,
 so tests exercise the full lifecycle (submit → poll → copy → clear) with no live calls.
 
+### 5.3 HLS discovery
+
+**`forest_sentinel.hls`** (bead #38) discovers HLS scenes for an AOI and time window through
+the EE seam and records them as `observation` rows. It enumerates both HLS v2.0 collections —
+`NASA/HLS/HLSL30/v002` (Landsat 8/9, sensor `HLSL30`) and `NASA/HLS/HLSS30/v002` (Sentinel-2,
+sensor `HLSS30`) — via `ImageCollection.filterBounds(aoi).filterDate(since, until)`. Each image
+feature is parsed into the `observation` fields: `source_scene_id` from `system:index`,
+`acquired_at` from `system:time_start` (epoch ms → UTC), `cloud_cover_percent` from the
+`CLOUD_COVERAGE` property when present. Dedup is by the `(aoi_id, source_scene_id)` unique
+constraint plus an in-run guard, so a re-run over the same window records nothing and reports the
+images as skipped. An empty window / no available scenes yields zero observations without error.
+`DiscoveryResult(discovered, recorded, skipped)` reports the per-pass counts.
+
+**Auth.** Earth Engine needs a GCP service account with EE access and an EE-registered Cloud
+project: `FOREST_SENTINEL_GEE_PROJECT` (project id) plus ambient credentials
+(`GOOGLE_APPLICATION_CREDENTIALS`, or an interactive `earthengine authenticate`). The
+`FOREST_SENTINEL_GCS_STAGING_BUCKET` (used by storage) must be writable by the same account.
+CI exercises everything through stubs, so no credentials are needed to run the tests.
+
 ## 6. Cross-cutting properties
 
 - **AOI-first configurability.** Switching deployment to a new AOI is a configuration change, not a code change.
