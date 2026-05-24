@@ -112,8 +112,35 @@ Additional weak signals, such as night-time lights anomalies or mill / port / ex
 
 ## Data Pipeline
 
+```mermaid
+flowchart TD
+    cron["GitHub Actions cron"] --> orch["GCE e2-micro VM<br/>Python orchestrator"]
+    orch --> aoi["Load configured AOI"]
+    aoi --> submit["Submit Earth Engine work"]
+
+    subgraph EE["Google Earth Engine — server-side (free noncommercial tier)"]
+        direction TB
+        filt["Filter HLSL30 / HLSS30<br/>by AOI and date"] --> mask["QA mask with Fmask"]
+        mask --> idx["Compute NBR / NDVI"]
+        idx --> chg["ΔNBR / ΔNDVI vs.<br/>trailing-median baseline"]
+        chg --> cand["Threshold + reduceToVectors<br/>candidate polygons"]
+        idx --> exp["Export.image.toCloudStorage"]
+        chg --> exp
+    end
+
+    submit --> filt
+    exp --> stg["GCS staging<br/>(transient)"]
+    stg --> copy["VM copies COG to local disk,<br/>then clears staging"]
+    copy --> disk[("COGs on VM disk<br/>/data/cogs")]
+    copy --> meta["Record metadata + provenance"]
+    cand --> meta
+    meta --> pg[("PostgreSQL + PostGIS")]
+    pg --> dash["Dashboard:<br/>maps, timelines, events"]
+    disk -. serves rasters .-> dash
+```
+
 1. **GitHub Actions** runs on a schedule and triggers the pipeline.
-2. A **Google Compute Engine VM** executes the Python processing job.
+2. A **Google Compute Engine VM** executes the Python orchestration job (it submits Earth Engine work and ingests results).
 3. The pipeline loads the configured AOI geometry.
 4. The pipeline accesses relevant **HLS analysis-ready imagery through Google Earth Engine** (`HLSL30` / `HLSS30`).
 5. Earth Engine computes vegetation/disturbance indices such as NBR and NDVI server-side.
@@ -144,6 +171,39 @@ Additional weak signals, such as night-time lights anomalies or mill / port / ex
 - **Future raster storage:** Google Cloud Storage (when COG volume outgrows the free VM disk)
 - **Dashboard:** lightweight web application backed by PostGIS
 - **Versioning / CI:** GitHub
+
+## Infrastructure Architecture
+
+The prototype targets **$0/month** by staying inside always-free tiers: GitHub Actions, the Earth Engine noncommercial tier, and a single always-free `e2-micro` VM that hosts the orchestrator, PostgreSQL + PostGIS, and the canonical COG store on its free disk. Earth Engine performs the heavy raster compute server-side; Cloud Storage is used only as a transient export staging area, cleared after each COG is copied to the VM. See `docs/architecture.md` §4b for the full cost model.
+
+```mermaid
+flowchart LR
+    nasa["NASA HLS<br/>HLSL30 / HLSS30"]
+
+    subgraph GH["GitHub — free"]
+        gha["GitHub Actions<br/>cron + CI"]
+    end
+
+    subgraph GCP["Google Cloud Platform"]
+        ee["Earth Engine<br/>noncommercial tier — free"]
+        gcs["Cloud Storage<br/>transient export staging"]
+        subgraph VM["e2-micro VM — always-free"]
+            orch["forest-sentinel<br/>orchestrator"]
+            db[("PostgreSQL<br/>+ PostGIS")]
+            disk[("COGs on 30 GB<br/>free disk")]
+        end
+    end
+
+    nasa -. ingested by .-> ee
+    gha -->|triggers| orch
+    orch -->|submit / poll| ee
+    ee -->|export COG| gcs
+    orch -->|copy then delete| gcs
+    orch --> disk
+    orch --> db
+    db --> dash["Dashboard"]
+    disk -. serves .-> dash
+```
 
 ## Core Domain Objects
 
