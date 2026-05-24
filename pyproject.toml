@@ -10,6 +10,8 @@ dependencies = [
     "alembic>=1.13",
     "psycopg[binary]>=3.1",
     "shapely>=2.0",
+    "earthengine-api>=1.1",
+    "google-cloud-storage>=2.16",
 ]
 
 [project.scripts]
@@ -25,12 +27,14 @@ packages = ["src/forest_sentinel"]
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-cov>=5",
     "ruff>=0.9",
     "mypy>=1.15",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=forest_sentinel --cov-report=term-missing --cov-fail-under=90"
 
 [tool.ruff]
 line-length = 100
@@ -47,5 +51,5 @@ mypy_path = "src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["geoalchemy2.*", "shapely.*"]
+module = ["geoalchemy2.*", "shapely.*", "ee.*", "google.cloud.*"]
 ignore_missing_imports = true
