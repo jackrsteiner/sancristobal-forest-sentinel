@@ -143,3 +143,38 @@ def median_of(images: list[Any]) -> Any:
 def subtract(image: Any, other: Any) -> Any:
     """``image - other`` as an EE image (the change product)."""
     return image.subtract(other)
+
+
+def _feature_with_area(feature: Any) -> Any:
+    """Tag a vector feature with its area in m² (native projection)."""
+    return feature.set("area_m2", feature.area(maxError=1))
+
+
+def threshold_and_vectorize(
+    delta_image: Any,
+    *,
+    threshold: float,
+    scale: int,
+    region: Any,
+    min_area_m2: float,
+) -> list[dict[str, Any]]:
+    """Threshold a change image, polygonize the mask, and return candidate features.
+
+    Disturbance is a drop beyond ``threshold`` (``delta < threshold``). The mask is
+    polygonized with ``reduceToVectors``; each polygon is tagged with its area and the
+    collection is filtered to ``area_m2 >= min_area_m2``. Returns the GeoJSON features
+    (WGS 84 geometry + ``area_m2`` property) — plain Python the caller persists.
+    """
+    mask = delta_image.lt(threshold).selfMask()
+    vectors = mask.reduceToVectors(
+        geometry=ee.Geometry(region),
+        scale=scale,
+        geometryType="polygon",
+        eightConnected=False,
+        maxPixels=1e10,
+    )
+    with_area = vectors.map(_feature_with_area)
+    filtered = with_area.filter(ee.Filter.gte("area_m2", min_area_m2))
+    info = filtered.getInfo() or {}
+    features: list[dict[str, Any]] = info.get("features", [])
+    return features

@@ -99,3 +99,55 @@ def test_apply_fmask_mask_accepts_custom_band(fake_ee: MagicMock) -> None:
     image = MagicMock(name="image")
     earthengine.apply_fmask_mask(image, fmask_band="QA")
     image.select.assert_called_once_with("QA")
+
+
+def test_normalized_difference_passes_bands() -> None:
+    image = MagicMock(name="image")
+    result = earthengine.normalized_difference(image, ["B5", "B7"])
+    image.normalizedDifference.assert_called_once_with(["B5", "B7"])
+    assert result is image.normalizedDifference.return_value
+
+
+def test_median_of_builds_collection(fake_ee: MagicMock) -> None:
+    result = earthengine.median_of(["a", "b"])
+    fake_ee.ImageCollection.assert_called_once_with(["a", "b"])
+    assert result is fake_ee.ImageCollection.return_value.median.return_value
+
+
+def test_subtract_delegates() -> None:
+    image = MagicMock(name="image")
+    result = earthengine.subtract(image, "baseline")
+    image.subtract.assert_called_once_with("baseline")
+    assert result is image.subtract.return_value
+
+
+def test_feature_with_area_sets_area_property() -> None:
+    feature = MagicMock(name="feature")
+    result = earthengine._feature_with_area(feature)
+    feature.area.assert_called_once_with(maxError=1)
+    feature.set.assert_called_once_with("area_m2", feature.area.return_value)
+    assert result is feature.set.return_value
+
+
+def test_threshold_and_vectorize_returns_features(fake_ee: MagicMock) -> None:
+    delta = MagicMock(name="delta")
+    filtered = delta.lt.return_value.selfMask.return_value.reduceToVectors.return_value.map.return_value.filter.return_value
+    filtered.getInfo.return_value = {"features": [{"geometry": {}, "properties": {"area_m2": 5}}]}
+
+    features = earthengine.threshold_and_vectorize(
+        delta, threshold=-0.25, scale=30, region={"type": "Polygon"}, min_area_m2=4500
+    )
+    assert features == [{"geometry": {}, "properties": {"area_m2": 5}}]
+    delta.lt.assert_called_once_with(-0.25)
+
+
+def test_threshold_and_vectorize_handles_empty(fake_ee: MagicMock) -> None:
+    delta = MagicMock(name="delta")
+    filtered = delta.lt.return_value.selfMask.return_value.reduceToVectors.return_value.map.return_value.filter.return_value
+    filtered.getInfo.return_value = None
+    assert (
+        earthengine.threshold_and_vectorize(
+            delta, threshold=-0.25, scale=30, region={}, min_area_m2=4500
+        )
+        == []
+    )

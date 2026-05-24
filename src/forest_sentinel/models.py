@@ -178,6 +178,33 @@ class ChangeRasterSource(Base):
     index_raster_id: Mapped[int] = mapped_column(ForeignKey("index_raster.id"), primary_key=True)
 
 
+class DisturbanceCandidate(Base):
+    """A candidate disturbance polygon extracted from a change raster."""
+
+    __tablename__ = "disturbance_candidate"
+    __table_args__ = (Index("ix_disturbance_candidate_change_raster_id", "change_raster_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    change_raster_id: Mapped[int] = mapped_column(
+        ForeignKey("change_raster.id", ondelete="CASCADE"), nullable=False
+    )
+    methodology_version_id: Mapped[int] = mapped_column(
+        ForeignKey("methodology_version.id", name="fk_disturbance_candidate_methodology"),
+        nullable=False,
+    )
+    geometry: Mapped[WKBElement] = mapped_column(
+        Geometry(geometry_type="POLYGON", srid=AOI_SRID),
+        nullable=False,
+    )
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    area_m2: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class QualityMask(Base):
     """Per-observation QA coverage from Fmask masking.
 

@@ -309,6 +309,24 @@ the `methodology_version.parameters` and on the `change_raster` row.
 observation's index plus each baseline observation's index — so a change product's provenance is
 explicit. Re-runs replace the source set.
 
+### 5.7 Disturbance candidates
+
+**`forest_sentinel.candidates`** (bead #41) turns the ΔNBR change signal into reviewable
+geometry — the visible output of Slice 1. In Earth Engine it thresholds the delta (disturbance =
+an NBR drop beyond a threshold, `delta < threshold`), polygonizes the mask with
+`reduceToVectors`, tags each polygon with its area (`Feature.area`), and filters to a minimum
+area. The features come back as WGS 84 GeoJSON and are persisted as `disturbance_candidate` rows.
+
+**Defaults** (overridable via methodology `parameters` or explicit kwargs, and captured in the
+`methodology_version`): `delta_nbr_threshold = -0.25`, `min_area_m2 = 4500` (≈ 0.45 ha). The
+minimum area is enforced both server-side (the EE `Filter`) and client-side as a guard. The
+`reduceToVectors` scale is a documented cost lever.
+
+**`disturbance_candidate`** (migration `0007`): `id`, `change_raster_id` (FK, ON DELETE CASCADE),
+`methodology_version_id` (FK), `geometry` (PostGIS `POLYGON` SRID 4326), `detected_at` (the source
+observation's `acquired_at`), `area_m2`, `created_at`; indexed on `change_raster_id`. Re-runs
+delete and re-insert the candidate set for a change raster so rows reflect the latest parameters.
+
 ## 6. Cross-cutting properties
 
 - **AOI-first configurability.** Switching deployment to a new AOI is a configuration change, not a code change.
