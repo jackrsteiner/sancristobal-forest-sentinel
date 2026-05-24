@@ -209,3 +209,52 @@ def test_downgrade_removes_disturbance_candidate_table(
     command.downgrade(alembic_config, "base")
 
     assert "disturbance_candidate" not in inspect(clean_database).get_table_names()
+
+
+def test_migrations_create_event_tables(alembic_config: Config, clean_database: Engine) -> None:
+    command.upgrade(alembic_config, "head")
+
+    inspector = inspect(clean_database)
+    tables = set(inspector.get_table_names())
+    assert {"disturbance_event", "event_observation"} <= tables
+
+    event_columns = {column["name"] for column in inspector.get_columns("disturbance_event")}
+    assert {
+        "id",
+        "aoi_id",
+        "methodology_version_id",
+        "geometry",
+        "status",
+        "first_detected_at",
+        "last_detected_at",
+    } <= event_columns
+
+    obs_columns = {column["name"] for column in inspector.get_columns("event_observation")}
+    assert {
+        "id",
+        "event_id",
+        "disturbance_candidate_id",
+        "observed_at",
+        "area_m2",
+        "growth_m2",
+    } <= (obs_columns)
+
+    # The event geometry is registered with PostGIS as a MULTIPOLYGON in EPSG:4326.
+    with clean_database.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT type, srid FROM geometry_columns "
+                "WHERE f_table_name = 'disturbance_event' AND f_geometry_column = 'geometry'"
+            )
+        ).one()
+    assert row[0] == "MULTIPOLYGON"
+    assert row[1] == 4326
+
+
+def test_downgrade_removes_event_tables(alembic_config: Config, clean_database: Engine) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "base")
+
+    tables = set(inspect(clean_database).get_table_names())
+    assert "disturbance_event" not in tables
+    assert "event_observation" not in tables

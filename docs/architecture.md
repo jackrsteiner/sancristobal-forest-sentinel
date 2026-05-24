@@ -350,6 +350,20 @@ is pure orchestration over injectable building blocks, so the hallway test
 Earth Engine + storage and asserts a candidate polygon lands in PostGIS and dumps to valid
 WGS 84 GeoJSON — the mock-backed stand-in for a live run.
 
+### 5.9 Disturbance events (Slice 2)
+
+**`disturbance_event`** (migration `0008`) tracks a disturbance over time as the cumulative
+footprint of overlapping candidates: `id`, `aoi_id` (FK), `methodology_version_id` (FK, provenance
+per E9), `geometry` (PostGIS `MULTIPOLYGON` SRID 4326 — the unioned footprint), `status`
+(`new`/`ongoing`; `resolved`/`uncertain` arrive with scheduling and confidence in later slices),
+`first_detected_at`, `last_detected_at`, `created_at`.
+
+**`event_observation`** (migration `0008`) is one per-date measurement of an event, produced by a
+single candidate: `id`, `event_id` (FK, ON DELETE CASCADE), `disturbance_candidate_id` (FK),
+`observed_at`, `area_m2`, `growth_m2` (area added vs the prior measurement; null for the first),
+`created_at`. `UNIQUE (disturbance_candidate_id)` means each candidate contributes to exactly one
+measurement, which makes event tracking idempotent and incremental.
+
 ## 6. Cross-cutting properties
 
 - **AOI-first configurability.** Switching deployment to a new AOI is a configuration change, not a code change.

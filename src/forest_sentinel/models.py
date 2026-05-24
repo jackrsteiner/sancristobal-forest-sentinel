@@ -225,3 +225,59 @@ class QualityMask(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class DisturbanceEvent(Base):
+    """A disturbance tracked over time: the cumulative footprint of overlapping
+    candidates across dates, with first/last detection and a lifecycle status.
+    """
+
+    __tablename__ = "disturbance_event"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    aoi_id: Mapped[int] = mapped_column(ForeignKey("aoi.id"), nullable=False)
+    methodology_version_id: Mapped[int] = mapped_column(
+        ForeignKey("methodology_version.id", name="fk_disturbance_event_methodology"),
+        nullable=False,
+    )
+    geometry: Mapped[WKBElement] = mapped_column(
+        Geometry(geometry_type="MULTIPOLYGON", srid=AOI_SRID),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    first_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class EventObservation(Base):
+    """One per-date measurement of an event, produced by a single candidate."""
+
+    __tablename__ = "event_observation"
+    __table_args__ = (
+        # A candidate contributes to exactly one event measurement; makes tracking idempotent.
+        UniqueConstraint(
+            "disturbance_candidate_id", name="uq_event_observation_disturbance_candidate_id"
+        ),
+        Index("ix_event_observation_event_id", "event_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("disturbance_event.id", ondelete="CASCADE"), nullable=False
+    )
+    disturbance_candidate_id: Mapped[int] = mapped_column(
+        ForeignKey("disturbance_candidate.id"), nullable=False
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    area_m2: Mapped[float] = mapped_column(Float, nullable=False)
+    growth_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
