@@ -1,9 +1,8 @@
 """SQLAlchemy domain models.
 
 Each derived artifact in the system is traceable to its sources; the schema is
-introduced incrementally, one bead at a time. This module currently defines the
-``aoi`` table — the configured area of interest the rest of the pipeline runs
-against.
+introduced incrementally, one bead at a time. See ``docs/architecture.md`` §5.1 for the
+per-table reference.
 """
 
 from datetime import datetime
@@ -16,6 +15,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     MetaData,
     String,
     UniqueConstraint,
@@ -136,6 +136,46 @@ class IndexRaster(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class ChangeRaster(Base):
+    """A ΔNBR/ΔNDVI change product: current index minus the trailing-median baseline."""
+
+    __tablename__ = "change_raster"
+    __table_args__ = (
+        UniqueConstraint(
+            "observation_id",
+            "change_type",
+            "methodology_version_id",
+            name="uq_change_raster_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    observation_id: Mapped[int] = mapped_column(ForeignKey("observation.id"), nullable=False)
+    methodology_version_id: Mapped[int] = mapped_column(
+        ForeignKey("methodology_version.id"), nullable=False
+    )
+    change_type: Mapped[str] = mapped_column(String, nullable=False)
+    cog_path: Mapped[str] = mapped_column(String, nullable=False)
+    baseline_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    valid_pixel_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class ChangeRasterSource(Base):
+    """Links a change raster to a contributing ``index_raster`` (current or baseline)."""
+
+    __tablename__ = "change_raster_source"
+
+    change_raster_id: Mapped[int] = mapped_column(
+        ForeignKey("change_raster.id", ondelete="CASCADE"), primary_key=True
+    )
+    index_raster_id: Mapped[int] = mapped_column(ForeignKey("index_raster.id"), primary_key=True)
 
 
 class QualityMask(Base):

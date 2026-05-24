@@ -133,3 +133,13 @@ def image_by_id(image_id: str) -> Any:
 def normalized_difference(image: Any, bands: list[str]) -> Any:
     """``(bands[0] - bands[1]) / (bands[0] + bands[1])`` as an EE image."""
     return image.normalizedDifference(bands)
+
+
+def median_of(images: list[Any]) -> Any:
+    """Per-pixel median across ``images`` (the trailing-baseline reduction)."""
+    return ee.ImageCollection(images).median()
+
+
+def subtract(image: Any, other: Any) -> Any:
+    """``image - other`` as an EE image (the change product)."""
+    return image.subtract(other)

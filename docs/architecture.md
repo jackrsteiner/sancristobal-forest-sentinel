@@ -287,6 +287,28 @@ real run.)*
 per observation on the masked image and recorded both on the `quality_mask` row and on each
 `index_raster`.
 
+### 5.6 Change products (ΔNBR, ΔNDVI)
+
+**`forest_sentinel.change`** (bead #40) turns per-observation indices into a disturbance signal.
+The baseline is the per-pixel **median** of the index over a trailing window of prior
+observations (`ImageCollection.median()`); the change product is `current − baseline`
+(`subtract`). The delta is exported as a COG and recorded as a `change_raster`. An observation
+with no prior observations has no baseline and is skipped.
+
+The trailing-window size is configurable (`baseline_window`, **default 5**) and is captured in
+the `methodology_version.parameters` and on the `change_raster` row.
+
+**`change_raster`** (migration `0006`): `id`, `observation_id` (FK, the current observation),
+`methodology_version_id` (FK), `change_type` (`delta_nbr`/`delta_ndvi`), `cog_path`,
+`baseline_window`, `valid_pixel_fraction` (carried from the current observation's index),
+`created_at`. `UNIQUE (observation_id, change_type, methodology_version_id)`
+(`uq_change_raster_identity`) → re-runs upsert.
+
+**`change_raster_source`** (migration `0006`): composite PK `(change_raster_id, index_raster_id)`,
+`ON DELETE CASCADE` from `change_raster`. Records every contributing `index_raster` — the current
+observation's index plus each baseline observation's index — so a change product's provenance is
+explicit. Re-runs replace the source set.
+
 ## 6. Cross-cutting properties
 
 - **AOI-first configurability.** Switching deployment to a new AOI is a configuration change, not a code change.
