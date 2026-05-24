@@ -142,3 +142,13 @@ def test_unknown_aoi_events_is_404(client: TestClient) -> None:
 
 def test_unknown_event_detail_is_404(client: TestClient) -> None:
     assert client.get("/api/events/999999").status_code == 404
+
+
+def test_index_serves_the_map_page(client: TestClient) -> None:
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Open Forest Sentinel" in response.text
+    # The page wires up the API endpoints it consumes.
+    assert "/api/aois" in response.text
+    assert "leaflet" in response.text.lower()

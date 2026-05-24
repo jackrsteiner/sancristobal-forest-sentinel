@@ -11,9 +11,11 @@ with a transactional test session; no Earth Engine or storage access happens her
 
 from collections.abc import Iterator
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
 from sqlalchemy import Engine, func, select
@@ -42,9 +44,16 @@ def get_session() -> Iterator[Session]:
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
+_INDEX_HTML = Path(__file__).parent / "static" / "index.html"
+
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Open Forest Sentinel", description="Forest disturbance dashboard.")
+
+    @app.get("/", response_class=HTMLResponse)
+    def index() -> str:
+        """The Leaflet map page that consumes the JSON/GeoJSON API."""
+        return _INDEX_HTML.read_text()
 
     @app.get("/api/aois")
     def list_aois(session: SessionDep) -> list[dict[str, Any]]:

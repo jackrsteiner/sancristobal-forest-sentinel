@@ -265,7 +265,17 @@ Earth Engine access requires a GCP service account with Earth Engine enabled and
 | `FOREST_SENTINEL_COG_ROOT` | local canonical COG directory (default `data/cogs/`) |
 | `GOOGLE_APPLICATION_CREDENTIALS` | service-account key (or run `earthengine authenticate`) |
 
-Later slices add event tracking and the dashboard (see `docs/work-plan.md`).
+The run also tracks candidates into disturbance events (overlapping candidates across dates become one event with a growing footprint and a per-date timeline).
+
+**View the dashboard:**
+
+```sh
+uv run uvicorn forest_sentinel.dashboard.app:app --port 8000
+```
+
+Open <http://localhost:8000> for a Leaflet map of disturbance events per AOI, with per-event timelines (size and expansion), status, and supporting evidence. The dashboard is read-only and unauthenticated in this slice; it also exposes a JSON/GeoJSON API under `/api`.
+
+Later slices add scheduled execution, manual review, confidence scoring, and radar (see `docs/work-plan.md`).
 
 ## Development
 

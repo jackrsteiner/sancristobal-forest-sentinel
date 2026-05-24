@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Open Forest Sentinel</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: system-ui, sans-serif; display: flex; height: 100vh; }
+      #sidebar { width: 360px; padding: 16px; overflow-y: auto; border-right: 1px solid #ddd; }
+      #map { flex: 1; }
+      h1 { font-size: 18px; margin: 0 0 12px; }
+      select, button { font: inherit; padding: 6px; }
+      .event { border: 1px solid #ddd; border-radius: 6px; padding: 8px; margin: 8px 0; cursor: pointer; }
+      .event.selected { border-color: #c0392b; }
+      .status-new { color: #2980b9; }
+      .status-ongoing { color: #c0392b; }
+      .timeline { font-size: 13px; margin: 6px 0; }
+      .evidence { font-size: 12px; color: #555; }
+      .muted { color: #888; }
+    </style>
+  </head>
+  <body>
+    <div id="sidebar">
+      <h1>Open Forest Sentinel</h1>
+      <label>AOI: <select id="aoi-select"></select></label>
+      <div id="summary" class="muted"></div>
+      <div id="events"></div>
+    </div>
+    <div id="map"></div>
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script>
+      const map = L.map("map").setView([0, 0], 2);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OpenStreetMap contributors",
+        maxZoom: 19,
+      }).addTo(map);
+
+      let eventsLayer = null;
+      const layersById = {};
+
+      async function loadAois() {
+        const aois = await (await fetch("/api/aois")).json();
+        const select = document.getElementById("aoi-select");
+        select.innerHTML = "";
+        aois.forEach((aoi) => {
+          const option = document.createElement("option");
+          option.value = aoi.id;
+          option.textContent = `${aoi.name} (${aoi.event_count} events)`;
+          select.appendChild(option);
+        });
+        if (aois.length) loadEvents(aois[0].id);
+      }
+
+      async function loadEvents(aoiId) {
+        const collection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
+        if (eventsLayer) map.removeLayer(eventsLayer);
+        eventsLayer = L.geoJSON(collection, {
+          style: (f) => ({
+            color: f.properties.status === "ongoing" ? "#c0392b" : "#2980b9",
+            weight: 2,
+          }),
+          onEachFeature: (feature, layer) => {
+            layersById[feature.properties.id] = layer;
+            layer.on("click", () => showEvent(feature.properties.id));
+          },
+        }).addTo(map);
+
+        const features = collection.features;
+        document.getElementById("summary").textContent = `${features.length} disturbance events`;
+        renderEventList(features);
+        if (features.length) map.fitBounds(eventsLayer.getBounds(), { maxZoom: 12 });
+      }
+
+      function renderEventList(features) {
+        const container = document.getElementById("events");
+        container.innerHTML = "";
+        features.forEach((f) => {
+          const p = f.properties;
+          const div = document.createElement("div");
+          div.className = "event";
+          div.id = `event-${p.id}`;
+          div.innerHTML =
+            `<strong>Event #${p.id}</strong> ` +
+            `<span class="status-${p.status}">${p.status}</span>` +
+            `<div class="muted">first detected ${fmtDate(p.first_detected_at)} · ` +
+            `latest area ${fmtArea(p.latest_area_m2)} · ${p.observation_count} obs</div>`;
+          div.onclick = () => showEvent(p.id);
+          container.appendChild(div);
+        });
+      }
+
+      async function showEvent(eventId) {
+        document
+          .querySelectorAll(".event")
+          .forEach((el) => el.classList.remove("selected"));
+        const card = document.getElementById(`event-${eventId}`);
+        if (card) card.classList.add("selected");
+        if (layersById[eventId]) map.fitBounds(layersById[eventId].getBounds(), { maxZoom: 14 });
+
+        const detail = await (await fetch(`/api/events/${eventId}`)).json();
+        const rows = detail.timeline
+          .map(
+            (m) =>
+              `<div class="timeline">${fmtDate(m.observed_at)}: ${fmtArea(m.area_m2)}` +
+              (m.growth_m2 != null ? ` (Δ ${fmtArea(m.growth_m2)})` : "") +
+              `</div>`,
+          )
+          .join("");
+        const evidence = detail.evidence
+          .map((e) => `<div class="evidence">${e.change_type}: ${e.cog_path}</div>`)
+          .join("");
+        const card2 = document.getElementById(`event-${eventId}`);
+        if (card2) {
+          card2.querySelectorAll(".detail").forEach((el) => el.remove());
+          const detailDiv = document.createElement("div");
+          detailDiv.className = "detail";
+          detailDiv.innerHTML =
+            `<div class="timeline"><em>Timeline (expansion):</em></div>${rows}` +
+            `<div class="timeline"><em>Evidence:</em></div>${evidence}`;
+          card2.appendChild(detailDiv);
+        }
+      }
+
+      function fmtDate(iso) {
+        return iso ? iso.slice(0, 10) : "—";
+      }
+      function fmtArea(m2) {
+        return m2 == null ? "—" : `${(m2 / 10000).toFixed(2)} ha`;
+      }
+
+      document.getElementById("aoi-select").addEventListener("change", (e) =>
+        loadEvents(e.target.value),
+      );
+      loadAois();
+    </script>
+  </body>
+</html>

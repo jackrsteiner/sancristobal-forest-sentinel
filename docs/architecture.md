@@ -371,6 +371,25 @@ otherwise it starts a new event. The pipeline (`run_pipeline`) calls tracking as
 so a single `forest-sentinel run` goes discover → indices → change → candidates → **events**, and
 the per-stage summary reports events created and event-observations tracked.
 
+### 5.10 Dashboard (Slice 2, E10)
+
+**`forest_sentinel.dashboard`** is a FastAPI app (`uv run uvicorn forest_sentinel.dashboard.app:app`)
+serving a read-only, unauthenticated view over PostGIS — the resolved Slice 2 decisions are
+**FastAPI + Leaflet**, **no auth**. Endpoints:
+
+- `GET /` — a static Leaflet map page (`static/index.html`) that consumes the API.
+- `GET /api/aois` — AOIs with event counts.
+- `GET /api/aois/{id}/events` — the AOI's events as a GeoJSON `FeatureCollection` (status, first/
+  last detected, latest area, observation count).
+- `GET /api/events/{id}` — event detail: footprint geometry, the measurement **timeline** (area +
+  growth), and **supporting evidence** (the source ΔNBR change rasters).
+
+Together these answer the six README "Product Deliverable" questions — where (geometry), when first
+detected, size, expansion rate (timeline growth), status, and supporting evidence. The database
+session is an injectable dependency (`get_session`), so endpoints are tested headlessly with
+FastAPI's `TestClient` against a transactional session; no Earth Engine or storage access occurs
+in the dashboard.
+
 ## 6. Cross-cutting properties
 
 - **AOI-first configurability.** Switching deployment to a new AOI is a configuration change, not a code change.
