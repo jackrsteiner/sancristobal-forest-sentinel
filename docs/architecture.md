@@ -93,25 +93,23 @@ Schema changes are versioned with **Alembic**; each migration is reviewed and sh
 
 ### 4a. Imagery access & compute decision: Google Earth Engine
 
-**Decision.** Slice 1 accesses HLS and computes index, change, and candidate products **server-side in Google Earth Engine (EE)**, exporting Cloud Optimized GeoTIFFs to Google Cloud Storage. This **supersedes** the earlier resolved decision to access HLS by downloading scenes through NASA's `earthaccess` client and computing indices locally with rasterio/numpy.
+**Decision.** Slice 1 accesses HLS and computes index, change, and candidate products **server-side in Google Earth Engine (EE)**, exporting Cloud Optimized GeoTIFFs to a transient Cloud Storage staging area that the VM copies to local disk (see [§4b](#4b-cost-model-the-0-path)).
 
 **Rationale.**
 
-- **Server-side compute keeps the VM tiny.** NBR / NDVI, the trailing-median baseline, ΔNBR / ΔNDVI, and threshold-plus-polygonize all map to EE primitives (`normalizedDifference`, `ImageCollection.median()`, `gt()` + `reduceToVectors`), removing local raster loops. Because EE does the heavy compute (free under the noncommercial tier), the VM only orchestrates and hosts a small Postgres — which fits the **always-free `e2-micro`** instance. See [§4b](#4b-cost-model-the-0-path).
+- **Server-side compute keeps the VM tiny.** NBR / NDVI, the trailing-median baseline, ΔNBR / ΔNDVI, and threshold-plus-polygonize all map to EE primitives (`normalizedDifference`, `ImageCollection.median()`, `gt()` + `reduceToVectors`). EE does the heavy raster work (free under the noncommercial tier), so the VM only orchestrates and hosts a small Postgres — which fits the **always-free `e2-micro`** instance.
 - **No raw-scene egress.** Inputs stay inside Google's network; only the finished COGs leave EE, into a transient GCS staging area.
-- **EE produces the COGs.** No local rio-cogeo write path is needed; the VM only copies finished COGs to its free local disk (the canonical store), keeping bulk storage at $0.
-- **Cloud / shadow / haze masking is built in.** The `Fmask` QA band ships with both HLS collections, so QA masking (E14) can be satisfied inside Slice 1.
+- **EE produces the COGs.** The VM does not write rasters itself; it copies the finished COGs to its free local disk (the canonical store), keeping bulk storage at $0.
+- **Cloud / shadow / haze masking is built in.** The `Fmask` QA band ships with both HLS collections, so QA masking (E14) is satisfied inside Slice 1.
 - **Cheaper future slices.** Sentinel-1 GRD (E16), Hansen Global Forest Change, GEDI, ESA WorldCover, and other context layers (E17) already exist in the EE catalog.
 
 **Costs and risks accepted.**
 
 - **Asynchronous execution.** Exports are batch tasks (submit → poll → ingest), so the pipeline is a state machine rather than a synchronous function. The CLI entrypoint and the GitHub Actions cron must handle the task lifecycle.
-- **EECU quota is the cost dimension.** Cost discipline shifts from "minimize bytes downloaded" to "minimize EECU-hours per run." The project runs under the EE **noncommercial tiers**; the working assumption is the **Contributor** tier, confirmed by the EECU benchmark in the verification plan. Commercial use would later require a paid license.
-- **Observation currency depends on EE's HLS ingestion lag**, which can run behind NASA LP DAAC. The README's "less than one week old" target is validated against a live EE-vs-LP-DAAC lag measurement before the near-real-time target is locked (verification plan, V1).
+- **EECU-hours are the compute cost dimension.** The project runs under the EE **noncommercial tiers**; the working assumption is the **Contributor** tier, to be confirmed once real per-run usage is measured. Commercial use would later require a paid license.
+- **Observation currency depends on EE's HLS ingestion lag**, which can run behind NASA LP DAAC. If the lag is large for the AOI, the README's "less than one week old" target may not hold; confirm against real data during implementation and adjust the target if needed.
 - **Reproducibility.** Because the compute substrate is Google's, `methodology_version` records must capture the EE script version / asset IDs so a run can be reproduced.
 - **Auth surface.** Requires a GCP service account with Earth Engine access, an EE-registered Cloud project, and a GCS bucket.
-
-This decision is validated by the Option C verification plan (EE-vs-LP-DAAC ingestion lag, per-run EECU benchmark, and a GCE VM service-account smoke test) before Slice 1 implementation begins.
 
 ### 4b. Cost model: the $0 path
 
@@ -120,7 +118,7 @@ The prototype targets **$0/month** for a reasonably small AOI by staying inside 
 | Component | $0 mechanism | Watch-out |
 |-----------|--------------|-----------|
 | Scheduler | GitHub Actions cron (free minutes; unlimited for public repos) | Heavy/long jobs can exhaust private-repo minutes |
-| Raster compute | Earth Engine **noncommercial** tier (free EECU-hours) | Must stay noncommercial; tier quota (working assumption: Contributor) is confirmed by verification V2 |
+| Raster compute | Earth Engine **noncommercial** tier (free EECU-hours) | Must stay noncommercial; tier quota (working assumption: Contributor) confirmed once real usage is measured |
 | Orchestrator + database | Always-free **`e2-micro`** VM (2 shared vCPU, 1 GB RAM), 24/7, in `us-west1` / `us-central1` / `us-east1` | 1 GB RAM is tight — keep the AOI small and tune Postgres |
 | Raster storage | COGs on the VM's **30 GB free disk** (shared with Postgres) | Disk is finite — needs a retention policy; serving COGs later comes from the VM, not a CDN |
 | Export staging | GCS used only as a **transient** EE-export hop, cleared after each copy-to-disk | Keep staging well under the 5 GB-month GCS free tier by deleting promptly |
