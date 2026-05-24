@@ -14,3 +14,6 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Locally exported COGs (canonical store on the VM disk; not source)
+data/cogs/

@@ -192,6 +192,32 @@ identical inputs (order-insensitive parameter comparison), inserts when absent, 
 `MethodologyVersionMismatch` if a `(name, version)` already stores different parameters — the
 same identity must never silently map to divergent parameters; bump the version instead.
 
+### 5.2 Earth Engine seam and raster storage
+
+**`forest_sentinel.earthengine`** (the EE seam) is the *single* module that touches `ee.*`.
+Every Earth Engine operation — `initialize`, submitting an `Export.image.toCloudStorage`
+task, reading task state — is a small function here that takes/returns plain Python or opaque
+handles. Pipeline modules call these helpers and stay free of EE objects, so tests stub this
+module rather than standing up a live EE session. Auth: a GCP service account with Earth Engine
+access and an EE-registered Cloud project; the project is read from
+`FOREST_SENTINEL_GEE_PROJECT` and credentials come from the ambient environment.
+
+**`forest_sentinel.storage`** (bead #36) owns the GCS-staging → local-disk bridge. Earth Engine
+can only export to Google Cloud Storage, but bulk storage must stay on the VM's always-free disk
+(§4b). `Storage.export_image(image, key)`:
+
+1. submits the EE export to the staging bucket at the key's relative prefix,
+2. polls the task to `COMPLETED` (raising `StorageError` on a terminal failure),
+3. copies the finished COG from GCS to the deterministic local path, and
+4. **deletes the staging object**.
+
+Deterministic layout: `{root}/{aoi}/{product}/{YYYY-MM-DD}/{file}.tif`, with each free-form
+component sanitized. Config via env: `FOREST_SENTINEL_COG_ROOT` (default `data/cogs/`),
+`FOREST_SENTINEL_GCS_STAGING_BUCKET`. `LocalDiskStorage` is the only backend today; switching the
+canonical store to GCS later is a swap behind the `Storage` protocol — pipeline code never
+touches GCS or EE directly, only `export_image`. The EE client and the GCS bucket are injected,
+so tests exercise the full lifecycle (submit → poll → copy → clear) with no live calls.
+
 ## 6. Cross-cutting properties
 
 - **AOI-first configurability.** Switching deployment to a new AOI is a configuration change, not a code change.
