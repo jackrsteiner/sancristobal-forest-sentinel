@@ -23,6 +23,8 @@ Every epic and every bead must respect:
 
 The epics below mirror the pipeline and stack described in the README. Each one becomes a tracking issue with sub-issue beads. E1–E13 cover the optical pipeline and its infrastructure; E14–E17 cover the QA masking, confidence model, radar augmentation, and contextual-evidence features the README describes but an earlier revision of this plan omitted.
 
+> **Imagery access & compute substrate: Google Earth Engine.** HLS access, index/change computation, and candidate polygonization run **server-side in Google Earth Engine (EE)**, which exports Cloud Optimized GeoTIFFs to Google Cloud Storage; the GCE VM orchestrates EE and ingests results. This supersedes the earlier `earthaccess` + local-rasterio approach. See [`docs/architecture.md` §4a](architecture.md#4a-imagery-access--compute-decision-google-earth-engine) for the full decision, costs, and risks. The epic *acceptance criteria* below are unchanged (they describe capabilities, not mechanics); the *how* is recorded per bead.
+
 ### E1 — Project foundations
 Set up the repository so beads can be implemented, tested, and shipped.
 
@@ -42,10 +44,10 @@ Make AOI deployability a first-class, code-free configuration surface.
 **Acceptance:** the pipeline can be pointed at an arbitrary AOI without code changes.
 
 ### E3 — HLS imagery access
-Access relevant HLS analysis-ready imagery for a configured AOI (README step 4).
+Access relevant HLS analysis-ready imagery for a configured AOI (README step 4), **through Google Earth Engine** (`ee.ImageCollection` over `HLSL30` / `HLSS30` v2.0).
 
-- Discover HLS scenes intersecting the AOI for a time window.
-- Record `observation`s with sensor, timestamp, cloud / quality metadata, and source scene identifiers.
+- Discover HLS scenes intersecting the AOI for a time window via Earth Engine `filterBounds` / `filterDate`.
+- Record `observation`s with sensor, timestamp, cloud / quality metadata, and source scene identifiers (derived from EE image properties).
 - Handle availability / cloud-cover gaps without breaking the pipeline.
 
 **Acceptance:** for any configured AOI, the pipeline can enumerate and ingest the relevant HLS observations.
@@ -117,9 +119,9 @@ Run the end-to-end pipeline on a cron schedule on a Google Compute Engine VM, tr
 **Acceptance:** scheduled runs refresh the dashboard without manual intervention.
 
 ### E12 — Raster storage layout
-Store COGs in the prototype location (`/data/cogs/` on the VM) with a layout that allows a future move to Google Cloud Storage without code changes outside a storage abstraction.
+Store COGs in **Google Cloud Storage** with a deterministic layout, behind a storage abstraction. Earth Engine exports COGs directly to GCS (`Export.image.toCloudStorage`), so GCS is the prototype store; the abstraction also owns the EE export-task lifecycle (submit, poll, locate output) and provides COG references to the metadata catalog.
 
-**Acceptance:** the pipeline writes COGs to the prototype location, and the storage interface is the only place that needs to change to switch to GCS.
+**Acceptance:** the pipeline writes COGs to GCS through the storage abstraction with a deterministic key layout, and exposes export-task status so the orchestrator can wait for completion before ingest.
 
 ### E13 — Database (PostgreSQL + PostGIS)
 Stand up PostgreSQL + PostGIS on the GCE VM and persist the domain objects from the README.
@@ -209,16 +211,18 @@ Every epic appears in at least one slice. E1, E2, E11, E12, and E13 are touched 
 
 Slice 1 is decomposed into eight beads filed under the **Slice 1** milestone (issues #35–#42), each linked as a sub-issue of its epic:
 
-- **#35** — Methodology versioning: `methodology_version` table, model, helper (E9).
-- **#36** — Raster storage abstraction + COG writer, `storage.py` (E12).
+- **#35** — Methodology versioning: `methodology_version` table, model, helper; the stored value captures the EE script version / asset IDs for reproducibility (E9).
+- **#36** — Storage abstraction over GCS + Earth Engine export-task lifecycle, `storage.py` (E12).
 - **#37** — `observation` table + model (E13).
-- **#38** — HLS scene discovery → `observation` records, via `earthaccess` (E3). Depends on #37.
-- **#39** — `index_raster` table + NBR/NDVI computation → COGs (E4). Depends on #35, #36, #38.
-- **#40** — `change_raster` table + trailing-median baseline + ΔNBR/ΔNDVI (E5). Depends on #39.
-- **#41** — `disturbance_candidate` table + threshold/polygonize extraction (E6). Depends on #40.
-- **#42** — Wire the Slice 1 pipeline into `forest-sentinel run` end-to-end (E3–E6). Depends on #38–#41.
+- **#38** — HLS scene discovery → `observation` records, via **Earth Engine** (`ee.ImageCollection('NASA/HLS/HLSL30/v002' | 'HLSS30/v002').filterBounds(aoi).filterDate(...)`) (E3). Depends on #37.
+- **#39** — `index_raster` table + NBR/NDVI as EE band expressions → COGs exported to GCS (E4). Depends on #35, #36, #38.
+- **#40** — `change_raster` table + trailing-median baseline (`ImageCollection.median()`) + ΔNBR/ΔNDVI in EE (E5). Depends on #39.
+- **#41** — `disturbance_candidate` table + threshold (`gt`/`lt`) + `reduceToVectors` polygonize + configurable area filter (E6). Depends on #40.
+- **#42** — Wire the Slice 1 pipeline into `forest-sentinel run` end-to-end with the **async EE export lifecycle** (submit → poll → ingest) (E3–E6). Depends on #38–#41.
 
-Architectural decisions baked into these beads: HLS access via `earthaccess` (`HLSL30` / `HLSS30`); change product = ΔNBR/ΔNDVI against a per-pixel trailing-median baseline; candidate extraction = threshold + polygonize + configurable area filter; COGs written through a `storage.py` abstraction. Each bead records its decision in `docs/architecture.md`.
+Architectural decisions baked into these beads (see [`docs/architecture.md` §4a](architecture.md#4a-imagery-access--compute-decision-google-earth-engine)): HLS access **and compute run server-side in Google Earth Engine** over `HLSL30` / `HLSS30` v2.0; change product = ΔNBR/ΔNDVI against a per-pixel trailing-median baseline; candidate extraction = threshold + polygonize + configurable area filter; COGs are exported by EE to GCS through a `storage.py` abstraction that also owns the export-task lifecycle. Each bead records its decision in `docs/architecture.md`.
+
+> **Optional Slice 1 addition.** Because the `Fmask` QA band ships with both HLS collections, QA masking (E14) is nearly free in EE and may be pulled into Slice 1 as an additional bead, rather than waiting for Slice 4. Decide during the Slice 1 re-plan.
 
 ### Slice 2 — bead outline
 
@@ -256,6 +260,6 @@ These are points the README does not resolve. They should be answered inside the
 **Resolved:**
 
 - Migration tooling for PostgreSQL + PostGIS — SQLAlchemy 2.0 + GeoAlchemy2 + Alembic (bead #22; see `docs/architecture.md`).
-- HLS imagery access — `earthaccess` against HLS v2.0 `HLSL30` / `HLSS30` (Slice 1 plan; recorded by bead #38).
+- Imagery access & raster compute — **Google Earth Engine** (server-side), accessing HLS v2.0 `HLSL30` / `HLSS30` and computing indices, change products, and candidates server-side, exporting COGs to GCS. **Supersedes the earlier `earthaccess` + local-rasterio decision.** (See `docs/architecture.md` §4a; recorded by beads #38–#41. Validated by the Option C verification plan before implementation begins.)
 - Change products & detection — ΔNBR/ΔNDVI against a per-pixel trailing-median baseline; candidates by threshold + polygonize + configurable area filter (Slice 1 plan; recorded by beads #40, #41).
-- Raster storage layout — COGs written through a `storage.py` abstraction under a configurable root (Slice 1 plan; recorded by bead #36).
+- Raster storage layout — COGs exported by Earth Engine to Google Cloud Storage through a `storage.py` abstraction that also owns the EE export-task lifecycle (Slice 1 plan; recorded by bead #36).

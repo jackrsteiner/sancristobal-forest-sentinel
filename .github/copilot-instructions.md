@@ -22,12 +22,13 @@ Every change must respect these properties from the README:
 Match the prototype stack described in the README. Do not swap components without an explicit decision.
 
 - **Language:** Python.
-- **Raster processing:** rasterio, GDAL, numpy, rio-cogeo.
-- **Imagery source:** NASA HLS.
-- **Raster output format:** Cloud Optimized GeoTIFF.
-- **Prototype raster storage:** local VM filesystem (e.g. `/data/cogs/`). The future path is Google Cloud Storage; isolate storage access behind an interface so the swap is local.
+- **Imagery access & raster compute:** Google Earth Engine (`earthengine-api`). HLS access, indices, change products, and candidate polygonization run server-side in EE, which exports COGs to GCS. See `docs/architecture.md` §4a.
+- **Local raster handling:** rasterio, GDAL, rio-cogeo (ingest / validate EE-exported COGs); numpy.
+- **Imagery source:** NASA HLS (`HLSL30` / `HLSS30`), accessed via Google Earth Engine.
+- **Raster output format:** Cloud Optimized GeoTIFF (written by EE export).
+- **Raster storage:** Google Cloud Storage (Earth Engine export target); isolate storage access and the export-task lifecycle behind an interface.
 - **Database:** PostgreSQL + PostGIS on the same Compute Engine VM (prototype). The future path is Cloud SQL for PostgreSQL with PostGIS.
-- **Compute:** Google Compute Engine VM.
+- **Compute:** Google Compute Engine VM (orchestrates Earth Engine and ingests results).
 - **Scheduler:** GitHub Actions cron.
 - **Dashboard:** lightweight web application backed by PostGIS.
 - **Versioning / CI:** GitHub.
@@ -65,7 +66,7 @@ When starting work as an agent:
 
 - New and changed code must be covered by tests.
 - Tests must pass locally and in CI before a bead is closed.
-- Use small, deterministic raster fixtures for index, change, and detection logic — do not depend on live HLS calls in unit tests.
+- Use small, deterministic raster fixtures for index, change, and detection logic — do not depend on live Earth Engine or HLS calls in unit tests; mock the Earth Engine client.
 - If you cannot test something, say so explicitly in the bead's test plan. "I'll add tests later" is not acceptable; track it as a `Blocks` bead.
 
 ## Open questions
