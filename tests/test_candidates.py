@@ -106,6 +106,16 @@ def test_resolve_min_area_precedence() -> None:
     )
 
 
+def test_resolvers_treat_stored_null_as_absent() -> None:
+    # A methodology recorded with explicit nulls (e.g. by an older CLI run) must fall
+    # back to the defaults instead of crashing on float(None).
+    m = MethodologyVersion(
+        name="m", version="1", parameters={"delta_nbr_threshold": None, "min_area_m2": None}
+    )
+    assert resolve_threshold(m, None) == DEFAULT_DELTA_NBR_THRESHOLD
+    assert resolve_min_area(m, None) == DEFAULT_MIN_AREA_M2
+
+
 def test_extracts_candidates_with_provenance(db_session: Session) -> None:
     change, methodology, obs = _setup(db_session)
     fake = FakeEarthEngine([_poly_feature(0.1, 10_000), _poly_feature(0.3, 20_000)])

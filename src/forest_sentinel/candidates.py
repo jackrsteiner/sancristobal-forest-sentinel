@@ -36,14 +36,17 @@ def resolve_threshold(methodology: MethodologyVersion, override: float | None) -
     """Threshold from the explicit override, else methodology parameters, else default."""
     if override is not None:
         return override
-    return float(methodology.parameters.get(_THRESHOLD_PARAM, DEFAULT_DELTA_NBR_THRESHOLD))
+    # A stored null must fall back to the default, not reach float().
+    value = methodology.parameters.get(_THRESHOLD_PARAM)
+    return float(value) if value is not None else DEFAULT_DELTA_NBR_THRESHOLD
 
 
 def resolve_min_area(methodology: MethodologyVersion, override: float | None) -> float:
     """Minimum area from the explicit override, else methodology parameters, else default."""
     if override is not None:
         return override
-    return float(methodology.parameters.get(_MIN_AREA_PARAM, DEFAULT_MIN_AREA_M2))
+    value = methodology.parameters.get(_MIN_AREA_PARAM)
+    return float(value) if value is not None else DEFAULT_MIN_AREA_M2
 
 
 def extract_candidates_for_change_raster(

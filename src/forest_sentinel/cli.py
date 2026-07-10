@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, pipeline, storage
 from forest_sentinel.aoi import AoiConfigError, get_or_create_aoi, load_aoi_config, persist_aoi
+from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.change import DEFAULT_BASELINE_WINDOW
 from forest_sentinel.db import get_engine
 from forest_sentinel.hls import HLS_COLLECTIONS
@@ -113,12 +114,16 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    # Record the *resolved* values so provenance reflects what the run actually used,
+    # even when the CLI flags are omitted.
+    threshold = args.threshold if args.threshold is not None else DEFAULT_DELTA_NBR_THRESHOLD
+    min_area = args.min_area if args.min_area is not None else DEFAULT_MIN_AREA_M2
     parameters = {
         "ee_script_version": EE_SCRIPT_VERSION,
         "collections": sorted(HLS_COLLECTIONS),
         "baseline_window": args.baseline_window,
-        "delta_nbr_threshold": args.threshold,
-        "min_area_m2": args.min_area,
+        "delta_nbr_threshold": threshold,
+        "min_area_m2": min_area,
     }
 
     engine = get_engine()
@@ -141,8 +146,8 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                 methodology=methodology,
                 storage=cog_storage,
                 baseline_window=args.baseline_window,
-                threshold=args.threshold,
-                min_area_m2=args.min_area,
+                threshold=threshold,
+                min_area_m2=min_area,
             )
             session.commit()
     except StorageError as exc:

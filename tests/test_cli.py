@@ -5,8 +5,9 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, pipeline, storage
+from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.cli import main
-from forest_sentinel.models import Aoi
+from forest_sentinel.models import Aoi, MethodologyVersion
 from forest_sentinel.pipeline import PipelineSummary
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
@@ -95,6 +96,34 @@ def test_pipeline_mode_runs_and_reports_summary(
     # The configured window was threaded through to the pipeline.
     assert str(captured["since"]) == "2026-01-01"
     assert str(captured["until"]) == "2026-02-01"
+
+
+def test_pipeline_mode_defaults_are_resolved_and_recorded(
+    migrated_database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Omitting --threshold/--min-area must use and record the documented defaults,
+    not store nulls that crash candidate extraction (audit BUG-1)."""
+    captured: dict[str, object] = {}
+
+    def fake_run_pipeline(session: object, **kwargs: object) -> PipelineSummary:
+        captured.update(kwargs)
+        return PipelineSummary(0, 0, 0, 0, 0, 0, 0, 0)
+
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+
+    args = ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    assert main(args) == 0
+
+    # The resolved defaults are threaded into the pipeline...
+    assert captured["threshold"] == DEFAULT_DELTA_NBR_THRESHOLD
+    assert captured["min_area_m2"] == DEFAULT_MIN_AREA_M2
+    # ...and recorded in the methodology provenance (no nulls).
+    with Session(migrated_database) as session:
+        methodology = session.execute(select(MethodologyVersion)).scalar_one()
+    assert methodology.parameters["delta_nbr_threshold"] == DEFAULT_DELTA_NBR_THRESHOLD
+    assert methodology.parameters["min_area_m2"] == DEFAULT_MIN_AREA_M2
 
 
 def test_pipeline_mode_reuses_existing_aoi(
