@@ -16,6 +16,7 @@ that intersects several events is attached to the earliest; merging multiple eve
 a deliberate non-goal of this slice.
 """
 
+import logging
 from dataclasses import dataclass
 
 from geoalchemy2.elements import WKBElement
@@ -34,6 +35,8 @@ from forest_sentinel.models import (
     EventObservation,
     Observation,
 )
+
+logger = logging.getLogger(__name__)
 
 EVENT_STATUS_NEW = "new"
 EVENT_STATUS_ONGOING = "ongoing"
@@ -166,5 +169,11 @@ def _as_multipolygon(geometry: BaseGeometry) -> MultiPolygon:
         return geometry
     if geometry.geom_type == "Polygon":
         return MultiPolygon([geometry])
-    parts = [part for part in getattr(geometry, "geoms", []) if part.geom_type == "Polygon"]
+    geoms = list(getattr(geometry, "geoms", []))
+    parts = [part for part in geoms if part.geom_type == "Polygon"]
+    dropped = [part.geom_type for part in geoms if part.geom_type != "Polygon"]
+    if dropped:
+        # A degenerate union (touching edges) can yield lines/points; dropping them
+        # changes the stored footprint, so say so instead of doing it silently.
+        logger.warning("event footprint union dropped non-polygon parts: %s", dropped)
     return MultiPolygon(parts)

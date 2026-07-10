@@ -9,16 +9,23 @@ disturbance events, all through Earth Engine, persisting results to PostGIS.
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, pipeline, storage
-from forest_sentinel.aoi import AoiConfigError, get_or_create_aoi, load_aoi_config, persist_aoi
+from forest_sentinel.aoi import (
+    AoiConfig,
+    AoiConfigError,
+    get_or_create_aoi,
+    load_aoi_config,
+    persist_aoi,
+)
 from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.change import DEFAULT_BASELINE_WINDOW
 from forest_sentinel.db import get_engine
@@ -82,30 +89,45 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_slice0(aoi_path: Path) -> int:
+def _load_aoi_or_report(aoi_path: Path) -> AoiConfig | None:
+    """Load the AOI config, printing the standard error message on failure."""
     try:
-        config = load_aoi_config(aoi_path)
+        return load_aoi_config(aoi_path)
     except AoiConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return None
 
+
+@contextmanager
+def _disposing_engine() -> Iterator[Engine]:
+    """An engine for one CLI invocation, disposed on the way out."""
     engine = get_engine()
     try:
-        with Session(engine) as session:
-            try:
-                aoi = persist_aoi(session, config)
-                session.commit()
-            except IntegrityError:
-                session.rollback()
-                print(f"error: an AOI named {config.name!r} already exists", file=sys.stderr)
-                return 1
-            aoi_id = aoi.id
-            total = session.execute(select(func.count()).select_from(Aoi)).scalar_one()
-    except OperationalError as exc:
-        print(f"error: could not connect to the database ({exc})", file=sys.stderr)
-        return 1
+        yield engine
     finally:
         engine.dispose()
+
+
+def _run_slice0(aoi_path: Path) -> int:
+    config = _load_aoi_or_report(aoi_path)
+    if config is None:
+        return 1
+
+    with _disposing_engine() as engine:
+        try:
+            with Session(engine) as session:
+                try:
+                    aoi = persist_aoi(session, config)
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    print(f"error: an AOI named {config.name!r} already exists", file=sys.stderr)
+                    return 1
+                aoi_id = aoi.id
+                total = session.execute(select(func.count()).select_from(Aoi)).scalar_one()
+        except OperationalError as exc:
+            print(f"error: could not connect to the database ({exc})", file=sys.stderr)
+            return 1
 
     minx, miny, maxx, maxy = config.geometry.bounds
     print(f"Loaded AOI {config.name!r} from {aoi_path}")
@@ -116,10 +138,8 @@ def _run_slice0(aoi_path: Path) -> int:
 
 
 def _run_pipeline(args: argparse.Namespace) -> int:
-    try:
-        config = load_aoi_config(args.aoi)
-    except AoiConfigError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    config = _load_aoi_or_report(args.aoi)
+    if config is None:
         return 1
 
     # Record the *resolved* values so provenance reflects what the run actually used,
@@ -134,44 +154,39 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         "min_area_m2": min_area,
     }
 
-    engine = get_engine()
-    try:
-        earthengine.initialize(args.gee_project)
-        cog_storage = storage.local_disk_storage_from_env()
-        with Session(engine) as session:
-            aoi = get_or_create_aoi(session, config)
-            methodology = get_or_create_methodology_version(
-                session,
-                name=args.methodology_name,
-                version=args.methodology_version,
-                parameters=parameters,
-            )
-            summary = pipeline.run_pipeline(
-                session,
-                aoi=aoi,
-                since=args.since,
-                until=args.until,
-                methodology=methodology,
-                storage=cog_storage,
-                baseline_window=args.baseline_window,
-                threshold=threshold,
-                min_area_m2=min_area,
-            )
-            session.commit()
-    except StorageError as exc:
-        print(f"error: storage is not configured ({exc})", file=sys.stderr)
-        return 1
-    except EarthEngineError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except MethodologyVersionMismatch as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except OperationalError as exc:
-        print(f"error: could not connect to the database ({exc})", file=sys.stderr)
-        return 1
-    finally:
-        engine.dispose()
+    with _disposing_engine() as engine:
+        try:
+            earthengine.initialize(args.gee_project)
+            cog_storage = storage.local_disk_storage_from_env()
+            with Session(engine) as session:
+                aoi = get_or_create_aoi(session, config)
+                methodology = get_or_create_methodology_version(
+                    session,
+                    name=args.methodology_name,
+                    version=args.methodology_version,
+                    parameters=parameters,
+                )
+                summary = pipeline.run_pipeline(
+                    session,
+                    aoi=aoi,
+                    since=args.since,
+                    until=args.until,
+                    methodology=methodology,
+                    storage=cog_storage,
+                    baseline_window=args.baseline_window,
+                    threshold=threshold,
+                    min_area_m2=min_area,
+                )
+                session.commit()
+        except StorageError as exc:
+            print(f"error: storage is not configured ({exc})", file=sys.stderr)
+            return 1
+        except (EarthEngineError, MethodologyVersionMismatch) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except OperationalError as exc:
+            print(f"error: could not connect to the database ({exc})", file=sys.stderr)
+            return 1
 
     print(f"Ran Slice 1 pipeline for AOI {config.name!r} ({args.since} → {args.until})")
     print(

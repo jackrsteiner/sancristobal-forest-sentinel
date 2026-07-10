@@ -12,7 +12,7 @@ from typing import Any
 
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, indices
@@ -178,11 +178,9 @@ def _upsert_change_raster(
 
 
 def _replace_sources(session: Session, change_raster_id: int, index_raster_ids: list[int]) -> None:
-    for source in session.execute(
-        select(ChangeRasterSource).where(ChangeRasterSource.change_raster_id == change_raster_id)
-    ).scalars():
-        session.delete(source)
-    session.flush()
+    session.execute(
+        delete(ChangeRasterSource).where(ChangeRasterSource.change_raster_id == change_raster_id)
+    )
     for index_raster_id in index_raster_ids:
         session.add(
             ChangeRasterSource(change_raster_id=change_raster_id, index_raster_id=index_raster_id)

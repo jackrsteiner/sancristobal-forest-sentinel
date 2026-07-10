@@ -12,7 +12,7 @@ from typing import Any
 
 from geoalchemy2.shape import from_shape
 from shapely.geometry import shape
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, indices
@@ -140,10 +140,9 @@ def _any_candidate_tracked(session: Session, change_raster_id: int) -> bool:
 
 
 def _delete_existing(session: Session, change_raster_id: int) -> None:
-    for candidate in session.execute(
-        select(DisturbanceCandidate).where(
+    session.execute(
+        delete(DisturbanceCandidate).where(
             DisturbanceCandidate.change_raster_id == change_raster_id
         )
-    ).scalars():
-        session.delete(candidate)
+    )
     session.flush()

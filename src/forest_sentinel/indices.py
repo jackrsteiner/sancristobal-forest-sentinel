@@ -44,12 +44,17 @@ SENSOR_BANDS: dict[str, BandMapping] = {
 SENSOR_COLLECTIONS: dict[str, str] = {sensor: cid for cid, sensor in HLS_COLLECTIONS.items()}
 
 
-def index_bands(sensor: str) -> dict[str, list[str]]:
-    """The ``normalizedDifference`` band pairs per index for ``sensor``."""
+def _require_bands(sensor: str) -> BandMapping:
+    """The band mapping for ``sensor``, or a ``ValueError`` for unknown sensors."""
     try:
-        bands = SENSOR_BANDS[sensor]
+        return SENSOR_BANDS[sensor]
     except KeyError as exc:
         raise ValueError(f"unsupported sensor for index computation: {sensor!r}") from exc
+
+
+def index_bands(sensor: str) -> dict[str, list[str]]:
+    """The ``normalizedDifference`` band pairs per index for ``sensor``."""
+    bands = _require_bands(sensor)
     return {
         "NBR": [bands.nir, bands.swir2],
         "NDVI": [bands.nir, bands.red],
@@ -62,8 +67,7 @@ def build_masked_image(observation: Observation, *, ee_module: Any = earthengine
     Public so the change-product module can build each observation's masked image once
     and derive both indices from it, instead of re-masking per index type.
     """
-    if observation.sensor not in SENSOR_BANDS:
-        raise ValueError(f"unsupported sensor for index computation: {observation.sensor!r}")
+    _require_bands(observation.sensor)
     collection_id = SENSOR_COLLECTIONS[observation.sensor]
     image = ee_module.image_by_id(f"{collection_id}/{observation.source_scene_id}")
     return qa.mask_image(image, ee_module=ee_module)
@@ -92,9 +96,7 @@ def compute_indices_for_observation(
     ee_module: Any = earthengine,
 ) -> list[IndexRaster]:
     """Compute and persist NBR + NDVI index rasters for one observation."""
-    bands = SENSOR_BANDS.get(observation.sensor)
-    if bands is None:
-        raise ValueError(f"unsupported sensor for index computation: {observation.sensor!r}")
+    bands = _require_bands(observation.sensor)
 
     region = mapping(to_shape(aoi.geometry))
     masked = build_masked_image(observation, ee_module=ee_module)
