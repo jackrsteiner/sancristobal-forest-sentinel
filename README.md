@@ -139,12 +139,12 @@ flowchart TD
     disk -. serves rasters .-> dash
 ```
 
-1. **GitHub Actions** runs on a schedule and triggers the pipeline.
+1. **GitHub Actions** runs on a schedule and triggers the pipeline. *(Target design — today the shipped scheduler is a systemd timer on the VM; see `DEPLOYMENT.md` §7.)*
 2. A **Google Compute Engine VM** executes the Python orchestration job (it submits Earth Engine work and ingests results).
 3. The pipeline loads the configured AOI geometry.
 4. The pipeline accesses relevant **HLS analysis-ready imagery through Google Earth Engine** (`HLSL30` / `HLSS30`).
 5. Earth Engine computes vegetation/disturbance indices such as NBR and NDVI server-side.
-6. The system applies QA masking for cloud, shadow, haze, water, missing data, or other low-quality observations.
+6. The system applies QA masking — currently the HLS `Fmask` band: cloud, cloud shadow, snow/ice, and high aerosol are masked; water and low/moderate aerosol are deliberately kept (see `docs/architecture.md` §5.4).
 7. The system computes change products such as ΔNBR / ΔNDVI or other anomaly measures against a historical baseline.
 8. Change signals are converted into candidate disturbance polygons.
 9. Candidate polygons are tracked over time as disturbance events.
@@ -156,7 +156,7 @@ flowchart TD
 
 ## Prototype Technology Stack
 
-- **Scheduler / trigger:** GitHub Actions cron
+- **Scheduler / trigger:** GitHub Actions cron (target; today a systemd timer on the VM — see `DEPLOYMENT.md` §7)
 - **Compute:** Google Compute Engine VM
 - **Prototype database:** PostgreSQL + PostGIS running on the same Compute Engine VM
 - **Future managed database option:** Cloud SQL for PostgreSQL with PostGIS

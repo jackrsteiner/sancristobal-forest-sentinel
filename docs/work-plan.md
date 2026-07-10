@@ -38,7 +38,7 @@ Set up the repository so beads can be implemented, tested, and shipped.
 Make AOI deployability a first-class, code-free configuration surface.
 
 - Load a configured AOI geometry (per README step 3).
-- Validate AOI metadata (name, geometry, CRS, etc. — fields **TBD**).
+- Validate AOI metadata — resolved: a non-empty `properties.name` plus a valid WGS 84 `Polygon`/`MultiPolygon` (implemented in `src/forest_sentinel/aoi.py`).
 - Persist AOI records in PostGIS (`aoi` domain object).
 
 **Acceptance:** the pipeline can be pointed at an arbitrary AOI without code changes.
@@ -57,13 +57,13 @@ Compute per-observation vegetation / disturbance indices (README step 5).
 
 - `NBR  = (NIR - SWIR2) / (NIR + SWIR2)`
 - `NDVI = (NIR - RED)  / (NIR + RED)`
-- Write outputs as Cloud Optimized GeoTIFFs (README step 10).
+- Write outputs as Cloud Optimized GeoTIFFs (README step 13).
 - Record `index_raster` metadata in PostGIS.
 
 **Acceptance:** for each `observation`, NBR and NDVI COGs are produced and indexed.
 
 ### E5 — Change products
-Compute change products such as ΔNBR / ΔNDVI or other anomaly measures (README step 6).
+Compute change products such as ΔNBR / ΔNDVI or other anomaly measures (README step 7).
 
 - Produce `change_raster`s as COGs.
 - Record provenance back to source `observation`s and `index_raster`s.
@@ -71,19 +71,19 @@ Compute change products such as ΔNBR / ΔNDVI or other anomaly measures (README
 **Acceptance:** for an AOI with sufficient observations, change rasters are produced on schedule.
 
 ### E6 — Disturbance candidates
-Convert change signals into candidate disturbance polygons (README step 7).
+Convert change signals into candidate disturbance polygons (README step 8).
 
 - Persist `disturbance_candidate`s in PostGIS with geometry and provenance.
-- Detection thresholds and algorithm: **TBD** in beads.
+- Detection thresholds and algorithm — resolved: ΔNBR < −0.25 + `reduceToVectors` + minimum-area filter (see "Open questions → Resolved" and `docs/architecture.md` §5.7).
 
 **Acceptance:** the pipeline emits candidate polygons for real change signals over a test AOI.
 
 ### E7 — Event tracking
-Track candidate polygons over time as disturbance events (README step 8).
+Track candidate polygons over time as disturbance events (README step 9).
 
 - Maintain `disturbance_event`s spanning multiple dates.
 - Capture per-date measurements as `event_observation`s (area, severity, growth).
-- Tracking algorithm: **TBD** in beads.
+- Tracking algorithm — resolved: spatial overlap, earliest event wins, same methodology version only (see `docs/architecture.md` §5.9).
 
 **Acceptance:** repeated runs over the same AOI produce a stable, growing record of events with per-date measurements.
 
@@ -101,11 +101,11 @@ Tag every derived artifact with the processing / detection method that produced 
 **Acceptance:** every `index_raster`, `change_raster`, `disturbance_candidate`, and `disturbance_event` references a `methodology_version`.
 
 ### E10 — Dashboard
-Deliver the lightweight web dashboard, backed by PostGIS (README §"Product Deliverable", step 9, and stack).
+Deliver the lightweight web dashboard, backed by PostGIS (README §"Product Deliverable", step 12, and stack).
 
 - Maps, timelines, event detail views, AOI summary metrics.
-- Surfaces: where, when first detected, size, expansion rate, status (new / ongoing / resolved / uncertain), supporting evidence.
-- Framework choice: **TBD**.
+- Surfaces: where, when first detected, size, expansion rate, status (`new`/`ongoing` today; `resolved`/`uncertain` arrive with Slices 3–4), supporting evidence.
+- Framework — resolved: FastAPI + Leaflet (see `docs/architecture.md` §5.10).
 
 **Acceptance:** a user can answer the six core README "Product Deliverable" questions from the dashboard — where, when first detected, size, expansion rate, status, and supporting evidence. (The README's remaining deliverable questions — sensor/method attribution, optical-vs-radar basis, quality-affected confidence, contextual evidence — are delivered by E14–E17, not this epic.)
 
@@ -127,7 +127,7 @@ Store COGs on the **VM's local filesystem** (e.g. `/data/cogs/`) with a determin
 Stand up PostgreSQL + PostGIS on the GCE VM and persist the domain objects from the README.
 
 - Schemas for `aoi`, `observation`, `index_raster`, `change_raster`, `disturbance_candidate`, `disturbance_event`, `event_observation`, `manual_review`, `methodology_version`.
-- Migration / versioning approach: **TBD**.
+- Migration / versioning approach — resolved: SQLAlchemy 2.0 + GeoAlchemy2 + Alembic (see "Open questions → Resolved").
 - Future managed path: Cloud SQL for PostgreSQL with PostGIS.
 
 **Acceptance:** all domain objects are persisted in PostGIS and queryable by the pipeline and dashboard.
@@ -140,7 +140,7 @@ Mask low-quality pixels so detections carry honest quality metadata (README step
 > `valid_pixel_fraction` are persisted (see `docs/architecture.md` §5.4). What remains is
 > surfacing mask coverage in the dashboard (Slice 4).
 
-- Apply HLS QA layers to mask cloud, cloud shadow, haze, water, and missing data. *(shipped)*
+- Apply the HLS `Fmask` QA layer to mask cloud, cloud shadow, snow/ice, and high aerosol — water and low/moderate aerosol are deliberately kept (`docs/architecture.md` §5.4). *(shipped)*
 - Persist `quality_mask` metadata and retain it on downstream `observation`s and index / change products. *(shipped)*
 - Surface mask coverage so the dashboard can distinguish strong evidence from obscured observations. *(remaining)*
 

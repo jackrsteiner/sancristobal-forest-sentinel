@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the architecture of Open Forest Sentinel as defined by the project README. It is intentionally faithful to that source; design choices not stated in the README are flagged as **TBD**.
+This document describes the architecture of Open Forest Sentinel as defined by the project README. It is intentionally faithful to that source; design points the README leaves open are either recorded here once resolved (§5) or listed as still open (§7).
 
 ## 1. Purpose and shape of the system
 
@@ -20,7 +20,7 @@ Slice 2 dashboard (§5.10):
 - when disturbance was first detected
 - how large the affected area is
 - how quickly the disturbance is expanding
-- which detections are new, ongoing, resolved, or uncertain
+- which detections are new, ongoing, resolved, or uncertain (`new`/`ongoing` today; `resolved`/`uncertain` arrive with scheduling and confidence in Slices 3–4, §5.9)
 - what satellite-derived evidence supports each detection
 
 The remaining four — which sensor or method produced a detection, whether it is optical-only /
@@ -34,7 +34,7 @@ Derived rasters are internal analytical artifacts that power detection, tracking
 
 The pipeline runs on a schedule end-to-end. **Imagery access and raster computation run server-side in Google Earth Engine (EE); the Compute Engine VM orchestrates EE, then ingests the exported products.** See [§4a — Imagery access & compute decision](#4a-imagery-access--compute-decision-google-earth-engine) for the rationale.
 
-1. **GitHub Actions** runs on a cron schedule and triggers the pipeline.
+1. **GitHub Actions** runs on a cron schedule and triggers the pipeline. *(Target design — the shipped scheduler today is a systemd timer on the VM; the Actions workflow exists but is disabled until Slice 3 / E11. See `DEPLOYMENT.md` §7.)*
 2. A **Google Compute Engine VM** executes the Python orchestration job (it submits Earth Engine work and ingests results; it does not do the raster math itself).
 3. The pipeline loads the configured AOI geometry.
 4. The pipeline discovers and accesses relevant **HLS analysis-ready imagery through Google Earth Engine** — `ee.ImageCollection` over the `HLSL30` / `HLSS30` v2.0 collections, filtered to the AOI and time window. NASA HLS remains the source dataset; Earth Engine is the access and compute substrate.
@@ -81,7 +81,7 @@ GCE VM ── load AOI ──▶ submit Earth Engine work ───────�
 
 | Concern                       | Prototype                                                | Future path                                    |
 |-------------------------------|----------------------------------------------------------|------------------------------------------------|
-| Scheduler / trigger           | GitHub Actions cron                                      | —                                              |
+| Scheduler / trigger           | systemd timer on the VM today; GitHub Actions cron is the target (Slice 3 / E11) | —             |
 | Compute (orchestration)       | Google Compute Engine VM (submits EE work, ingests results) | —                                           |
 | Imagery access & raster compute | Google Earth Engine (`earthengine-api`)                | —                                              |
 | Database                      | PostgreSQL + PostGIS on the same Compute Engine VM       | Cloud SQL for PostgreSQL with PostGIS          |
