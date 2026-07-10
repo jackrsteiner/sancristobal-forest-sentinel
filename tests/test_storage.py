@@ -125,6 +125,43 @@ def test_export_polls_until_completed(tmp_path: Path) -> None:
     assert len(sleeps) == 3
 
 
+def test_export_times_out_on_stuck_task(tmp_path: Path) -> None:
+    """A task that never reaches a terminal state must raise instead of polling
+    forever (audit BUG-11)."""
+    staging = FakeStagingBucket()
+    fake_ee = FakeEarthEngine(["RUNNING"] * 100)
+    sleeps: list[float] = []
+    store = LocalDiskStorage(
+        tmp_path,
+        "staging-bucket",
+        staging,
+        ee_module=fake_ee,
+        poll_interval_seconds=1.0,
+        timeout_seconds=3.0,
+        sleep=sleeps.append,
+    )
+    key = CogKey(aoi="aoi", product="nbr", date="2026-01-02", filename="nbr.tif")
+    with pytest.raises(StorageError, match="timed out after 3s"):
+        store.export_image("img", key)
+    assert len(sleeps) == 3  # polled until the timeout budget was exhausted
+    assert staging.downloaded == []
+    assert staging.deleted == []
+
+
+def test_staging_failures_surface_as_storage_errors(tmp_path: Path) -> None:
+    """Raw GCS exceptions from the staged copy/clear (missing object, transient API
+    error) must become StorageError so per-observation isolation applies (R2-1)."""
+
+    class BrokenStagingBucket(FakeStagingBucket):
+        def download_to(self, blob_name: str, destination: Path) -> None:
+            raise RuntimeError("404 staging object not found")
+
+    store, _, _ = _storage(tmp_path, ["COMPLETED"], BrokenStagingBucket())
+    key = CogKey(aoi="aoi", product="nbr", date="2026-01-02", filename="nbr.tif")
+    with pytest.raises(StorageError, match="staging copy/clear failed"):
+        store.export_image("img", key)
+
+
 def test_export_raises_on_failed_task(tmp_path: Path) -> None:
     staging = FakeStagingBucket()
     store, _, _ = _storage(tmp_path, ["RUNNING", "FAILED"], staging)

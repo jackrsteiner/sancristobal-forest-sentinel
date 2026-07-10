@@ -4,9 +4,10 @@ import pytest
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
-from forest_sentinel import earthengine, pipeline, storage
+from forest_sentinel import earthengine, indices, pipeline, qa, storage
+from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.cli import main
-from forest_sentinel.models import Aoi
+from forest_sentinel.models import Aoi, MethodologyVersion
 from forest_sentinel.pipeline import PipelineSummary
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
@@ -35,6 +36,16 @@ def test_run_with_bad_config_exits_nonzero(
     exit_code = main(["run", "--aoi", str(tmp_path / "missing.geojson")])
     assert exit_code == 1
     assert "error:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--since", "--until"])
+def test_lone_window_flag_is_a_usage_error(flag: str, capsys: pytest.CaptureFixture[str]) -> None:
+    """A single window flag used to fall through silently to the Slice 0 load
+    (audit BUG-8); it must be rejected as a usage error."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(["run", "--aoi", str(SAMPLE_AOI), flag, "2026-01-01"])
+    assert excinfo.value.code == 2
+    assert "--since and --until must be provided together" in capsys.readouterr().err
 
 
 def test_run_with_duplicate_aoi_exits_nonzero(
@@ -97,6 +108,60 @@ def test_pipeline_mode_runs_and_reports_summary(
     assert str(captured["until"]) == "2026-02-01"
 
 
+def test_pipeline_mode_reports_export_failures_with_nonzero_exit(
+    migrated_database: Engine,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial results are committed, but skipped exports must alert the scheduler
+    (re-audit R4)."""
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "run_pipeline",
+        lambda session, **kwargs: PipelineSummary(3, 3, 0, 4, 2, 1, 1, 1, export_failures=1),
+    )
+    exit_code = main(
+        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    )
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "Disturbance events: 1 created" in captured.out  # summary still printed
+    assert "1 observation(s) skipped" in captured.err
+
+
+def test_pipeline_mode_defaults_are_resolved_and_recorded(
+    migrated_database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Omitting --threshold/--min-area must use and record the documented defaults,
+    not store nulls that crash candidate extraction (audit BUG-1)."""
+    captured: dict[str, object] = {}
+
+    def fake_run_pipeline(session: object, **kwargs: object) -> PipelineSummary:
+        captured.update(kwargs)
+        return PipelineSummary(0, 0, 0, 0, 0, 0, 0, 0)
+
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+
+    args = ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    assert main(args) == 0
+
+    # The resolved defaults are threaded into the pipeline...
+    assert captured["threshold"] == DEFAULT_DELTA_NBR_THRESHOLD
+    assert captured["min_area_m2"] == DEFAULT_MIN_AREA_M2
+    # ...and recorded in the methodology provenance (no nulls), together with the
+    # scale and mask categories that also shape the output.
+    with Session(migrated_database) as session:
+        methodology = session.execute(select(MethodologyVersion)).scalar_one()
+    assert methodology.parameters["delta_nbr_threshold"] == DEFAULT_DELTA_NBR_THRESHOLD
+    assert methodology.parameters["min_area_m2"] == DEFAULT_MIN_AREA_M2
+    assert methodology.parameters["scale_m"] == indices.DEFAULT_SCALE_METERS
+    assert methodology.parameters["masked_categories"] == list(qa.MASK_CATEGORIES)
+
+
 def test_pipeline_mode_reuses_existing_aoi(
     migrated_database: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -113,6 +178,69 @@ def test_pipeline_mode_reuses_existing_aoi(
 
     with Session(migrated_database) as session:
         assert len(session.execute(select(Aoi)).scalars().all()) == 1
+
+
+def test_pipeline_mode_reports_earth_engine_failure(
+    migrated_database: Engine,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failing_initialize(project: str | None = None) -> None:
+        raise earthengine.EarthEngineError("Earth Engine initialization failed: no credentials")
+
+    monkeypatch.setattr(earthengine, "initialize", failing_initialize)
+    exit_code = main(
+        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    )
+    assert exit_code == 1
+    assert "Earth Engine initialization failed" in capsys.readouterr().err
+
+
+def test_pipeline_mode_reports_methodology_mismatch(
+    migrated_database: Engine,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-running with different parameters but the same version is a user error and
+    must print the 'bump the version' guidance, not a traceback (audit BUG-13)."""
+    with Session(migrated_database) as session:
+        session.add(
+            MethodologyVersion(name="optical-change", version="1.0.0", parameters={"other": 1})
+        )
+        session.commit()
+
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    exit_code = main(
+        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    )
+    assert exit_code == 1
+    assert "bump the version" in capsys.readouterr().err
+
+
+def test_pipeline_mode_reports_concurrent_creation_race(
+    migrated_database: Engine,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-AOI lock can't cover the AOI/methodology creation itself; a losing
+    first-ever run must get a friendly message, not a traceback (re-audit round 3,
+    finding 3)."""
+    from sqlalchemy.exc import IntegrityError
+
+    from forest_sentinel import cli
+
+    def racing_get_or_create(session: object, config: object) -> object:
+        raise IntegrityError("INSERT INTO aoi ...", {}, Exception("duplicate key uq_aoi_name"))
+
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    monkeypatch.setattr(cli, "get_or_create_aoi", racing_get_or_create)
+    exit_code = main(
+        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    )
+    assert exit_code == 1
+    assert "concurrent run created this AOI" in capsys.readouterr().err
 
 
 def test_pipeline_mode_reports_storage_misconfiguration(

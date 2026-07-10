@@ -44,22 +44,30 @@ SENSOR_BANDS: dict[str, BandMapping] = {
 SENSOR_COLLECTIONS: dict[str, str] = {sensor: cid for cid, sensor in HLS_COLLECTIONS.items()}
 
 
-def index_bands(sensor: str) -> dict[str, list[str]]:
-    """The ``normalizedDifference`` band pairs per index for ``sensor``."""
+def _require_bands(sensor: str) -> BandMapping:
+    """The band mapping for ``sensor``, or a ``ValueError`` for unknown sensors."""
     try:
-        bands = SENSOR_BANDS[sensor]
+        return SENSOR_BANDS[sensor]
     except KeyError as exc:
         raise ValueError(f"unsupported sensor for index computation: {sensor!r}") from exc
+
+
+def index_bands(sensor: str) -> dict[str, list[str]]:
+    """The ``normalizedDifference`` band pairs per index for ``sensor``."""
+    bands = _require_bands(sensor)
     return {
         "NBR": [bands.nir, bands.swir2],
         "NDVI": [bands.nir, bands.red],
     }
 
 
-def _masked_image(observation: Observation, *, ee_module: Any) -> Any:
-    """Rebuild the Fmask-masked HLS image for an observation."""
-    if observation.sensor not in SENSOR_BANDS:
-        raise ValueError(f"unsupported sensor for index computation: {observation.sensor!r}")
+def build_masked_image(observation: Observation, *, ee_module: Any = earthengine) -> Any:
+    """Rebuild the Fmask-masked HLS image for an observation.
+
+    Public so the change-product module can build each observation's masked image once
+    and derive both indices from it, instead of re-masking per index type.
+    """
+    _require_bands(observation.sensor)
     collection_id = SENSOR_COLLECTIONS[observation.sensor]
     image = ee_module.image_by_id(f"{collection_id}/{observation.source_scene_id}")
     return qa.mask_image(image, ee_module=ee_module)
@@ -73,7 +81,7 @@ def build_index_image(
     Reused by the change-product baseline (#40), which needs the index images themselves.
     """
     nd_bands = index_bands(observation.sensor)[index_type]
-    masked = _masked_image(observation, ee_module=ee_module)
+    masked = build_masked_image(observation, ee_module=ee_module)
     return ee_module.normalized_difference(masked, nd_bands)
 
 
@@ -88,12 +96,10 @@ def compute_indices_for_observation(
     ee_module: Any = earthengine,
 ) -> list[IndexRaster]:
     """Compute and persist NBR + NDVI index rasters for one observation."""
-    bands = SENSOR_BANDS.get(observation.sensor)
-    if bands is None:
-        raise ValueError(f"unsupported sensor for index computation: {observation.sensor!r}")
+    bands = _require_bands(observation.sensor)
 
     region = mapping(to_shape(aoi.geometry))
-    masked = _masked_image(observation, ee_module=ee_module)
+    masked = build_masked_image(observation, ee_module=ee_module)
 
     fraction = qa.measure_valid_fraction(masked, bands.red, region, scale, ee_module=ee_module)
     qa.record_quality_mask(session, observation_id=observation.id, valid_pixel_fraction=fraction)
@@ -102,11 +108,14 @@ def compute_indices_for_observation(
     results: list[IndexRaster] = []
     for index_type, nd_bands in index_bands(observation.sensor).items():
         index_image = ee_module.normalized_difference(masked, nd_bands)
+        # The scene id keeps same-day observations (both sensors, adjacent tiles) from
+        # exporting to the same path and silently overwriting each other; the AOI id
+        # keeps distinct AOI names that sanitize identically from sharing a tree.
         key = CogKey(
-            aoi=aoi.name,
+            aoi=f"{aoi.id}-{aoi.name}",
             product=index_type,
             date=date,
-            filename=f"{index_type.lower()}.tif",
+            filename=f"{index_type.lower()}-{observation.source_scene_id}.tif",
         )
         cog_path = storage.export_image(index_image, key, scale=scale, region=region)
         results.append(

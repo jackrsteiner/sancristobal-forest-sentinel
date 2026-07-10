@@ -150,8 +150,8 @@ Adding `--since/--until` switches from the Slice 0 load to the full pipeline. Tu
 |------|---------|---------|
 | `--since` / `--until` | observation window (`--since` inclusive, `--until` exclusive) | — |
 | `--baseline-window` | number of prior observations in the trailing-median baseline | `5` |
-| `--threshold` | ΔNBR drop below which a pixel is flagged (negative) | computed |
-| `--min-area` | minimum candidate polygon area, m² | computed |
+| `--threshold` | ΔNBR drop below which a pixel is flagged (negative) | `-0.25` |
+| `--min-area` | minimum candidate polygon area, m² | `4500` (≈ 0.45 ha) |
 | `--methodology-name` / `--methodology-version` | provenance labels recorded per run | `optical-change` / `1.0.0` |
 | `--gee-project` | overrides `FOREST_SENTINEL_GEE_PROJECT` | env |
 
@@ -229,9 +229,12 @@ systemctl status forest-sentinel-pipeline.timer    # is it scheduled?
 sudo systemctl start forest-sentinel-pipeline      # run on demand
 ```
 
-Change the cadence by editing `OnCalendar=` in
-`scripts/systemd/forest-sentinel-pipeline.timer` (re-run `vm_setup.sh` or
-`systemctl daemon-reload` after editing on the VM).
+Change the cadence by editing `OnCalendar=` in the **installed** unit —
+`sudo systemctl edit --full forest-sentinel-pipeline.timer` (systemd reloads it for
+you) — or edit `scripts/systemd/forest-sentinel-pipeline.timer` in the repo and
+re-run `vm_setup.sh` to reinstall it. (Editing the repo copy alone does nothing:
+the unit is *copied* to `/etc/systemd/system` at install time, and `daemon-reload`
+only re-reads installed units.)
 
 ### From GitHub Actions (intended direction — E11)
 

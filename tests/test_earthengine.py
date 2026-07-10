@@ -29,6 +29,16 @@ def test_initialize_falls_back_to_env(fake_ee: MagicMock, monkeypatch: pytest.Mo
     fake_ee.Initialize.assert_called_once_with(project="env-project")
 
 
+def test_initialize_wraps_ee_failures(fake_ee: MagicMock) -> None:
+    class FakeEEException(Exception):
+        pass
+
+    fake_ee.EEException = FakeEEException
+    fake_ee.Initialize.side_effect = FakeEEException("no credentials")
+    with pytest.raises(earthengine.EarthEngineError, match="initialization failed"):
+        earthengine.initialize("my-project")
+
+
 def test_start_image_export_submits_cog_task(fake_ee: MagicMock) -> None:
     task = fake_ee.batch.Export.image.toCloudStorage.return_value
     returned = earthengine.start_image_export_to_gcs(
@@ -49,6 +59,17 @@ def test_export_task_state_reads_status() -> None:
     assert earthengine.export_task_state(task) == "RUNNING"
 
 
+def test_export_task_state_wraps_ee_failures(fake_ee: MagicMock) -> None:
+    class FakeEEException(Exception):
+        pass
+
+    fake_ee.EEException = FakeEEException
+    task = MagicMock()
+    task.status.side_effect = FakeEEException("transient 500")
+    with pytest.raises(earthengine.EarthEngineError, match="task state"):
+        earthengine.export_task_state(task)
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [("FAILED", True), ("CANCELLED", True), ("RUNNING", False), ("COMPLETED", False)],
@@ -65,6 +86,17 @@ def test_list_image_properties_maps_features(fake_ee: MagicMock) -> None:
     result = earthengine.list_image_properties("C", {"type": "Polygon"}, "2026-01-01", "2026-01-31")
     assert result == [{"id": "img-1", "properties": {"system:index": "scene-1"}}]
     fake_ee.ImageCollection.assert_called_once_with("C")
+
+
+def test_list_image_properties_wraps_ee_failures(fake_ee: MagicMock) -> None:
+    class FakeEEException(Exception):
+        pass
+
+    fake_ee.EEException = FakeEEException
+    chain = fake_ee.ImageCollection.return_value.filterBounds.return_value.filterDate.return_value
+    chain.getInfo.side_effect = FakeEEException("quota exceeded")
+    with pytest.raises(earthengine.EarthEngineError, match="listing"):
+        earthengine.list_image_properties("C", {}, "2026-01-01", "2026-01-31")
 
 
 def test_list_image_properties_handles_empty(fake_ee: MagicMock) -> None:

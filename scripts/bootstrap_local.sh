@@ -45,7 +45,7 @@ Next steps:
   uv run forest-sentinel run --aoi examples/aoi-sample.geojson
 
   # Run the full optical-change pipeline (needs Earth Engine credentials —
-  # see DEPLOYMENT.md "Credentials & secrets"):
+  # see DEPLOYMENT.md §3 "Configure credentials & store them safely"):
   uv run forest-sentinel run --aoi examples/aoi-sample.geojson \
       --since 2026-01-01 --until 2026-02-01
 

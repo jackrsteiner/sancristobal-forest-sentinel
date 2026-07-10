@@ -2,29 +2,41 @@
 
 ``forest-sentinel run --aoi <config>`` loads a configured AOI, persists it, and prints a
 summary (the Slice 0 walking skeleton). Adding ``--since`` and ``--until`` runs the full
-Slice 1 optical-change pipeline for that AOI over the window: discover HLS observations →
-NBR/NDVI indices → ΔNBR/ΔNDVI change products → candidate disturbance polygons, all through
-Earth Engine, persisting results to PostGIS.
+optical-change pipeline for that AOI over the window: discover HLS observations →
+NBR/NDVI indices → ΔNBR/ΔNDVI change products → candidate disturbance polygons → tracked
+disturbance events, all through Earth Engine, persisting results to PostGIS.
 """
 
 import argparse
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from forest_sentinel import earthengine, pipeline, storage
-from forest_sentinel.aoi import AoiConfigError, get_or_create_aoi, load_aoi_config, persist_aoi
+from forest_sentinel import earthengine, indices, pipeline, qa, storage
+from forest_sentinel.aoi import (
+    AoiConfig,
+    AoiConfigError,
+    get_or_create_aoi,
+    load_aoi_config,
+    persist_aoi,
+)
+from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.change import DEFAULT_BASELINE_WINDOW
 from forest_sentinel.db import get_engine
+from forest_sentinel.earthengine import EarthEngineError
 from forest_sentinel.hls import HLS_COLLECTIONS
-from forest_sentinel.methodology import get_or_create_methodology_version
+from forest_sentinel.methodology import (
+    MethodologyVersionMismatch,
+    get_or_create_methodology_version,
+)
 from forest_sentinel.models import Aoi
-from forest_sentinel.storage import StorageError
+from forest_sentinel.storage import StorageConfigurationError, StorageError
 
 # Pins what Google ran for this build, recorded in the methodology version for reproducibility.
 EE_SCRIPT_VERSION = "slice1-optical-change-v1"
@@ -32,7 +44,11 @@ EE_SCRIPT_VERSION = "slice1-optical-change-v1"
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments and dispatch. Returns a process exit code."""
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if (args.since is None) != (args.until is None):
+        # A lone window flag used to fall through to the Slice 0 load silently.
+        parser.error("--since and --until must be provided together")
     if args.since is not None and args.until is not None:
         return _run_pipeline(args)
     return _run_slice0(args.aoi)
@@ -73,30 +89,45 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_slice0(aoi_path: Path) -> int:
+def _load_aoi_or_report(aoi_path: Path) -> AoiConfig | None:
+    """Load the AOI config, printing the standard error message on failure."""
     try:
-        config = load_aoi_config(aoi_path)
+        return load_aoi_config(aoi_path)
     except AoiConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        return 1
+        return None
 
+
+@contextmanager
+def _disposing_engine() -> Iterator[Engine]:
+    """An engine for one CLI invocation, disposed on the way out."""
     engine = get_engine()
     try:
-        with Session(engine) as session:
-            try:
-                aoi = persist_aoi(session, config)
-                session.commit()
-            except IntegrityError:
-                session.rollback()
-                print(f"error: an AOI named {config.name!r} already exists", file=sys.stderr)
-                return 1
-            aoi_id = aoi.id
-            total = session.execute(select(func.count()).select_from(Aoi)).scalar_one()
-    except OperationalError as exc:
-        print(f"error: could not connect to the database ({exc})", file=sys.stderr)
-        return 1
+        yield engine
     finally:
         engine.dispose()
+
+
+def _run_slice0(aoi_path: Path) -> int:
+    config = _load_aoi_or_report(aoi_path)
+    if config is None:
+        return 1
+
+    with _disposing_engine() as engine:
+        try:
+            with Session(engine) as session:
+                try:
+                    aoi = persist_aoi(session, config)
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    print(f"error: an AOI named {config.name!r} already exists", file=sys.stderr)
+                    return 1
+                aoi_id = aoi.id
+                total = session.execute(select(func.count()).select_from(Aoi)).scalar_one()
+        except OperationalError as exc:
+            print(f"error: could not connect to the database ({exc})", file=sys.stderr)
+            return 1
 
     minx, miny, maxx, maxy = config.geometry.bounds
     print(f"Loaded AOI {config.name!r} from {aoi_path}")
@@ -107,52 +138,69 @@ def _run_slice0(aoi_path: Path) -> int:
 
 
 def _run_pipeline(args: argparse.Namespace) -> int:
-    try:
-        config = load_aoi_config(args.aoi)
-    except AoiConfigError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    config = _load_aoi_or_report(args.aoi)
+    if config is None:
         return 1
 
+    # Record the *resolved* values so provenance reflects what the run actually used,
+    # even when the CLI flags are omitted.
+    threshold = args.threshold if args.threshold is not None else DEFAULT_DELTA_NBR_THRESHOLD
+    min_area = args.min_area if args.min_area is not None else DEFAULT_MIN_AREA_M2
     parameters = {
         "ee_script_version": EE_SCRIPT_VERSION,
         "collections": sorted(HLS_COLLECTIONS),
         "baseline_window": args.baseline_window,
-        "delta_nbr_threshold": args.threshold,
-        "min_area_m2": args.min_area,
+        "delta_nbr_threshold": threshold,
+        "min_area_m2": min_area,
+        # Everything that shapes the output belongs in the provenance record: the
+        # export / reduceToVectors scale and the Fmask categories masked out.
+        "scale_m": indices.DEFAULT_SCALE_METERS,
+        "masked_categories": list(qa.MASK_CATEGORIES),
     }
 
-    engine = get_engine()
-    try:
-        earthengine.initialize(args.gee_project)
-        cog_storage = storage.local_disk_storage_from_env()
-        with Session(engine) as session:
-            aoi = get_or_create_aoi(session, config)
-            methodology = get_or_create_methodology_version(
-                session,
-                name=args.methodology_name,
-                version=args.methodology_version,
-                parameters=parameters,
+    with _disposing_engine() as engine:
+        try:
+            earthengine.initialize(args.gee_project)
+            cog_storage = storage.local_disk_storage_from_env()
+            with Session(engine) as session:
+                aoi = get_or_create_aoi(session, config)
+                methodology = get_or_create_methodology_version(
+                    session,
+                    name=args.methodology_name,
+                    version=args.methodology_version,
+                    parameters=parameters,
+                )
+                summary = pipeline.run_pipeline(
+                    session,
+                    aoi=aoi,
+                    since=args.since,
+                    until=args.until,
+                    methodology=methodology,
+                    storage=cog_storage,
+                    baseline_window=args.baseline_window,
+                    threshold=threshold,
+                    min_area_m2=min_area,
+                )
+                session.commit()
+        except StorageConfigurationError as exc:
+            print(f"error: storage is not configured ({exc})", file=sys.stderr)
+            return 1
+        except (StorageError, EarthEngineError, MethodologyVersionMismatch) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except IntegrityError:
+            # First-ever run for an AOI racing another run: the per-AOI advisory lock
+            # can only be taken once the AOI row exists, so the get-or-creates above
+            # can collide. Nothing was committed; a re-run reuses the winner's rows.
+            print(
+                "error: a concurrent run created this AOI or methodology at the same "
+                "time; re-run to reuse it",
+                file=sys.stderr,
             )
-            summary = pipeline.run_pipeline(
-                session,
-                aoi=aoi,
-                since=args.since,
-                until=args.until,
-                methodology=methodology,
-                storage=cog_storage,
-                baseline_window=args.baseline_window,
-                threshold=args.threshold,
-                min_area_m2=args.min_area,
-            )
-            session.commit()
-    except StorageError as exc:
-        print(f"error: storage is not configured ({exc})", file=sys.stderr)
-        return 1
-    except OperationalError as exc:
-        print(f"error: could not connect to the database ({exc})", file=sys.stderr)
-        return 1
-    finally:
-        engine.dispose()
+            return 1
+        except OperationalError as exc:
+            print(f"error: could not connect to the database ({exc})", file=sys.stderr)
+            return 1
 
     print(f"Ran Slice 1 pipeline for AOI {config.name!r} ({args.since} → {args.until})")
     print(
@@ -168,4 +216,12 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         f"Disturbance events: {summary.events_created} created, "
         f"{summary.event_observations} observations tracked"
     )
+    if summary.export_failures:
+        # Partial results are committed; a nonzero exit alerts the scheduler.
+        print(
+            f"error: {summary.export_failures} observation(s) skipped due to failed "
+            "Earth Engine exports (see logs); partial results were persisted",
+            file=sys.stderr,
+        )
+        return 1
     return 0

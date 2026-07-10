@@ -16,6 +16,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# systemd services get a minimal PATH that excludes ~/.local/bin, where
+# vm_setup.sh installs uv — make sure it is reachable.
+export PATH="${HOME}/.local/bin:${PATH}"
+
 ENV_FILE="${ENV_FILE:-.env}"
 if [ -f "${ENV_FILE}" ]; then
     set -a

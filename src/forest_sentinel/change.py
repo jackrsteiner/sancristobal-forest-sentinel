@@ -12,10 +12,11 @@ from typing import Any
 
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, indices
+from forest_sentinel.candidates import change_raster_is_frozen
 from forest_sentinel.models import (
     Aoi,
     ChangeRaster,
@@ -40,7 +41,9 @@ class ChangeProduct:
     """A persisted change raster plus the EE delta image it was computed from.
 
     The pipeline (#42) reuses ``delta_image`` for candidate extraction (#41) without
-    rebuilding it.
+    rebuilding it. For a **frozen** raster (its candidates are tracked into events)
+    ``delta_image`` is ``None``: nothing was recomputed, and candidate extraction
+    short-circuits before touching it.
     """
 
     change_type: str
@@ -61,37 +64,87 @@ def compute_change_products_for_observation(
 ) -> list[ChangeProduct]:
     """Compute and persist ΔNBR/ΔNDVI for one observation against its trailing baseline.
 
-    An observation with no prior observations in the AOI has no baseline and is skipped
-    (the next run, with one more prior observation, produces deltas).
+    The baseline for each index type is the trailing window of prior observations that
+    have an ``index_raster`` under this methodology — so the imagery reduced into the
+    median always matches the recorded ``change_raster_source`` provenance. An
+    observation with no such priors has no baseline and is skipped (the next run, with
+    one more indexed prior observation, produces deltas).
     """
     region = mapping(to_shape(aoi.geometry))
     date = observation.acquired_at.date().isoformat()
     results: list[ChangeProduct] = []
 
-    for change_type, index_type in CHANGE_TYPES.items():
-        baseline_obs = (
-            session.execute(
-                select(Observation)
-                .where(Observation.aoi_id == aoi.id)
-                .where(Observation.acquired_at < observation.acquired_at)
-                .order_by(Observation.acquired_at.desc())
-                .limit(baseline_window)
+    # Masked source images are shared across change types and built lazily (a fully
+    # frozen observation needs none). The baseline is per index type: only prior
+    # observations that HAVE an index raster under this methodology participate, so
+    # the imagery reduced into the median always equals the recorded
+    # change_raster_source provenance — an observation whose index export failed (or
+    # that predates this methodology) is excluded from the math, not just the record.
+    baseline_cache: dict[str, list[Observation]] = {}
+    masked_images: dict[int, Any] = {}
+
+    def baseline_for(index_type: str) -> list[Observation]:
+        if index_type not in baseline_cache:
+            baseline_cache[index_type] = list(
+                session.execute(
+                    select(Observation)
+                    .join(IndexRaster, IndexRaster.observation_id == Observation.id)
+                    .where(Observation.aoi_id == aoi.id)
+                    .where(Observation.acquired_at < observation.acquired_at)
+                    .where(IndexRaster.index_type == index_type)
+                    .where(IndexRaster.methodology_version_id == methodology.id)
+                    .order_by(Observation.acquired_at.desc())
+                    .limit(baseline_window)
+                )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
+        return baseline_cache[index_type]
+
+    def masked_image(obs: Observation) -> Any:
+        if obs.id not in masked_images:
+            masked_images[obs.id] = indices.build_masked_image(obs, ee_module=ee_module)
+        return masked_images[obs.id]
+
+    def index_image(obs: Observation, index_type: str) -> Any:
+        nd_bands = indices.index_bands(obs.sensor)[index_type]
+        return ee_module.normalized_difference(masked_image(obs), nd_bands)
+
+    for change_type, index_type in CHANGE_TYPES.items():
+        # Frozen: the existing raster is evidence for tracked candidates. Recomputing
+        # would overwrite its COG (same path) and rewrite its recorded sources with a
+        # different baseline — silently invalidating the events derived from it.
+        existing = _get_change_raster(
+            session,
+            observation_id=observation.id,
+            change_type=change_type,
+            methodology_version_id=methodology.id,
         )
-        if not baseline_obs:
+        if existing is not None and change_raster_is_frozen(session, existing.id):
+            results.append(
+                ChangeProduct(change_type=change_type, change_raster=existing, delta_image=None)
+            )
             continue
 
-        current_image = indices.build_index_image(observation, index_type, ee_module=ee_module)
-        baseline_images = [
-            indices.build_index_image(prior, index_type, ee_module=ee_module)
-            for prior in baseline_obs
-        ]
+        baseline_obs = baseline_for(index_type)
+        if not baseline_obs:
+            # No usable baseline for this index type; skip it (the next run, with one
+            # more indexed prior observation, produces the delta).
+            continue
+
+        current_image = index_image(observation, index_type)
+        baseline_images = [index_image(prior, index_type) for prior in baseline_obs]
         baseline_median = ee_module.median_of(baseline_images)
         delta = ee_module.subtract(current_image, baseline_median)
 
-        key = CogKey(aoi=aoi.name, product=change_type, date=date, filename=f"{change_type}.tif")
+        # As with index COGs (see indices.py), the scene id and AOI id keep paths
+        # collision-free.
+        key = CogKey(
+            aoi=f"{aoi.id}-{aoi.name}",
+            product=change_type,
+            date=date,
+            filename=f"{change_type}-{observation.source_scene_id}.tif",
+        )
         cog_path = storage.export_image(delta, key, scale=scale, region=region)
 
         source_obs_ids = [observation.id, *(prior.id for prior in baseline_obs)]
@@ -129,6 +182,21 @@ def compute_change_products_for_observation(
     return results
 
 
+def _get_change_raster(
+    session: Session,
+    *,
+    observation_id: int,
+    change_type: str,
+    methodology_version_id: int,
+) -> ChangeRaster | None:
+    return session.execute(
+        select(ChangeRaster)
+        .where(ChangeRaster.observation_id == observation_id)
+        .where(ChangeRaster.change_type == change_type)
+        .where(ChangeRaster.methodology_version_id == methodology_version_id)
+    ).scalar_one_or_none()
+
+
 def _upsert_change_raster(
     session: Session,
     *,
@@ -139,12 +207,12 @@ def _upsert_change_raster(
     baseline_window: int,
     valid_pixel_fraction: float | None,
 ) -> ChangeRaster:
-    existing = session.execute(
-        select(ChangeRaster)
-        .where(ChangeRaster.observation_id == observation_id)
-        .where(ChangeRaster.change_type == change_type)
-        .where(ChangeRaster.methodology_version_id == methodology_version_id)
-    ).scalar_one_or_none()
+    existing = _get_change_raster(
+        session,
+        observation_id=observation_id,
+        change_type=change_type,
+        methodology_version_id=methodology_version_id,
+    )
     if existing is not None:
         existing.cog_path = cog_path
         existing.baseline_window = baseline_window
@@ -163,11 +231,9 @@ def _upsert_change_raster(
 
 
 def _replace_sources(session: Session, change_raster_id: int, index_raster_ids: list[int]) -> None:
-    for source in session.execute(
-        select(ChangeRasterSource).where(ChangeRasterSource.change_raster_id == change_raster_id)
-    ).scalars():
-        session.delete(source)
-    session.flush()
+    session.execute(
+        delete(ChangeRasterSource).where(ChangeRasterSource.change_raster_id == change_raster_id)
+    )
     for index_raster_id in index_raster_ids:
         session.add(
             ChangeRasterSource(change_raster_id=change_raster_id, index_raster_id=index_raster_id)

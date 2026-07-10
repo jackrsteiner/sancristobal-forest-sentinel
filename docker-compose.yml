@@ -1,6 +1,9 @@
 services:
   db:
     image: postgis/postgis:16-3.4
+    # Come back after a VM reboot; without this every timer-fired run fails until
+    # someone manually runs `docker compose up -d` again.
+    restart: unless-stopped
     environment:
       POSTGRES_USER: forest_sentinel
       POSTGRES_PASSWORD: forest_sentinel

@@ -46,6 +46,11 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.isort]
+# `tests` is importable (tests/fakes.py) but lives outside the src roots; classify it
+# explicitly so import grouping doesn't depend on resolver heuristics.
+known-first-party = ["forest_sentinel", "tests"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true

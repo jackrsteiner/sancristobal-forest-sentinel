@@ -1,9 +1,5 @@
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from geoalchemy2.shape import from_shape
-from shapely.geometry import MultiPolygon, Polygon
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,7 +8,6 @@ from forest_sentinel.change import (
     CHANGE_TYPES,
     compute_change_products_for_observation,
 )
-from forest_sentinel.methodology import get_or_create_methodology_version
 from forest_sentinel.models import (
     Aoi,
     ChangeRaster,
@@ -20,81 +15,22 @@ from forest_sentinel.models import (
     MethodologyVersion,
     Observation,
 )
-from forest_sentinel.storage import CogKey
-
-
-class FakeEarthEngine:
-    def __init__(self) -> None:
-        self.median_sizes: list[int] = []
-
-    def image_by_id(self, image_id: str) -> dict[str, Any]:
-        return {"id": image_id}
-
-    def apply_fmask_mask(self, image: Any) -> dict[str, Any]:
-        return {"masked": image}
-
-    def valid_pixel_fraction(self, image: Any, band: str, region: Any, scale: int) -> float:
-        return 0.9
-
-    def normalized_difference(self, image: Any, bands: list[str]) -> dict[str, Any]:
-        return {"nd": tuple(bands), "image": image}
-
-    def median_of(self, images: list[Any]) -> dict[str, Any]:
-        self.median_sizes.append(len(images))
-        return {"median": len(images)}
-
-    def subtract(self, image: Any, other: Any) -> dict[str, Any]:
-        return {"delta": (image, other)}
-
-
-class FakeStorage:
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.exports: list[CogKey] = []
-
-    def path_for(self, key: CogKey) -> Path:
-        return self.root / key.relative_path()
-
-    def export_image(
-        self, image: Any, key: CogKey, *, scale: int | None = None, region: Any = None
-    ) -> Path:
-        self.exports.append(key)
-        return self.path_for(key)
-
-
-def _aoi(session: Session) -> Aoi:
-    square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
-    aoi = Aoi(name="Test AOI", geometry=from_shape(MultiPolygon([square]), srid=4326))
-    session.add(aoi)
-    session.flush()
-    return aoi
-
-
-def _observation(session: Session, aoi: Aoi, day: int) -> Observation:
-    obs = Observation(
-        aoi_id=aoi.id,
-        sensor="HLSL30",
-        acquired_at=datetime(2026, 1, day, tzinfo=UTC),
-        source_scene_id=f"scene-{day}",
-    )
-    session.add(obs)
-    session.flush()
-    return obs
-
-
-def _methodology(session: Session) -> MethodologyVersion:
-    return get_or_create_methodology_version(
-        session, name="optical-change", version="1.0.0", parameters={"baseline_window": 5}
-    )
+from tests.fakes import (
+    FakeEarthEngine,
+    FakeStorage,
+    make_aoi,
+    make_methodology,
+    make_observation,
+)
 
 
 def _build_history(
     session: Session, days: list[int], fake_ee: FakeEarthEngine, tmp_path: Path
 ) -> tuple[Aoi, list[Observation], MethodologyVersion]:
     """Create observations on the given days and compute their index rasters."""
-    aoi = _aoi(session)
-    methodology = _methodology(session)
-    observations = [_observation(session, aoi, day) for day in days]
+    aoi = make_aoi(session)
+    methodology = make_methodology(session, parameters={"baseline_window": 5})
+    observations = [make_observation(session, aoi, day=day) for day in days]
     storage = FakeStorage(tmp_path / "indices")
     for obs in observations:
         indices.compute_indices_for_observation(
@@ -142,11 +78,40 @@ def test_computes_delta_against_trailing_median(db_session: Session, tmp_path: P
         assert row.methodology_version_id == methodology.id
         assert row.baseline_window == 5
         assert row.valid_pixel_fraction == 0.9
-        assert row.cog_path.endswith(f"{row.change_type}.tif")
+        # The path carries the change type and the (sanitized) source scene id.
+        assert row.cog_path.endswith(f"{row.change_type}-scene-6.tif")
 
     # Provenance: current + 5 baselines = 6 contributing index rasters per change type.
     sources = db_session.execute(select(ChangeRasterSource)).scalars().all()
     assert len(sources) == 12
+
+
+def test_baseline_excludes_observations_without_index_rasters(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """A prior observation with no index raster (failed export, or pre-methodology)
+    must be excluded from the baseline median, not silently omitted from the recorded
+    provenance while its imagery is still used (re-audit round 3, finding 1)."""
+    fake_ee = FakeEarthEngine()
+    aoi, observations, methodology = _build_history(db_session, [1, 3], fake_ee, tmp_path)
+    # Day-2 observation exists but its index exports failed: no index rasters.
+    make_observation(db_session, aoi, day=2)
+
+    compute_change_products_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=observations[-1],  # day 3
+        methodology=methodology,
+        storage=FakeStorage(tmp_path / "change"),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    # The median reduced only day-1's imagery (not day-2's) for each change type...
+    assert fake_ee.median_sizes == [1, 1]
+    # ...and the recorded provenance matches exactly: current + day-1, per type.
+    sources = db_session.execute(select(ChangeRasterSource)).scalars().all()
+    assert len(sources) == 4  # 2 change types x (current + 1 baseline)
 
 
 def test_no_baseline_is_skipped(db_session: Session, tmp_path: Path) -> None:
@@ -180,6 +145,79 @@ def test_baseline_window_limits_history(db_session: Session, tmp_path: Path) -> 
         ee_module=fake_ee,
     )
     assert fake_ee.median_sizes == [3, 3]
+
+
+def test_frozen_change_rasters_are_not_recomputed(db_session: Session, tmp_path: Path) -> None:
+    """Once a raster's candidates are tracked into events, a re-run must not
+    re-export its COG or rewrite its recorded sources (re-audit R2) — even when a
+    late-arriving observation would change the baseline."""
+    from datetime import UTC, datetime
+
+    from geoalchemy2.shape import from_shape
+    from shapely.geometry import Polygon
+
+    from forest_sentinel.events import track_events_for_aoi
+    from forest_sentinel.models import AOI_SRID, DisturbanceCandidate
+
+    fake_ee = FakeEarthEngine()
+    aoi, observations, methodology = _build_history(db_session, [1, 4], fake_ee, tmp_path)
+    current = observations[-1]
+    products = compute_change_products_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=current,
+        methodology=methodology,
+        storage=FakeStorage(tmp_path / "change"),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+    delta_nbr = next(p.change_raster for p in products if p.change_type == "delta_nbr")
+    sources_before = {
+        (s.change_raster_id, s.index_raster_id)
+        for s in db_session.execute(select(ChangeRasterSource)).scalars()
+        if s.change_raster_id == delta_nbr.id
+    }
+
+    # Track a candidate from the ΔNBR raster into an event: the raster is now frozen.
+    ring = Polygon([(0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.1, 0.2), (0.1, 0.1)])
+    db_session.add(
+        DisturbanceCandidate(
+            change_raster_id=delta_nbr.id,
+            methodology_version_id=methodology.id,
+            geometry=from_shape(ring, srid=AOI_SRID),
+            detected_at=datetime(2026, 1, 4, tzinfo=UTC),
+            area_m2=10_000.0,
+        )
+    )
+    db_session.flush()
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    # A late-arriving observation lands inside the window (would change the baseline).
+    make_observation(db_session, aoi, day=3)
+    rerun_storage = FakeStorage(tmp_path / "rerun")
+    rerun = compute_change_products_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=current,
+        methodology=methodology,
+        storage=rerun_storage,
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    frozen = next(p for p in rerun if p.change_type == "delta_nbr")
+    assert frozen.change_raster.id == delta_nbr.id
+    assert frozen.delta_image is None  # nothing recomputed
+    # Only the unfrozen ΔNDVI product was re-exported.
+    assert [key.product for _, key, _ in rerun_storage.exports] == ["delta_ndvi"]
+    # The frozen raster's provenance is untouched.
+    sources_after = {
+        (s.change_raster_id, s.index_raster_id)
+        for s in db_session.execute(select(ChangeRasterSource)).scalars()
+        if s.change_raster_id == delta_nbr.id
+    }
+    assert sources_after == sources_before
 
 
 def test_rerun_replaces_sources(db_session: Session, tmp_path: Path) -> None:

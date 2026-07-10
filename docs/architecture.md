@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the architecture of Open Forest Sentinel as defined by the project README. It is intentionally faithful to that source; design choices not stated in the README are flagged as **TBD**.
+This document describes the architecture of Open Forest Sentinel as defined by the project README. It is intentionally faithful to that source; design points the README leaves open are either recorded here once resolved (§5) or listed as still open (§7).
 
 ## 1. Purpose and shape of the system
 
@@ -12,14 +12,21 @@ A defining property is **observation currency**: by using openly available HLS i
 
 ## 2. User-facing deliverable
 
-The product is **not** a set of derived raster files. It is a lightweight dashboard that surfaces:
+The product is **not** a set of derived raster files. It is a lightweight dashboard that surfaces
+the README's ten "Product Deliverable" questions. The **six core questions** ship with the
+Slice 2 dashboard (§5.10):
 
 - where likely logging or forest disturbance is happening
 - when disturbance was first detected
 - how large the affected area is
 - how quickly the disturbance is expanding
-- which detections are new, ongoing, resolved, or uncertain
+- which detections are new, ongoing, resolved, or uncertain (`new`/`ongoing` today; `resolved`/`uncertain` arrive with scheduling and confidence in Slices 3–4, §5.9)
 - what satellite-derived evidence supports each detection
+
+The remaining four — which sensor or method produced a detection, whether it is optical-only /
+radar-only / fused, how quality conditions affect confidence, and how it relates to contextual
+layers — arrive with the confidence model, radar augmentation, and context-layer epics
+(E14–E17).
 
 Derived rasters are internal analytical artifacts that power detection, tracking, visualization, and review.
 
@@ -27,7 +34,7 @@ Derived rasters are internal analytical artifacts that power detection, tracking
 
 The pipeline runs on a schedule end-to-end. **Imagery access and raster computation run server-side in Google Earth Engine (EE); the Compute Engine VM orchestrates EE, then ingests the exported products.** See [§4a — Imagery access & compute decision](#4a-imagery-access--compute-decision-google-earth-engine) for the rationale.
 
-1. **GitHub Actions** runs on a cron schedule and triggers the pipeline.
+1. **GitHub Actions** runs on a cron schedule and triggers the pipeline. *(Target design — the shipped scheduler today is a systemd timer on the VM; the Actions workflow exists but is disabled until Slice 3 / E11. See `DEPLOYMENT.md` §7.)*
 2. A **Google Compute Engine VM** executes the Python orchestration job (it submits Earth Engine work and ingests results; it does not do the raster math itself).
 3. The pipeline loads the configured AOI geometry.
 4. The pipeline discovers and accesses relevant **HLS analysis-ready imagery through Google Earth Engine** — `ee.ImageCollection` over the `HLSL30` / `HLSS30` v2.0 collections, filtered to the AOI and time window. NASA HLS remains the source dataset; Earth Engine is the access and compute substrate.
@@ -74,13 +81,13 @@ GCE VM ── load AOI ──▶ submit Earth Engine work ───────�
 
 | Concern                       | Prototype                                                | Future path                                    |
 |-------------------------------|----------------------------------------------------------|------------------------------------------------|
-| Scheduler / trigger           | GitHub Actions cron                                      | —                                              |
+| Scheduler / trigger           | systemd timer on the VM today; GitHub Actions cron is the target (Slice 3 / E11) | —             |
 | Compute (orchestration)       | Google Compute Engine VM (submits EE work, ingests results) | —                                           |
 | Imagery access & raster compute | Google Earth Engine (`earthengine-api`)                | —                                              |
 | Database                      | PostgreSQL + PostGIS on the same Compute Engine VM       | Cloud SQL for PostgreSQL with PostGIS          |
 | Database access / migrations  | SQLAlchemy 2.0 ORM, GeoAlchemy2 spatial types, Alembic   | —                                              |
 | Language                      | Python                                                   | —                                              |
-| Local raster handling         | rasterio, GDAL, rio-cogeo (ingest / validate EE-exported COGs); numpy | —                                 |
+| Local raster handling         | None — EE-exported COGs are copied to disk as-is         | rasterio / GDAL / rio-cogeo COG validation on ingest (planned bead); numpy |
 | Imagery source                | NASA HLS (`HLSL30` / `HLSS30` v2.0), accessed via Google Earth Engine | —                                 |
 | Raster output format          | Cloud Optimized GeoTIFF (written by EE export)           | —                                              |
 | Raster storage                | Local VM filesystem, e.g. `/data/cogs/` (canonical). GCS used only as a transient EE-export staging area, then cleared | Google Cloud Storage (when COG volume outgrows the free VM disk) |
@@ -129,19 +136,28 @@ The prototype targets **$0/month** for a reasonably small AOI by staying inside 
 
 ## 5. Core domain objects
 
-These are the entities the system tracks. Concrete schemas, columns, and relationships are **TBD** and will be resolved in implementation beads.
+These are the entities the system tracks. Concrete schemas are introduced incrementally, one
+bead per table; the tables realized so far are specified in §5.1–§5.10. Objects listed as
+*planned* are not yet implemented.
 
-| Object                  | Description                                                                              |
-|-------------------------|------------------------------------------------------------------------------------------|
-| `aoi`                   | Configured area of interest geometry and metadata.                                       |
-| `observation`           | One imagery acquisition / date used for analysis. Holds sensor, timestamp, cloud / quality metadata, and source scene identifiers. |
-| `index_raster`          | Derived NBR / NDVI raster metadata.                                                      |
-| `change_raster`         | ΔNBR / ΔNDVI or anomaly raster metadata.                                                 |
-| `disturbance_candidate` | Raw detected disturbance polygon.                                                        |
-| `disturbance_event`     | Tracked logging / disturbance event over time.                                           |
-| `event_observation`     | Per-date measurement of event area, severity, and growth.                                |
-| `manual_review`         | Human validation, notes, uncertainty, false-positive status.                             |
-| `methodology_version`   | Processing and detection method provenance.                                              |
+| Object                  | Status      | Description                                                                              |
+|-------------------------|-------------|------------------------------------------------------------------------------------------|
+| `aoi`                   | implemented | Configured area of interest geometry and metadata.                                       |
+| `observation`           | implemented | One imagery acquisition / date used for analysis. Holds sensor, timestamp, cloud / quality metadata, and source scene identifiers. |
+| `quality_mask`          | implemented | Per-observation QA coverage from Fmask masking (§5.4).                                   |
+| `index_raster`          | implemented | Derived NBR / NDVI raster metadata.                                                      |
+| `change_raster`         | implemented | ΔNBR / ΔNDVI or anomaly raster metadata.                                                 |
+| `change_raster_source`  | implemented | Link table: every `index_raster` that contributed to a `change_raster` (§5.6).           |
+| `disturbance_candidate` | implemented | Raw detected disturbance polygon.                                                        |
+| `disturbance_event`     | implemented | Tracked logging / disturbance event over time.                                           |
+| `event_observation`     | implemented | Per-date measurement of event area, severity, and growth.                                |
+| `methodology_version`   | implemented | Processing and detection method provenance.                                              |
+| `manual_review`         | planned     | Human validation, notes, uncertainty, false-positive status (Slice 3, E8).               |
+| `sensor_source`         | planned     | Source dataset metadata beyond HLS (E16).                                                |
+| `radar_change_raster`   | planned     | Sentinel-1-derived SAR change metadata (E16).                                            |
+| `context_layer`         | planned     | Legal / administrative / infrastructure overlay dataset (E17).                           |
+| `event_context`         | planned     | Relationship between an event and contextual features (E17).                             |
+| `confidence_assessment` | planned     | Structured explanation of an event's confidence level (E15).                             |
 
 Relationships implied by the pipeline:
 
@@ -211,8 +227,12 @@ can only export to Google Cloud Storage, but bulk storage must stay on the VM's 
 3. copies the finished COG from GCS to the deterministic local path, and
 4. **deletes the staging object**.
 
-Deterministic layout: `{root}/{aoi}/{product}/{YYYY-MM-DD}/{file}.tif`, with each free-form
-component sanitized. Config via env: `FOREST_SENTINEL_COG_ROOT` (default `data/cogs/`),
+Deterministic layout: `{root}/{aoi_id}-{aoi_name}/{product}/{YYYY-MM-DD}/{file}.tif`, with each
+free-form component sanitized. The AOI's database id prefixes the name so distinct AOIs whose
+names sanitize identically (e.g. `My AOI` vs `my-aoi`) never share a tree, and the filename
+embeds the source scene id (e.g. `nbr-{source_scene_id}.tif`) so same-day observations — both
+HLS sensors acquire on the same date, and adjacent tiles share dates — never export to the same
+path. Config via env: `FOREST_SENTINEL_COG_ROOT` (default `data/cogs/`),
 `FOREST_SENTINEL_GCS_STAGING_BUCKET`. `LocalDiskStorage` is the only backend today; switching the
 canonical store to GCS later is a swap behind the `Storage` protocol — pipeline code never
 touches GCS or EE directly, only `export_image`. The EE client and the GCS bucket are injected,
@@ -292,8 +312,12 @@ per observation on the masked image and recorded both on the `quality_mask` row 
 **`forest_sentinel.change`** (bead #40) turns per-observation indices into a disturbance signal.
 The baseline is the per-pixel **median** of the index over a trailing window of prior
 observations (`ImageCollection.median()`); the change product is `current − baseline`
-(`subtract`). The delta is exported as a COG and recorded as a `change_raster`. An observation
-with no prior observations has no baseline and is skipped.
+(`subtract`). Only prior observations that **have an `index_raster` under the current
+methodology** participate in the baseline, so the imagery reduced into the median always equals
+the recorded `change_raster_source` provenance — a prior whose index export failed, or that
+predates the methodology, is excluded from the math rather than silently omitted from the
+record. The delta is exported as a COG and recorded as a `change_raster`. An observation with
+no such priors has no baseline and is skipped.
 
 The trailing-window size is configurable (`baseline_window`, **default 5**) and is captured in
 the `methodology_version.parameters` and on the `change_raster` row.
@@ -307,7 +331,9 @@ the `methodology_version.parameters` and on the `change_raster` row.
 **`change_raster_source`** (migration `0006`): composite PK `(change_raster_id, index_raster_id)`,
 `ON DELETE CASCADE` from `change_raster`. Records every contributing `index_raster` — the current
 observation's index plus each baseline observation's index — so a change product's provenance is
-explicit. Re-runs replace the source set.
+explicit. Re-runs replace the source set — unless the raster is **frozen** (any of its candidates
+is tracked into an event, §5.7): a frozen raster's COG and source set are event evidence and are
+never recomputed, even if a late-arriving observation would change the baseline.
 
 ### 5.7 Disturbance candidates
 
@@ -325,7 +351,12 @@ minimum area is enforced both server-side (the EE `Filter`) and client-side as a
 **`disturbance_candidate`** (migration `0007`): `id`, `change_raster_id` (FK, ON DELETE CASCADE),
 `methodology_version_id` (FK), `geometry` (PostGIS `POLYGON` SRID 4326), `detected_at` (the source
 observation's `acquired_at`), `area_m2`, `created_at`; indexed on `change_raster_id`. Re-runs
-delete and re-insert the candidate set for a change raster so rows reflect the latest parameters.
+delete and re-insert the candidate set for a change raster so rows reflect the latest parameters —
+but only while none of that set has been tracked into events. Once any candidate is referenced by
+an `event_observation` (§5.9) it is event history: the raster's candidate set is frozen and
+re-runs return it unchanged, so event footprints and timelines are never invalidated. Applying
+new detection parameters to already-tracked rasters requires a new `methodology_version` (new
+change rasters), not an in-place rewrite.
 
 ### 5.8 Pipeline orchestration
 
@@ -336,14 +367,20 @@ get-or-creates the AOI (idempotent) and the methodology version (which pins the 
 and EE script version), then calls `run_pipeline`, which:
 
 1. discovers HLS observations for the window,
-2. computes NBR/NDVI for every observation,
-3. computes ΔNBR/ΔNDVI against each observation's trailing baseline, and
+2. computes NBR/NDVI for every observation in the window,
+3. computes ΔNBR/ΔNDVI against each windowed observation's trailing baseline (the
+   baseline itself may reach back before the window), and
 4. extracts candidate polygons from each ΔNBR product.
 
 Because compute runs in Earth Engine, every COG export is an **asynchronous batch task**; the
 storage seam blocks and polls each export to `COMPLETED` before the dependent step, so a single
 invocation drives the whole slice synchronously (a submit-and-return mode is a later bead if
-needed). `run_pipeline` returns a `PipelineSummary` with per-stage counts, which the CLI prints.
+needed). Export failures are isolated per observation: a scene whose export fails (or times
+out) is skipped and counted in the summary, partial results are committed, and the CLI exits
+nonzero so the scheduler alerts — one persistently bad export cannot zero out a whole window.
+Runs are serialized per AOI with a transaction-scoped Postgres advisory lock, so a manual
+`forest-sentinel run` alongside the systemd timer waits for the in-flight run instead of racing
+its upserts. `run_pipeline` returns a `PipelineSummary` with per-stage counts, which the CLI prints.
 Without `--since`/`--until`, `run` stays in the Slice 0 load-and-persist behavior. `run_pipeline`
 is pure orchestration over injectable building blocks, so the hallway test
 (`test_run_full_pipeline_produces_candidates`) exercises the full thread against a stubbed
@@ -360,14 +397,19 @@ per E9), `geometry` (PostGIS `MULTIPOLYGON` SRID 4326 — the unioned footprint)
 
 **`event_observation`** (migration `0008`) is one per-date measurement of an event, produced by a
 single candidate: `id`, `event_id` (FK, ON DELETE CASCADE), `disturbance_candidate_id` (FK),
-`observed_at`, `area_m2`, `growth_m2` (area added vs the prior measurement; null for the first),
-`created_at`. `UNIQUE (disturbance_candidate_id)` means each candidate contributes to exactly one
-measurement, which makes event tracking idempotent and incremental.
+`observed_at`, `area_m2` (the candidate's single-scene detection area), `growth_m2` (**footprint
+expansion**: the geodesic area, PostGIS `ST_Area` over `geography`, that the candidate added to
+the event's unioned footprint; null for the first measurement — never negative, unlike a naive
+difference of detection areas, which can shrink under partial cloud while the disturbance keeps
+growing), `created_at`. `UNIQUE (disturbance_candidate_id)` means each candidate contributes to
+exactly one measurement, which makes event tracking idempotent and incremental.
 
 **`forest_sentinel.events`** implements the **spatial-overlap** tracking algorithm
 (`track_events_for_aoi`): the AOI's not-yet-tracked candidates are processed in detection order;
-a candidate that intersects an existing event's footprint (PostGIS `ST_Intersects`) extends it,
-otherwise it starts a new event. The pipeline (`run_pipeline`) calls tracking as its final stage,
+a candidate that intersects an existing event's footprint (PostGIS `ST_Intersects`) **and shares
+its methodology version** extends it, otherwise it starts a new event — an event records one
+`methodology_version_id` as provenance, so candidates from a different methodology start new
+events rather than falsifying it. The pipeline (`run_pipeline`) calls tracking as its final stage,
 so a single `forest-sentinel run` goes discover → indices → change → candidates → **events**, and
 the per-stage summary reports events created and event-observations tracked.
 
@@ -380,12 +422,15 @@ serving a read-only, unauthenticated view over PostGIS — the resolved Slice 2 
 - `GET /` — a static Leaflet map page (`static/index.html`) that consumes the API.
 - `GET /api/aois` — AOIs with event counts.
 - `GET /api/aois/{id}/events` — the AOI's events as a GeoJSON `FeatureCollection` (status, first/
-  last detected, latest area, observation count).
-- `GET /api/events/{id}` — event detail: footprint geometry, the measurement **timeline** (area +
-  growth), and **supporting evidence** (the source ΔNBR change rasters).
+  last detected, cumulative footprint area, latest detection area, observation count).
+- `GET /api/events/{id}` — event detail: footprint geometry and area, the measurement
+  **timeline** (per-scene detection area + footprint growth), and **supporting evidence** (the
+  source ΔNBR change rasters).
 
-Together these answer the six README "Product Deliverable" questions — where (geometry), when first
-detected, size, expansion rate (timeline growth), status, and supporting evidence. The database
+Together these answer the six core README "Product Deliverable" questions (§2) — where
+(geometry), when first detected, size (footprint area), expansion rate (timeline footprint
+growth), status, and supporting evidence; the README's remaining deliverable questions arrive
+with E14–E17. The database
 session is an injectable dependency (`get_session`), so endpoints are tested headlessly with
 FastAPI's `TestClient` against a transactional session; no Earth Engine or storage access occurs
 in the dashboard.
@@ -397,6 +442,15 @@ in the dashboard.
 - **Temporal currency.** Scheduling and sensor revisit cadence are designed so detections refresh more often than weekly for small-to-medium AOIs.
 - **Provenance.** Every derived artifact is traceable to its source observations and to the `methodology_version` that produced it.
 
-## 7. Out of scope (for this document)
+## 7. Open design points
 
-Anything not asserted by the README is out of scope here. In particular: detection algorithm thresholds, polygon-tracking algorithm, dashboard framework choice, authentication model, and concrete database schemas. These are **TBD** and will be settled in implementation beads under the relevant epics.
+Earlier revisions listed detection thresholds, the tracking algorithm, the dashboard framework,
+and the concrete schemas as TBD; those are now resolved and recorded in §5.1–§5.10. The points
+that remain genuinely open, to be settled in implementation beads under the relevant epics:
+
+- Retention policy for COGs and observations (the VM disk is finite; see §4b).
+- The confidence scoring rule and `confidence_assessment` schema (E15, Slice 4).
+- The manual-review workflow, its schema, and the authentication / access model for review
+  (and any future non-read-only dashboard surface) (E8, Slice 3).
+- Radar processing parameters and the `radar_change_raster` / `sensor_source` schemas (E16).
+- Context-layer ingestion and the `context_layer` / `event_context` schemas (E17).

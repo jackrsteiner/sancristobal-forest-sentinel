@@ -24,12 +24,23 @@ from forest_sentinel import earthengine
 COG_ROOT_ENV_VAR = "FOREST_SENTINEL_COG_ROOT"
 GCS_STAGING_BUCKET_ENV_VAR = "FOREST_SENTINEL_GCS_STAGING_BUCKET"
 DEFAULT_COG_ROOT = "data/cogs/"
+# A stuck (non-terminal) EE task must not wedge the pipeline forever; generous
+# because large-AOI exports can legitimately take a long time.
+DEFAULT_EXPORT_TIMEOUT_SECONDS = 3600.0
 
 _SAFE_COMPONENT = re.compile(r"[^a-z0-9._-]+")
 
 
 class StorageError(RuntimeError):
     """Raised when a COG cannot be exported, staged, or copied to local disk."""
+
+
+class StorageConfigurationError(StorageError):
+    """Raised when storage cannot be *built* (missing configuration).
+
+    Distinct from run-time export failures so callers can tell "fix your
+    environment" apart from "this export failed".
+    """
 
 
 def _sanitize(component: str) -> str:
@@ -112,6 +123,7 @@ class LocalDiskStorage:
         *,
         ee_module: Any = earthengine,
         poll_interval_seconds: float = 5.0,
+        timeout_seconds: float | None = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._root = root
@@ -119,6 +131,7 @@ class LocalDiskStorage:
         self._staging = staging
         self._ee = ee_module
         self._poll_interval = poll_interval_seconds
+        self._timeout = timeout_seconds
         self._sleep = sleep
 
     def path_for(self, key: CogKey) -> Path:
@@ -140,16 +153,28 @@ class LocalDiskStorage:
         blob_name = f"{prefix}.tif"
         destination = self.path_for(key)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        self._staging.download_to(blob_name, destination)
-        self._staging.delete(blob_name)
+        # Staging errors (missing object, GCS hiccup) must surface as StorageError so
+        # the pipeline's per-observation isolation applies, not as raw GCS exceptions.
+        try:
+            self._staging.download_to(blob_name, destination)
+            self._staging.delete(blob_name)
+        except Exception as exc:
+            raise StorageError(f"staging copy/clear failed for {blob_name!r}: {exc}") from exc
         return destination
 
     def _await_completion(self, task: Any, prefix: str) -> None:
+        waited = 0.0
         state = self._ee.export_task_state(task)
         while state != earthengine.TASK_STATE_COMPLETED:
             if self._ee.is_terminal_failure(state):
                 raise StorageError(f"Earth Engine export {prefix!r} ended in state {state}")
+            if self._timeout is not None and waited >= self._timeout:
+                raise StorageError(
+                    f"Earth Engine export {prefix!r} timed out after {self._timeout:.0f}s "
+                    f"in state {state}"
+                )
             self._sleep(self._poll_interval)
+            waited += self._poll_interval
             state = self._ee.export_task_state(task)
 
 
@@ -158,7 +183,7 @@ def local_disk_storage_from_env(staging: StagingBucket | None = None) -> LocalDi
     root = Path(os.environ.get(COG_ROOT_ENV_VAR, DEFAULT_COG_ROOT))
     bucket_name = os.environ.get(GCS_STAGING_BUCKET_ENV_VAR)
     if not bucket_name:
-        raise StorageError(f"{GCS_STAGING_BUCKET_ENV_VAR} is not set")
+        raise StorageConfigurationError(f"{GCS_STAGING_BUCKET_ENV_VAR} is not set")
     if staging is None:
         staging = GcsStagingBucket(bucket_name)
     return LocalDiskStorage(root, bucket_name, staging)

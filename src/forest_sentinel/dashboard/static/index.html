@@ -65,6 +65,9 @@
       async function loadEvents(aoiId) {
         const collection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
         if (eventsLayer) map.removeLayer(eventsLayer);
+        // Drop layer references from the previous AOI so clicks can't zoom to
+        // layers that are no longer on the map.
+        Object.keys(layersById).forEach((id) => delete layersById[id]);
         eventsLayer = L.geoJSON(collection, {
           style: (f) => ({
             color: f.properties.status === "ongoing" ? "#c0392b" : "#2980b9",
@@ -94,7 +97,7 @@
             `<strong>Event #${p.id}</strong> ` +
             `<span class="status-${p.status}">${p.status}</span>` +
             `<div class="muted">first detected ${fmtDate(p.first_detected_at)} · ` +
-            `latest area ${fmtArea(p.latest_area_m2)} · ${p.observation_count} obs</div>`;
+            `footprint ${fmtArea(p.footprint_area_m2)} · ${p.observation_count} obs</div>`;
           div.onclick = () => showEvent(p.id);
           container.appendChild(div);
         });
@@ -112,8 +115,8 @@
         const rows = detail.timeline
           .map(
             (m) =>
-              `<div class="timeline">${fmtDate(m.observed_at)}: ${fmtArea(m.area_m2)}` +
-              (m.growth_m2 != null ? ` (Δ ${fmtArea(m.growth_m2)})` : "") +
+              `<div class="timeline">${fmtDate(m.observed_at)}: detected ${fmtArea(m.area_m2)}` +
+              (m.growth_m2 != null ? ` (footprint +${fmtArea(m.growth_m2)})` : "") +
               `</div>`,
           )
           .join("");

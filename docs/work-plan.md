@@ -38,7 +38,7 @@ Set up the repository so beads can be implemented, tested, and shipped.
 Make AOI deployability a first-class, code-free configuration surface.
 
 - Load a configured AOI geometry (per README step 3).
-- Validate AOI metadata (name, geometry, CRS, etc. — fields **TBD**).
+- Validate AOI metadata — resolved: a non-empty `properties.name` plus a valid WGS 84 `Polygon`/`MultiPolygon` (implemented in `src/forest_sentinel/aoi.py`).
 - Persist AOI records in PostGIS (`aoi` domain object).
 
 **Acceptance:** the pipeline can be pointed at an arbitrary AOI without code changes.
@@ -57,13 +57,13 @@ Compute per-observation vegetation / disturbance indices (README step 5).
 
 - `NBR  = (NIR - SWIR2) / (NIR + SWIR2)`
 - `NDVI = (NIR - RED)  / (NIR + RED)`
-- Write outputs as Cloud Optimized GeoTIFFs (README step 10).
+- Write outputs as Cloud Optimized GeoTIFFs (README step 13).
 - Record `index_raster` metadata in PostGIS.
 
 **Acceptance:** for each `observation`, NBR and NDVI COGs are produced and indexed.
 
 ### E5 — Change products
-Compute change products such as ΔNBR / ΔNDVI or other anomaly measures (README step 6).
+Compute change products such as ΔNBR / ΔNDVI or other anomaly measures (README step 7).
 
 - Produce `change_raster`s as COGs.
 - Record provenance back to source `observation`s and `index_raster`s.
@@ -71,19 +71,19 @@ Compute change products such as ΔNBR / ΔNDVI or other anomaly measures (README
 **Acceptance:** for an AOI with sufficient observations, change rasters are produced on schedule.
 
 ### E6 — Disturbance candidates
-Convert change signals into candidate disturbance polygons (README step 7).
+Convert change signals into candidate disturbance polygons (README step 8).
 
 - Persist `disturbance_candidate`s in PostGIS with geometry and provenance.
-- Detection thresholds and algorithm: **TBD** in beads.
+- Detection thresholds and algorithm — resolved: ΔNBR < −0.25 + `reduceToVectors` + minimum-area filter (see "Open questions → Resolved" and `docs/architecture.md` §5.7).
 
 **Acceptance:** the pipeline emits candidate polygons for real change signals over a test AOI.
 
 ### E7 — Event tracking
-Track candidate polygons over time as disturbance events (README step 8).
+Track candidate polygons over time as disturbance events (README step 9).
 
 - Maintain `disturbance_event`s spanning multiple dates.
 - Capture per-date measurements as `event_observation`s (area, severity, growth).
-- Tracking algorithm: **TBD** in beads.
+- Tracking algorithm — resolved: spatial overlap, earliest event wins, same methodology version only (see `docs/architecture.md` §5.9).
 
 **Acceptance:** repeated runs over the same AOI produce a stable, growing record of events with per-date measurements.
 
@@ -101,13 +101,13 @@ Tag every derived artifact with the processing / detection method that produced 
 **Acceptance:** every `index_raster`, `change_raster`, `disturbance_candidate`, and `disturbance_event` references a `methodology_version`.
 
 ### E10 — Dashboard
-Deliver the lightweight web dashboard, backed by PostGIS (README §"Product Deliverable", step 9, and stack).
+Deliver the lightweight web dashboard, backed by PostGIS (README §"Product Deliverable", step 12, and stack).
 
 - Maps, timelines, event detail views, AOI summary metrics.
-- Surfaces: where, when first detected, size, expansion rate, status (new / ongoing / resolved / uncertain), supporting evidence.
-- Framework choice: **TBD**.
+- Surfaces: where, when first detected, size, expansion rate, status (`new`/`ongoing` today; `resolved`/`uncertain` arrive with Slices 3–4), supporting evidence.
+- Framework — resolved: FastAPI + Leaflet (see `docs/architecture.md` §5.10).
 
-**Acceptance:** a user can answer all six questions listed in the README "Product Deliverable" section from the dashboard.
+**Acceptance:** a user can answer the six core README "Product Deliverable" questions from the dashboard — where, when first detected, size, expansion rate, status, and supporting evidence. (The README's remaining deliverable questions — sensor/method attribution, optical-vs-radar basis, quality-affected confidence, contextual evidence — are delivered by E14–E17, not this epic.)
 
 ### E11 — Scheduled execution
 Run the end-to-end pipeline on a cron schedule on a Google Compute Engine VM, triggered by GitHub Actions (README steps 1–2).
@@ -127,7 +127,7 @@ Store COGs on the **VM's local filesystem** (e.g. `/data/cogs/`) with a determin
 Stand up PostgreSQL + PostGIS on the GCE VM and persist the domain objects from the README.
 
 - Schemas for `aoi`, `observation`, `index_raster`, `change_raster`, `disturbance_candidate`, `disturbance_event`, `event_observation`, `manual_review`, `methodology_version`.
-- Migration / versioning approach: **TBD**.
+- Migration / versioning approach — resolved: SQLAlchemy 2.0 + GeoAlchemy2 + Alembic (see "Open questions → Resolved").
 - Future managed path: Cloud SQL for PostgreSQL with PostGIS.
 
 **Acceptance:** all domain objects are persisted in PostGIS and queryable by the pipeline and dashboard.
@@ -135,9 +135,14 @@ Stand up PostgreSQL + PostGIS on the GCE VM and persist the domain objects from 
 ### E14 — QA masking
 Mask low-quality pixels so detections carry honest quality metadata (README step 6, domain object `quality_mask`).
 
-- Apply HLS QA layers to mask cloud, cloud shadow, haze, water, and missing data.
-- Persist `quality_mask` metadata and retain it on downstream `observation`s and index / change products.
-- Surface mask coverage so the dashboard can distinguish strong evidence from obscured observations.
+> **Status:** the core of this epic shipped early, inside Slice 1 (bead #54): Fmask masking is
+> applied before index computation and the baseline, and `quality_mask` /
+> `valid_pixel_fraction` are persisted (see `docs/architecture.md` §5.4). What remains is
+> surfacing mask coverage in the dashboard (Slice 4).
+
+- Apply the HLS `Fmask` QA layer to mask cloud, cloud shadow, snow/ice, and high aerosol — water and low/moderate aerosol are deliberately kept (`docs/architecture.md` §5.4). *(shipped)*
+- Persist `quality_mask` metadata and retain it on downstream `observation`s and index / change products. *(shipped)*
+- Surface mask coverage so the dashboard can distinguish strong evidence from obscured observations. *(remaining)*
 
 **Acceptance:** index and change products are computed over masked inputs, and every derived artifact records the quality conditions it was produced under.
 
@@ -191,7 +196,7 @@ This map is the *horizontal* view. The "Vertical slices" section below is the *d
 
 The epics above describe *where code lives*. Vertical slices describe *what working capability ships and when*. Each slice is a thin end-to-end thread across several epics and ends in a concrete hallway test. Build the thinnest slice first (a "walking skeleton") and deepen it; do not finish one horizontal epic at a time. Each slice is tracked as a GitHub milestone.
 
-Slice 0 is complete and Slice 1 is decomposed into filed beads (see "Slice bead breakdowns" below). Slices 2–3 have bead outlines that require a dedicated planning pass before implementation; Slices 4–6 are sketched at the table level only.
+Slices 0–2 are complete: Slice 1 shipped as beads #35–#42 (plus QA masking, #54, pulled forward from E14), and Slice 2 shipped event tracking and the FastAPI + Leaflet dashboard (see `docs/architecture.md` §5.9–§5.10 for the resolved designs). Slice 3 has a bead outline that requires a dedicated planning pass before implementation; Slices 4–6 are sketched at the table level only.
 
 | Slice | Capability delivered | Epics touched | Hallway test |
 |-------|----------------------|---------------|--------------|
@@ -199,7 +204,7 @@ Slice 0 is complete and Slice 1 is decomposed into filed beads (see "Slice bead 
 | **Slice 1 — Optical change detection** | AOI → HLS observations → NBR/NDVI COGs → ΔNBR vs. baseline → candidate disturbance polygons in PostGIS. | E3, E4, E5, E6, E12, E9, E13 | Run over a small test AOI and eyeball the emitted candidate polygons on a map or GeoJSON dump. |
 | **Slice 2 — Events + dashboard** | Track candidates over time into disturbance events with per-date measurements; stand up the lightweight web dashboard. | E7, E10 | Open the dashboard and see events on a map with timelines, sizes, and status. |
 | **Slice 3 — Scheduling + review** | Run the pipeline on a GitHub Actions cron schedule; let a human validate detections. | E11, E8 | A scheduled run refreshes the dashboard unattended; a reviewer can mark an event reviewed, false-positive, or uncertain. |
-| **Slice 4 — QA & confidence hardening** | Cloud/shadow/haze masking on inputs and a transparent confidence model on outputs. | E14, E15 | Detections show honest quality metadata and an explained confidence level in the dashboard. |
+| **Slice 4 — QA & confidence hardening** | A transparent confidence model on outputs, plus the remaining QA hardening (Fmask masking itself shipped early, inside Slice 1 — see E14; what remains is surfacing quality metadata in the dashboard). | E14 (residual), E15 | Detections show honest quality metadata and an explained confidence level in the dashboard. |
 | **Slice 5 — Radar augmentation** | Sentinel-1 GRD backscatter change feeding the existing event model. | E16, E13 | The pipeline produces radar change products and radar-derived candidates for a configured AOI. |
 | **Slice 6 — Context layers** | Concessions, roads, rivers, and other context joined to disturbance events. | E17, E10 | The dashboard shows how a detection relates to concessions, protected areas, roads, and rivers. |
 
@@ -224,17 +229,19 @@ Architectural decisions baked into these beads (see [`docs/architecture.md` §4a
 
 > **Optional Slice 1 addition.** Because the `Fmask` QA band ships with both HLS collections, QA masking (E14) is nearly free in EE and may be pulled into Slice 1 as an additional bead, rather than waiting for Slice 4. Decide during the Slice 1 re-plan.
 
-### Slice 2 — bead outline
+### Slice 2 — shipped
 
-> **OUTLINE ONLY — not ready for agentic work.** These beads are a sketch. Before any are implemented, this slice needs a dedicated planning pass that (a) resolves the open design questions below and (b) expands each into a full `agent-bead` issue. Do not file or start these as-is.
+Slice 2 is implemented and merged. The design questions its planning pass resolved (recorded in
+`docs/architecture.md` §5.9–§5.10):
 
-Open questions to resolve first: the candidate→event **tracking algorithm**; the **dashboard framework** and hosting; the dashboard **auth / access model**.
+- Candidate→event tracking algorithm: **spatial overlap** — a candidate that intersects an
+  existing event's footprint extends it (earliest event wins), otherwise it starts a new event.
+- Dashboard framework: **FastAPI + Leaflet**, self-hosted on the VM.
+- Dashboard auth / access model: **read-only, unauthenticated** in this slice; reach it over an
+  SSH tunnel (see `DEPLOYMENT.md` §6). Auth is revisited with the review workflows (Slice 3).
 
-- `disturbance_event` + `event_observation` tables + models (E7, E13).
-- Candidate→event tracking algorithm (E7) — *needs design*.
-- Dashboard backend / API (E10) — *needs framework decision*.
-- Dashboard UI: map + timeline + event detail + AOI summary (E10).
-- Wire event tracking into the pipeline run (E7).
+Delivered: `disturbance_event` + `event_observation` tables and models (migration `0008`),
+`events.py` tracking wired into `forest-sentinel run`, and the dashboard backend / API + map UI.
 
 ### Slice 3 — bead outline
 
@@ -251,13 +258,13 @@ Depends on Slice 2. Open questions to resolve first: the review UI shape (tied t
 
 These are points the README does not resolve. They should be answered inside the relevant epic and recorded in `docs/architecture.md` once decided.
 
-- Concrete table schemas for the Slice 2–3 domain objects (`disturbance_event`, `event_observation`, `manual_review`).
-- The polygon-tracking algorithm used to assemble events from candidates (Slice 2).
-- Dashboard framework and hosting (Slice 2).
-- Authentication / access model for the dashboard and review workflows (Slices 2–3).
+- Concrete table schema for `manual_review` (Slice 3).
+- Authentication / access model for the review workflows (Slice 3; the Slice 2 dashboard shipped read-only and unauthenticated).
 - Retention policy for COGs and observations.
 
 **Resolved:**
+
+- `disturbance_event` / `event_observation` schemas, the candidate→event tracking algorithm (spatial overlap, earliest event wins), and the dashboard framework and hosting (FastAPI + Leaflet on the VM, read-only, no auth) — Slice 2 planning pass; see `docs/architecture.md` §5.9–§5.10.
 
 - Migration tooling for PostgreSQL + PostGIS — SQLAlchemy 2.0 + GeoAlchemy2 + Alembic (bead #22; see `docs/architecture.md`).
 - Imagery access & raster compute — **Google Earth Engine** (server-side): access HLS v2.0 `HLSL30` / `HLSS30`, compute indices, change products, and candidates server-side, and export COGs via a transient GCS staging area to the VM's local disk. (See `docs/architecture.md` §4a/§4b; recorded by beads #38–#41.)

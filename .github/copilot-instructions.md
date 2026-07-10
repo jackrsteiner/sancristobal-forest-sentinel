@@ -23,19 +23,19 @@ Match the prototype stack described in the README. Do not swap components withou
 
 - **Language:** Python.
 - **Imagery access & raster compute:** Google Earth Engine (`earthengine-api`). HLS access, indices, change products, and candidate polygonization run server-side in EE, which exports COGs to GCS. See `docs/architecture.md` §4a.
-- **Local raster handling:** rasterio, GDAL, rio-cogeo (ingest / validate EE-exported COGs); numpy.
+- **Local raster handling (planned, not yet a dependency):** rasterio, GDAL, rio-cogeo (COG validation on ingest is a future bead); numpy. Today EE-exported COGs are copied to disk as-is — do not assume these libraries are available.
 - **Imagery source:** NASA HLS (`HLSL30` / `HLSS30`), accessed via Google Earth Engine.
 - **Raster output format:** Cloud Optimized GeoTIFF (written by EE export).
 - **Raster storage:** local VM filesystem (e.g. `/data/cogs/`) for $0 cost. EE exports to a transient GCS staging area, which the storage layer copies to local disk and then clears. Isolate storage access, the export-task lifecycle, and the copy-to-disk step behind one interface.
 - **Database:** PostgreSQL + PostGIS on the same Compute Engine VM (prototype). The future path is Cloud SQL for PostgreSQL with PostGIS.
 - **Compute:** Google Compute Engine VM (orchestrates Earth Engine and ingests results).
-- **Scheduler:** GitHub Actions cron.
+- **Scheduler:** GitHub Actions cron is the target (Slice 3 / E11); the shipped scheduler today is a systemd timer on the VM (see `DEPLOYMENT.md` §7).
 - **Dashboard:** lightweight web application backed by PostGIS.
 - **Versioning / CI:** GitHub.
 
 ## Domain objects
 
-The system tracks: `aoi`, `observation`, `index_raster`, `change_raster`, `disturbance_candidate`, `disturbance_event`, `event_observation`, `manual_review`, `methodology_version`. Use these names in code, schemas, and docs. If you need a new domain object, propose it in a bead — do not invent one inline.
+The system tracks (implemented): `aoi`, `observation`, `quality_mask`, `index_raster`, `change_raster`, `change_raster_source`, `disturbance_candidate`, `disturbance_event`, `event_observation`, `methodology_version`. Planned (see `docs/architecture.md` §5): `manual_review`, `sensor_source`, `radar_change_raster`, `context_layer`, `event_context`, `confidence_assessment`. Use these names in code, schemas, and docs. If you need a new domain object, propose it in a bead — do not invent one inline.
 
 ## How work is organized
 

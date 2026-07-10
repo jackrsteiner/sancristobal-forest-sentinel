@@ -61,9 +61,11 @@ fi
 
 echo "==> Starting PostgreSQL + PostGIS and applying migrations"
 uv sync
-docker compose up -d
+# sudo: the docker-group membership granted above does not apply to the current
+# login session, so plain `docker` would fail on the first (fresh-VM) run.
+sudo docker compose up -d
 for _ in $(seq 1 30); do
-    docker compose exec -T db pg_isready -U forest_sentinel >/dev/null 2>&1 && break
+    sudo docker compose exec -T db pg_isready -U forest_sentinel >/dev/null 2>&1 && break
     sleep 2
 done
 set -a; . "${APP_DIR}/.env"; set +a

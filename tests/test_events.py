@@ -1,79 +1,27 @@
 from datetime import UTC, datetime
 
-from geoalchemy2.shape import from_shape, to_shape
-from shapely.geometry import MultiPolygon, Polygon
-from sqlalchemy import select
+import pytest
+from geoalchemy2.shape import to_shape
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel.events import (
     EVENT_STATUS_NEW,
     EVENT_STATUS_ONGOING,
+    footprint_area_m2,
     track_events_for_aoi,
 )
-from forest_sentinel.methodology import get_or_create_methodology_version
 from forest_sentinel.models import (
     Aoi,
-    ChangeRaster,
-    DisturbanceCandidate,
     DisturbanceEvent,
     EventObservation,
     MethodologyVersion,
-    Observation,
 )
+from tests.fakes import make_aoi, make_candidate, make_methodology
 
 
 def _aoi_and_methodology(session: Session) -> tuple[Aoi, MethodologyVersion]:
-    aoi = Aoi(
-        name="Test AOI",
-        geometry=from_shape(
-            MultiPolygon([Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])]), srid=4326
-        ),
-    )
-    session.add(aoi)
-    session.flush()
-    methodology = get_or_create_methodology_version(
-        session, name="optical-change", version="1.0.0", parameters={}
-    )
-    return aoi, methodology
-
-
-def _candidate(
-    session: Session,
-    aoi: Aoi,
-    methodology: MethodologyVersion,
-    *,
-    day: int,
-    ring: list[tuple[float, float]],
-    area_m2: float,
-) -> DisturbanceCandidate:
-    detected = datetime(2026, 1, day, tzinfo=UTC)
-    obs = Observation(
-        aoi_id=aoi.id,
-        sensor="HLSL30",
-        acquired_at=detected,
-        source_scene_id=f"scene-{day}",
-    )
-    session.add(obs)
-    session.flush()
-    change = ChangeRaster(
-        observation_id=obs.id,
-        methodology_version_id=methodology.id,
-        change_type="delta_nbr",
-        cog_path=f"/cogs/{day}.tif",
-        baseline_window=5,
-    )
-    session.add(change)
-    session.flush()
-    candidate = DisturbanceCandidate(
-        change_raster_id=change.id,
-        methodology_version_id=methodology.id,
-        geometry=from_shape(Polygon(ring), srid=4326),
-        detected_at=detected,
-        area_m2=area_m2,
-    )
-    session.add(candidate)
-    session.flush()
-    return candidate
+    return make_aoi(session), make_methodology(session)
 
 
 # Two overlapping squares (share the 0.1..0.2 strip) and one disjoint square.
@@ -82,10 +30,16 @@ _PATCH_A_GROWN = [(0.15, 0.1), (0.3, 0.1), (0.3, 0.2), (0.15, 0.2), (0.15, 0.1)]
 _PATCH_B = [(0.6, 0.6), (0.7, 0.6), (0.7, 0.7), (0.6, 0.7), (0.6, 0.6)]
 
 
+def _geodesic_area(session: Session, ring: list[tuple[float, float]]) -> float:
+    """Reference geodesic area of a ring, via the same PostGIS geography math."""
+    wkt = "POLYGON((" + ", ".join(f"{x} {y}" for x, y in ring) + "))"
+    return float(session.execute(select(func.ST_Area(func.ST_GeogFromText(wkt)))).scalar_one())
+
+
 def test_overlapping_candidates_form_one_event(db_session: Session) -> None:
     aoi, methodology = _aoi_and_methodology(db_session)
-    _candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
-    _candidate(db_session, aoi, methodology, day=8, ring=_PATCH_A_GROWN, area_m2=15_000.0)
+    make_candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    make_candidate(db_session, aoi, methodology, day=8, ring=_PATCH_A_GROWN, area_m2=15_000.0)
 
     result = track_events_for_aoi(db_session, aoi=aoi)
     db_session.commit()
@@ -103,13 +57,20 @@ def test_overlapping_candidates_form_one_event(db_session: Session) -> None:
     )
     assert [o.area_m2 for o in observations] == [10_000.0, 15_000.0]
     assert observations[0].growth_m2 is None
-    assert observations[1].growth_m2 == 5_000.0  # 15000 - 10000
+    # Footprint expansion: the union's geodesic area minus the first patch's.
+    expected_growth = footprint_area_m2(db_session, event.geometry) - _geodesic_area(
+        db_session, _PATCH_A
+    )
+    growth = observations[1].growth_m2
+    assert growth is not None
+    assert growth == pytest.approx(expected_growth, rel=1e-6)
+    assert growth > 0
 
 
 def test_disjoint_candidates_form_separate_events(db_session: Session) -> None:
     aoi, methodology = _aoi_and_methodology(db_session)
-    _candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
-    _candidate(db_session, aoi, methodology, day=2, ring=_PATCH_B, area_m2=8_000.0)
+    make_candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    make_candidate(db_session, aoi, methodology, day=2, ring=_PATCH_B, area_m2=8_000.0)
 
     result = track_events_for_aoi(db_session, aoi=aoi)
     db_session.commit()
@@ -122,7 +83,7 @@ def test_disjoint_candidates_form_separate_events(db_session: Session) -> None:
 
 def test_single_candidate_event_is_new(db_session: Session) -> None:
     aoi, methodology = _aoi_and_methodology(db_session)
-    _candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    make_candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
 
     track_events_for_aoi(db_session, aoi=aoi)
     db_session.commit()
@@ -134,8 +95,8 @@ def test_single_candidate_event_is_new(db_session: Session) -> None:
 
 def test_tracking_is_idempotent(db_session: Session) -> None:
     aoi, methodology = _aoi_and_methodology(db_session)
-    _candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
-    _candidate(db_session, aoi, methodology, day=8, ring=_PATCH_A_GROWN, area_m2=15_000.0)
+    make_candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    make_candidate(db_session, aoi, methodology, day=8, ring=_PATCH_A_GROWN, area_m2=15_000.0)
 
     first = track_events_for_aoi(db_session, aoi=aoi)
     db_session.commit()
@@ -148,10 +109,82 @@ def test_tracking_is_idempotent(db_session: Session) -> None:
     assert len(db_session.execute(select(EventObservation)).scalars().all()) == 2
 
 
+def test_contained_candidate_yields_zero_growth(db_session: Session) -> None:
+    """A later, smaller detection inside the existing footprint adds no area: growth
+    must be ~0, not negative (audit BUG-9)."""
+    aoi, methodology = _aoi_and_methodology(db_session)
+    inner = [(0.12, 0.12), (0.15, 0.12), (0.15, 0.15), (0.12, 0.15), (0.12, 0.12)]
+    make_candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    make_candidate(db_session, aoi, methodology, day=8, ring=inner, area_m2=1_000.0)
+
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    observations = (
+        db_session.execute(select(EventObservation).order_by(EventObservation.observed_at))
+        .scalars()
+        .all()
+    )
+    growth = observations[1].growth_m2
+    assert growth is not None
+    assert growth == pytest.approx(0.0, abs=1.0)  # within 1 m² of zero
+    assert growth >= 0.0
+
+
+def test_candidate_bridging_two_events_attaches_to_the_earliest(db_session: Session) -> None:
+    """A candidate intersecting several events must attach to the earliest, not crash
+    with MultipleResultsFound (audit BUG-3)."""
+    aoi, methodology = _aoi_and_methodology(db_session)
+    make_candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    make_candidate(db_session, aoi, methodology, day=2, ring=_PATCH_B, area_m2=8_000.0)
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+    assert len(db_session.execute(select(DisturbanceEvent)).scalars().all()) == 2
+
+    # A large square covering both existing patches bridges the two events.
+    bridge = [(0.05, 0.05), (0.75, 0.05), (0.75, 0.75), (0.05, 0.75), (0.05, 0.05)]
+    make_candidate(db_session, aoi, methodology, day=9, ring=bridge, area_m2=40_000.0)
+    result = track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    assert (result.events_created, result.events_extended) == (0, 1)
+    events = (
+        db_session.execute(select(DisturbanceEvent).order_by(DisturbanceEvent.first_detected_at))
+        .scalars()
+        .all()
+    )
+    assert len(events) == 2
+    earliest, later = events
+    assert earliest.status == EVENT_STATUS_ONGOING  # the bridge attached here
+    assert earliest.last_detected_at == datetime(2026, 1, 9, tzinfo=UTC)
+    assert later.status == EVENT_STATUS_NEW  # untouched
+
+
+def test_candidates_from_a_new_methodology_start_new_events(db_session: Session) -> None:
+    """An event records one methodology_version_id; a candidate produced under a
+    different methodology must not extend it (re-audit R3)."""
+    aoi, methodology_v1 = _aoi_and_methodology(db_session)
+    make_candidate(db_session, aoi, methodology_v1, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    methodology_v2 = make_methodology(db_session, version="2.0.0")
+    make_candidate(db_session, aoi, methodology_v2, day=8, ring=_PATCH_A_GROWN, area_m2=15_000.0)
+    result = track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    # Overlapping geometry, different methodology: a second event, not an extension.
+    assert (result.events_created, result.events_extended) == (1, 0)
+    events = (
+        db_session.execute(select(DisturbanceEvent).order_by(DisturbanceEvent.id)).scalars().all()
+    )
+    assert [e.methodology_version_id for e in events] == [methodology_v1.id, methodology_v2.id]
+
+
 def test_event_geometry_unions_extending_candidates(db_session: Session) -> None:
     aoi, methodology = _aoi_and_methodology(db_session)
-    _candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
-    _candidate(db_session, aoi, methodology, day=8, ring=_PATCH_A_GROWN, area_m2=15_000.0)
+    make_candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    make_candidate(db_session, aoi, methodology, day=8, ring=_PATCH_A_GROWN, area_m2=15_000.0)
 
     track_events_for_aoi(db_session, aoi=aoi)
     db_session.commit()

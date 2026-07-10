@@ -139,12 +139,12 @@ flowchart TD
     disk -. serves rasters .-> dash
 ```
 
-1. **GitHub Actions** runs on a schedule and triggers the pipeline.
+1. **GitHub Actions** runs on a schedule and triggers the pipeline. *(Target design — today the shipped scheduler is a systemd timer on the VM; see `DEPLOYMENT.md` §7.)*
 2. A **Google Compute Engine VM** executes the Python orchestration job (it submits Earth Engine work and ingests results).
 3. The pipeline loads the configured AOI geometry.
 4. The pipeline accesses relevant **HLS analysis-ready imagery through Google Earth Engine** (`HLSL30` / `HLSS30`).
 5. Earth Engine computes vegetation/disturbance indices such as NBR and NDVI server-side.
-6. The system applies QA masking for cloud, shadow, haze, water, missing data, or other low-quality observations.
+6. The system applies QA masking — currently the HLS `Fmask` band: cloud, cloud shadow, snow/ice, and high aerosol are masked; water and low/moderate aerosol are deliberately kept (see `docs/architecture.md` §5.4).
 7. The system computes change products such as ΔNBR / ΔNDVI or other anomaly measures against a historical baseline.
 8. Change signals are converted into candidate disturbance polygons.
 9. Candidate polygons are tracked over time as disturbance events.
@@ -156,13 +156,13 @@ flowchart TD
 
 ## Prototype Technology Stack
 
-- **Scheduler / trigger:** GitHub Actions cron
+- **Scheduler / trigger:** GitHub Actions cron (target; today a systemd timer on the VM — see `DEPLOYMENT.md` §7)
 - **Compute:** Google Compute Engine VM
 - **Prototype database:** PostgreSQL + PostGIS running on the same Compute Engine VM
 - **Future managed database option:** Cloud SQL for PostgreSQL with PostGIS
 - **Language:** Python
 - **Imagery access & raster compute:** Google Earth Engine (`earthengine-api`) — server-side index, change, and candidate computation
-- **Local raster handling:** rasterio, GDAL, rio-cogeo (ingest / validate EE-exported COGs); numpy
+- **Local raster handling (planned):** rasterio, GDAL, rio-cogeo (COG validation on ingest is a future bead); numpy. Today EE-exported COGs are copied to disk as-is.
 - **Imagery source, first vertical slice:** NASA HLS (`HLSL30` / `HLSS30`), accessed via Google Earth Engine
 - **Planned radar augmentation:** Sentinel-1 SAR, starting with GRD backscatter / intensity change detection
 - **Possible future reference layers:** GEDI / canopy structure products, ALOS / PALSAR-derived products, night-time lights, infrastructure and legal boundary datasets
@@ -256,6 +256,8 @@ uv run forest-sentinel run \
   [--methodology-name optical-change] [--methodology-version 1.0.0] \
   [--gee-project YOUR_GCP_PROJECT]
 ```
+
+The bracketed flags are optional and shown with their default values.
 
 This discovers HLS observations through Google Earth Engine, computes Fmask-masked NBR/NDVI and ΔNBR/ΔNDVI server-side, polygonizes disturbance candidates, exports COGs to local disk via a transient GCS staging area, persists everything to PostGIS, and prints a per-stage summary. The run is **idempotent** at the AOI level (it reuses the AOI row by name) and blocks while polling each Earth Engine export to completion.
 
