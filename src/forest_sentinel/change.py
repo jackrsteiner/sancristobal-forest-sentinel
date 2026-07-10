@@ -64,22 +64,51 @@ def compute_change_products_for_observation(
 ) -> list[ChangeProduct]:
     """Compute and persist ΔNBR/ΔNDVI for one observation against its trailing baseline.
 
-    An observation with no prior observations in the AOI has no baseline and is skipped
-    (the next run, with one more prior observation, produces deltas).
+    The baseline for each index type is the trailing window of prior observations that
+    have an ``index_raster`` under this methodology — so the imagery reduced into the
+    median always matches the recorded ``change_raster_source`` provenance. An
+    observation with no such priors has no baseline and is skipped (the next run, with
+    one more indexed prior observation, produces deltas).
     """
     region = mapping(to_shape(aoi.geometry))
     date = observation.acquired_at.date().isoformat()
     results: list[ChangeProduct] = []
 
-    # The baseline window and the masked source images are identical for every change
-    # type, so query and build them once (lazily — a fully frozen observation needs
-    # neither) and derive each index from the shared images.
-    baseline_obs: list[Observation] | None = None
+    # Masked source images are shared across change types and built lazily (a fully
+    # frozen observation needs none). The baseline is per index type: only prior
+    # observations that HAVE an index raster under this methodology participate, so
+    # the imagery reduced into the median always equals the recorded
+    # change_raster_source provenance — an observation whose index export failed (or
+    # that predates this methodology) is excluded from the math, not just the record.
+    baseline_cache: dict[str, list[Observation]] = {}
     masked_images: dict[int, Any] = {}
+
+    def baseline_for(index_type: str) -> list[Observation]:
+        if index_type not in baseline_cache:
+            baseline_cache[index_type] = list(
+                session.execute(
+                    select(Observation)
+                    .join(IndexRaster, IndexRaster.observation_id == Observation.id)
+                    .where(Observation.aoi_id == aoi.id)
+                    .where(Observation.acquired_at < observation.acquired_at)
+                    .where(IndexRaster.index_type == index_type)
+                    .where(IndexRaster.methodology_version_id == methodology.id)
+                    .order_by(Observation.acquired_at.desc())
+                    .limit(baseline_window)
+                )
+                .scalars()
+                .all()
+            )
+        return baseline_cache[index_type]
+
+    def masked_image(obs: Observation) -> Any:
+        if obs.id not in masked_images:
+            masked_images[obs.id] = indices.build_masked_image(obs, ee_module=ee_module)
+        return masked_images[obs.id]
 
     def index_image(obs: Observation, index_type: str) -> Any:
         nd_bands = indices.index_bands(obs.sensor)[index_type]
-        return ee_module.normalized_difference(masked_images[obs.id], nd_bands)
+        return ee_module.normalized_difference(masked_image(obs), nd_bands)
 
     for change_type, index_type in CHANGE_TYPES.items():
         # Frozen: the existing raster is evidence for tracked candidates. Recomputing
@@ -97,25 +126,11 @@ def compute_change_products_for_observation(
             )
             continue
 
-        if baseline_obs is None:
-            baseline_obs = list(
-                session.execute(
-                    select(Observation)
-                    .where(Observation.aoi_id == aoi.id)
-                    .where(Observation.acquired_at < observation.acquired_at)
-                    .order_by(Observation.acquired_at.desc())
-                    .limit(baseline_window)
-                )
-                .scalars()
-                .all()
-            )
-            if not baseline_obs:
-                # No baseline: nothing (further) can be computed for this observation.
-                return results
-            masked_images = {
-                obs.id: indices.build_masked_image(obs, ee_module=ee_module)
-                for obs in (observation, *baseline_obs)
-            }
+        baseline_obs = baseline_for(index_type)
+        if not baseline_obs:
+            # No usable baseline for this index type; skip it (the next run, with one
+            # more indexed prior observation, produces the delta).
+            continue
 
         current_image = index_image(observation, index_type)
         baseline_images = [index_image(prior, index_type) for prior in baseline_obs]

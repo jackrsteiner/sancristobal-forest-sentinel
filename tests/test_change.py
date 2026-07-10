@@ -86,6 +86,34 @@ def test_computes_delta_against_trailing_median(db_session: Session, tmp_path: P
     assert len(sources) == 12
 
 
+def test_baseline_excludes_observations_without_index_rasters(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """A prior observation with no index raster (failed export, or pre-methodology)
+    must be excluded from the baseline median, not silently omitted from the recorded
+    provenance while its imagery is still used (re-audit round 3, finding 1)."""
+    fake_ee = FakeEarthEngine()
+    aoi, observations, methodology = _build_history(db_session, [1, 3], fake_ee, tmp_path)
+    # Day-2 observation exists but its index exports failed: no index rasters.
+    make_observation(db_session, aoi, day=2)
+
+    compute_change_products_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=observations[-1],  # day 3
+        methodology=methodology,
+        storage=FakeStorage(tmp_path / "change"),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    # The median reduced only day-1's imagery (not day-2's) for each change type...
+    assert fake_ee.median_sizes == [1, 1]
+    # ...and the recorded provenance matches exactly: current + day-1, per type.
+    sources = db_session.execute(select(ChangeRasterSource)).scalars().all()
+    assert len(sources) == 4  # 2 change types x (current + 1 baseline)
+
+
 def test_no_baseline_is_skipped(db_session: Session, tmp_path: Path) -> None:
     fake_ee = FakeEarthEngine()
     aoi, observations, methodology = _build_history(db_session, [1], fake_ee, tmp_path)

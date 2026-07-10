@@ -312,8 +312,12 @@ per observation on the masked image and recorded both on the `quality_mask` row 
 **`forest_sentinel.change`** (bead #40) turns per-observation indices into a disturbance signal.
 The baseline is the per-pixel **median** of the index over a trailing window of prior
 observations (`ImageCollection.median()`); the change product is `current − baseline`
-(`subtract`). The delta is exported as a COG and recorded as a `change_raster`. An observation
-with no prior observations has no baseline and is skipped.
+(`subtract`). Only prior observations that **have an `index_raster` under the current
+methodology** participate in the baseline, so the imagery reduced into the median always equals
+the recorded `change_raster_source` provenance — a prior whose index export failed, or that
+predates the methodology, is excluded from the math rather than silently omitted from the
+record. The delta is exported as a COG and recorded as a `change_raster`. An observation with
+no such priors has no baseline and is skipped.
 
 The trailing-window size is configurable (`baseline_window`, **default 5**) and is captured in
 the `methodology_version.parameters` and on the `change_raster` row.
