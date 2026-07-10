@@ -3,8 +3,11 @@
 Slice 1 starts from NASA HLS analysis-ready imagery accessed through Earth Engine
 (``docs/architecture.md`` §4a). For a configured AOI and time window this module
 enumerates intersecting images from the two HLS v2.0 collections and records each as
-an ``observation``. Discovery is idempotent: the ``observation`` unique constraint on
-``(aoi_id, source_scene_id)`` means a re-run over the same window adds nothing.
+an ``observation``. Discovery is idempotent — including under concurrency: already-known
+scenes are skipped up front, and inserts go through ``ON CONFLICT DO NOTHING`` on the
+``(aoi_id, source_scene_id)`` unique constraint, so a scene committed by a concurrent
+run (e.g. a manual run alongside the systemd timer) is counted as skipped instead of
+raising ``IntegrityError``.
 """
 
 from collections.abc import Mapping
@@ -15,6 +18,7 @@ from typing import Any
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine
@@ -106,16 +110,25 @@ def discover_observations(
                 skipped += 1
                 continue
             seen_this_run.add(granule.source_scene_id)
-            session.add(
-                Observation(
+            # ON CONFLICT DO NOTHING: a concurrent run may have committed this scene
+            # after our snapshot above; that is a skip, not an IntegrityError. The
+            # RETURNING clause yields a row only when the insert actually happened.
+            inserted_id = session.execute(
+                pg_insert(Observation)
+                .values(
                     aoi_id=aoi.id,
                     sensor=granule.sensor,
                     acquired_at=granule.acquired_at,
                     source_scene_id=granule.source_scene_id,
                     cloud_cover_percent=granule.cloud_cover_percent,
                 )
-            )
-            recorded += 1
+                .on_conflict_do_nothing(constraint="uq_observation_aoi_id_source_scene_id")
+                .returning(Observation.id)
+            ).scalar_one_or_none()
+            if inserted_id is not None:
+                recorded += 1
+            else:
+                skipped += 1
 
     session.flush()
     return DiscoveryResult(discovered=discovered, recorded=recorded, skipped=skipped)

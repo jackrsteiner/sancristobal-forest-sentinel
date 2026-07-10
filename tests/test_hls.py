@@ -4,7 +4,7 @@ from typing import Any
 import pytest
 from geoalchemy2.shape import from_shape
 from shapely.geometry import MultiPolygon, Polygon
-from sqlalchemy import select
+from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel.hls import (
@@ -113,6 +113,45 @@ def test_rerun_is_idempotent(db_session: Session) -> None:
 
     assert (first.recorded, first.skipped) == (1, 0)
     assert (second.recorded, second.skipped) == (0, 1)
+    assert len(db_session.execute(select(Observation)).scalars().all()) == 1
+
+
+def test_concurrent_discovery_is_a_skip_not_a_crash(
+    db_session: Session, migrated_database: Engine
+) -> None:
+    """A scene committed by a concurrent run between our snapshot and our insert must
+    count as skipped, not raise IntegrityError (re-audit R6)."""
+    aoi = _make_aoi(db_session)
+    db_session.commit()
+    aoi_id = aoi.id
+    acquired = datetime(2026, 1, 2, tzinfo=UTC)
+
+    class RacingEarthEngine(FakeEarthEngine):
+        def list_image_properties(
+            self, collection_id: str, region: Any, since: str, until: str
+        ) -> list[dict[str, Any]]:
+            features = super().list_image_properties(collection_id, region, since, until)
+            if features:
+                # Another run commits the same scene *after* discovery's snapshot.
+                with Session(migrated_database) as other:
+                    other.add(
+                        Observation(
+                            aoi_id=aoi_id,
+                            sensor="HLSL30",
+                            acquired_at=acquired,
+                            source_scene_id="L30-race",
+                        )
+                    )
+                    other.commit()
+            return features
+
+    racing = RacingEarthEngine({HLSL30: [_feature("L30-race", _time_ms(2026, 1, 2))]})
+    result = discover_observations(
+        db_session, aoi, since=date(2026, 1, 1), until=date(2026, 1, 31), ee_module=racing
+    )
+    db_session.commit()
+
+    assert (result.discovered, result.recorded, result.skipped) == (1, 0, 1)
     assert len(db_session.execute(select(Observation)).scalars().all()) == 1
 
 
