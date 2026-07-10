@@ -92,12 +92,19 @@ def track_events_for_aoi(session: Session, *, aoi: Aoi) -> TrackingResult:
 def _find_overlapping_event(
     session: Session, aoi: Aoi, candidate: DisturbanceCandidate
 ) -> DisturbanceEvent | None:
-    return session.execute(
-        select(DisturbanceEvent)
-        .where(DisturbanceEvent.aoi_id == aoi.id)
-        .where(func.ST_Intersects(DisturbanceEvent.geometry, candidate.geometry))
-        .order_by(DisturbanceEvent.first_detected_at, DisturbanceEvent.id)
-    ).scalar_one_or_none()
+    # A candidate may intersect several events (e.g. a disturbance growing to bridge
+    # two previously separate ones); it attaches to the earliest.
+    return (
+        session.execute(
+            select(DisturbanceEvent)
+            .where(DisturbanceEvent.aoi_id == aoi.id)
+            .where(func.ST_Intersects(DisturbanceEvent.geometry, candidate.geometry))
+            .order_by(DisturbanceEvent.first_detected_at, DisturbanceEvent.id)
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
 
 
 def _create_event(

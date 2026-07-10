@@ -148,6 +148,35 @@ def test_tracking_is_idempotent(db_session: Session) -> None:
     assert len(db_session.execute(select(EventObservation)).scalars().all()) == 2
 
 
+def test_candidate_bridging_two_events_attaches_to_the_earliest(db_session: Session) -> None:
+    """A candidate intersecting several events must attach to the earliest, not crash
+    with MultipleResultsFound (audit BUG-3)."""
+    aoi, methodology = _aoi_and_methodology(db_session)
+    _candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    _candidate(db_session, aoi, methodology, day=2, ring=_PATCH_B, area_m2=8_000.0)
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+    assert len(db_session.execute(select(DisturbanceEvent)).scalars().all()) == 2
+
+    # A large square covering both existing patches bridges the two events.
+    bridge = [(0.05, 0.05), (0.75, 0.05), (0.75, 0.75), (0.05, 0.75), (0.05, 0.05)]
+    _candidate(db_session, aoi, methodology, day=9, ring=bridge, area_m2=40_000.0)
+    result = track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    assert (result.events_created, result.events_extended) == (0, 1)
+    events = (
+        db_session.execute(select(DisturbanceEvent).order_by(DisturbanceEvent.first_detected_at))
+        .scalars()
+        .all()
+    )
+    assert len(events) == 2
+    earliest, later = events
+    assert earliest.status == EVENT_STATUS_ONGOING  # the bridge attached here
+    assert earliest.last_detected_at == datetime(2026, 1, 9, tzinfo=UTC)
+    assert later.status == EVENT_STATUS_NEW  # untouched
+
+
 def test_event_geometry_unions_extending_candidates(db_session: Session) -> None:
     aoi, methodology = _aoi_and_methodology(db_session)
     _candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
