@@ -68,26 +68,34 @@ def compute_change_products_for_observation(
     date = observation.acquired_at.date().isoformat()
     results: list[ChangeProduct] = []
 
-    for change_type, index_type in CHANGE_TYPES.items():
-        baseline_obs = (
-            session.execute(
-                select(Observation)
-                .where(Observation.aoi_id == aoi.id)
-                .where(Observation.acquired_at < observation.acquired_at)
-                .order_by(Observation.acquired_at.desc())
-                .limit(baseline_window)
-            )
-            .scalars()
-            .all()
+    # The baseline window and the masked source images are identical for every change
+    # type, so query and build them once and derive each index from the shared images.
+    baseline_obs = (
+        session.execute(
+            select(Observation)
+            .where(Observation.aoi_id == aoi.id)
+            .where(Observation.acquired_at < observation.acquired_at)
+            .order_by(Observation.acquired_at.desc())
+            .limit(baseline_window)
         )
-        if not baseline_obs:
-            continue
+        .scalars()
+        .all()
+    )
+    if not baseline_obs:
+        return []
 
-        current_image = indices.build_index_image(observation, index_type, ee_module=ee_module)
-        baseline_images = [
-            indices.build_index_image(prior, index_type, ee_module=ee_module)
-            for prior in baseline_obs
-        ]
+    masked_images = {
+        obs.id: indices.build_masked_image(obs, ee_module=ee_module)
+        for obs in (observation, *baseline_obs)
+    }
+
+    def index_image(obs: Observation, index_type: str) -> Any:
+        nd_bands = indices.index_bands(obs.sensor)[index_type]
+        return ee_module.normalized_difference(masked_images[obs.id], nd_bands)
+
+    for change_type, index_type in CHANGE_TYPES.items():
+        current_image = index_image(observation, index_type)
+        baseline_images = [index_image(prior, index_type) for prior in baseline_obs]
         baseline_median = ee_module.median_of(baseline_images)
         delta = ee_module.subtract(current_image, baseline_median)
 

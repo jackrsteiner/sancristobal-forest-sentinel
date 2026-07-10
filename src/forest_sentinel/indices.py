@@ -56,8 +56,12 @@ def index_bands(sensor: str) -> dict[str, list[str]]:
     }
 
 
-def _masked_image(observation: Observation, *, ee_module: Any) -> Any:
-    """Rebuild the Fmask-masked HLS image for an observation."""
+def build_masked_image(observation: Observation, *, ee_module: Any = earthengine) -> Any:
+    """Rebuild the Fmask-masked HLS image for an observation.
+
+    Public so the change-product module can build each observation's masked image once
+    and derive both indices from it, instead of re-masking per index type.
+    """
     if observation.sensor not in SENSOR_BANDS:
         raise ValueError(f"unsupported sensor for index computation: {observation.sensor!r}")
     collection_id = SENSOR_COLLECTIONS[observation.sensor]
@@ -73,7 +77,7 @@ def build_index_image(
     Reused by the change-product baseline (#40), which needs the index images themselves.
     """
     nd_bands = index_bands(observation.sensor)[index_type]
-    masked = _masked_image(observation, ee_module=ee_module)
+    masked = build_masked_image(observation, ee_module=ee_module)
     return ee_module.normalized_difference(masked, nd_bands)
 
 
@@ -93,7 +97,7 @@ def compute_indices_for_observation(
         raise ValueError(f"unsupported sensor for index computation: {observation.sensor!r}")
 
     region = mapping(to_shape(aoi.geometry))
-    masked = _masked_image(observation, ee_module=ee_module)
+    masked = build_masked_image(observation, ee_module=ee_module)
 
     fraction = qa.measure_valid_fraction(masked, bands.red, region, scale, ee_module=ee_module)
     qa.record_quality_mask(session, observation_id=observation.id, valid_pixel_fraction=fraction)
