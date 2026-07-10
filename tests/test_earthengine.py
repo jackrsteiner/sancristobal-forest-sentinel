@@ -59,6 +59,17 @@ def test_export_task_state_reads_status() -> None:
     assert earthengine.export_task_state(task) == "RUNNING"
 
 
+def test_export_task_state_wraps_ee_failures(fake_ee: MagicMock) -> None:
+    class FakeEEException(Exception):
+        pass
+
+    fake_ee.EEException = FakeEEException
+    task = MagicMock()
+    task.status.side_effect = FakeEEException("transient 500")
+    with pytest.raises(earthengine.EarthEngineError, match="task state"):
+        earthengine.export_task_state(task)
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [("FAILED", True), ("CANCELLED", True), ("RUNNING", False), ("COMPLETED", False)],

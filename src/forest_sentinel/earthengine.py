@@ -72,8 +72,17 @@ def start_image_export_to_gcs(
 
 
 def export_task_state(task: Any) -> str:
-    """Return the current state string of an export task."""
-    state: str = task.status()["state"]
+    """Return the current state string of an export task.
+
+    Wrapped like every other server-touching helper: a transient API failure during
+    the (long) poll loop must surface as ``EarthEngineError`` so the pipeline's
+    per-observation isolation applies.
+    """
+    try:
+        status = task.status()
+    except ee.EEException as exc:
+        raise EarthEngineError(f"failed to read export task state: {exc}") from exc
+    state: str = status["state"]
     return state
 
 
