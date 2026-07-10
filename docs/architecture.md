@@ -397,8 +397,10 @@ exactly one measurement, which makes event tracking idempotent and incremental.
 
 **`forest_sentinel.events`** implements the **spatial-overlap** tracking algorithm
 (`track_events_for_aoi`): the AOI's not-yet-tracked candidates are processed in detection order;
-a candidate that intersects an existing event's footprint (PostGIS `ST_Intersects`) extends it,
-otherwise it starts a new event. The pipeline (`run_pipeline`) calls tracking as its final stage,
+a candidate that intersects an existing event's footprint (PostGIS `ST_Intersects`) **and shares
+its methodology version** extends it, otherwise it starts a new event — an event records one
+`methodology_version_id` as provenance, so candidates from a different methodology start new
+events rather than falsifying it. The pipeline (`run_pipeline`) calls tracking as its final stage,
 so a single `forest-sentinel run` goes discover → indices → change → candidates → **events**, and
 the per-stage summary reports events created and event-observations tracked.
 

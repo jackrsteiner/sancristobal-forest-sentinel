@@ -111,11 +111,15 @@ def _find_overlapping_event(
     session: Session, aoi: Aoi, candidate: DisturbanceCandidate
 ) -> DisturbanceEvent | None:
     # A candidate may intersect several events (e.g. a disturbance growing to bridge
-    # two previously separate ones); it attaches to the earliest.
+    # two previously separate ones); it attaches to the earliest. Only events of the
+    # same methodology version are considered: an event records a single
+    # methodology_version_id as provenance, so mixing versions in one footprint would
+    # falsify it — a new methodology starts new events instead.
     return (
         session.execute(
             select(DisturbanceEvent)
             .where(DisturbanceEvent.aoi_id == aoi.id)
+            .where(DisturbanceEvent.methodology_version_id == candidate.methodology_version_id)
             .where(func.ST_Intersects(DisturbanceEvent.geometry, candidate.geometry))
             .order_by(DisturbanceEvent.first_detected_at, DisturbanceEvent.id)
             .limit(1)

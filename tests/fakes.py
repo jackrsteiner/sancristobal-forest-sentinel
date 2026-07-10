@@ -112,11 +112,11 @@ def make_aoi(session: Session, *, name: str = "Test AOI") -> Aoi:
 
 
 def make_methodology(
-    session: Session, *, parameters: dict[str, Any] | None = None
+    session: Session, *, version: str = "1.0.0", parameters: dict[str, Any] | None = None
 ) -> MethodologyVersion:
-    """Get or create the standard optical-change/1.0.0 methodology version."""
+    """Get or create the standard optical-change methodology version."""
     return get_or_create_methodology_version(
-        session, name="optical-change", version="1.0.0", parameters=parameters or {}
+        session, name="optical-change", version=version, parameters=parameters or {}
     )
 
 

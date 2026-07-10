@@ -160,6 +160,27 @@ def test_candidate_bridging_two_events_attaches_to_the_earliest(db_session: Sess
     assert later.status == EVENT_STATUS_NEW  # untouched
 
 
+def test_candidates_from_a_new_methodology_start_new_events(db_session: Session) -> None:
+    """An event records one methodology_version_id; a candidate produced under a
+    different methodology must not extend it (re-audit R3)."""
+    aoi, methodology_v1 = _aoi_and_methodology(db_session)
+    make_candidate(db_session, aoi, methodology_v1, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    methodology_v2 = make_methodology(db_session, version="2.0.0")
+    make_candidate(db_session, aoi, methodology_v2, day=8, ring=_PATCH_A_GROWN, area_m2=15_000.0)
+    result = track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    # Overlapping geometry, different methodology: a second event, not an extension.
+    assert (result.events_created, result.events_extended) == (1, 0)
+    events = (
+        db_session.execute(select(DisturbanceEvent).order_by(DisturbanceEvent.id)).scalars().all()
+    )
+    assert [e.methodology_version_id for e in events] == [methodology_v1.id, methodology_v2.id]
+
+
 def test_event_geometry_unions_extending_candidates(db_session: Session) -> None:
     aoi, methodology = _aoi_and_methodology(db_session)
     make_candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
