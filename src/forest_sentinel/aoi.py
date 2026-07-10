@@ -8,17 +8,20 @@ says otherwise is rejected.
 """
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from geoalchemy2.shape import from_shape
+from geoalchemy2.shape import from_shape, to_shape
 from shapely.errors import ShapelyError
 from shapely.geometry import MultiPolygon, Polygon, shape
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from forest_sentinel.models import AOI_SRID, Aoi
+
+logger = logging.getLogger(__name__)
 
 # GeoJSON is WGS 84 by definition; an explicit CRS member must agree.
 _ALLOWED_CRS_NAMES = {
@@ -79,10 +82,19 @@ def get_or_create_aoi(session: Session, config: AoiConfig) -> Aoi:
     """Return the AOI row for ``config.name``, creating it if absent.
 
     Pipeline runs are idempotent at the AOI level: re-running over the same AOI reuses
-    its row rather than failing on the unique-name constraint.
+    its row rather than failing on the unique-name constraint. The stored geometry is
+    authoritative — if the config file's geometry has changed, the run still monitors
+    the stored footprint, and a warning says so (mirroring how a changed methodology
+    identity is surfaced rather than silently absorbed).
     """
     existing = session.execute(select(Aoi).where(Aoi.name == config.name)).scalar_one_or_none()
     if existing is not None:
+        if not to_shape(existing.geometry).equals(config.geometry):
+            logger.warning(
+                "AOI %r already exists with a different geometry; the stored footprint "
+                "is used. Create an AOI under a new name to monitor the new geometry.",
+                config.name,
+            )
         return existing
     return persist_aoi(session, config)
 
