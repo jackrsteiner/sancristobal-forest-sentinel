@@ -70,7 +70,7 @@ def extract_candidates_for_change_raster(
     ``event_observation`` FK and silently invalidate event footprints).
     """
     # Frozen: this raster's candidates are already event history; skip re-extraction.
-    if _any_candidate_tracked(session, change_raster.id):
+    if change_raster_is_frozen(session, change_raster.id):
         return _existing_candidates(session, change_raster.id)
 
     methodology = session.get(MethodologyVersion, change_raster.methodology_version_id)
@@ -124,7 +124,12 @@ def _existing_candidates(session: Session, change_raster_id: int) -> list[Distur
     )
 
 
-def _any_candidate_tracked(session: Session, change_raster_id: int) -> bool:
+def change_raster_is_frozen(session: Session, change_raster_id: int) -> bool:
+    """True once any of the raster's candidates is tracked into an event.
+
+    A frozen raster is event evidence: its candidate set must not be replaced (here)
+    and its COG/provenance must not be recomputed (``change.py`` checks this too).
+    """
     return (
         session.execute(
             select(DisturbanceCandidate.id)

@@ -119,6 +119,79 @@ def test_baseline_window_limits_history(db_session: Session, tmp_path: Path) -> 
     assert fake_ee.median_sizes == [3, 3]
 
 
+def test_frozen_change_rasters_are_not_recomputed(db_session: Session, tmp_path: Path) -> None:
+    """Once a raster's candidates are tracked into events, a re-run must not
+    re-export its COG or rewrite its recorded sources (re-audit R2) — even when a
+    late-arriving observation would change the baseline."""
+    from datetime import UTC, datetime
+
+    from geoalchemy2.shape import from_shape
+    from shapely.geometry import Polygon
+
+    from forest_sentinel.events import track_events_for_aoi
+    from forest_sentinel.models import AOI_SRID, DisturbanceCandidate
+
+    fake_ee = FakeEarthEngine()
+    aoi, observations, methodology = _build_history(db_session, [1, 4], fake_ee, tmp_path)
+    current = observations[-1]
+    products = compute_change_products_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=current,
+        methodology=methodology,
+        storage=FakeStorage(tmp_path / "change"),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+    delta_nbr = next(p.change_raster for p in products if p.change_type == "delta_nbr")
+    sources_before = {
+        (s.change_raster_id, s.index_raster_id)
+        for s in db_session.execute(select(ChangeRasterSource)).scalars()
+        if s.change_raster_id == delta_nbr.id
+    }
+
+    # Track a candidate from the ΔNBR raster into an event: the raster is now frozen.
+    ring = Polygon([(0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.1, 0.2), (0.1, 0.1)])
+    db_session.add(
+        DisturbanceCandidate(
+            change_raster_id=delta_nbr.id,
+            methodology_version_id=methodology.id,
+            geometry=from_shape(ring, srid=AOI_SRID),
+            detected_at=datetime(2026, 1, 4, tzinfo=UTC),
+            area_m2=10_000.0,
+        )
+    )
+    db_session.flush()
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    # A late-arriving observation lands inside the window (would change the baseline).
+    make_observation(db_session, aoi, day=3)
+    rerun_storage = FakeStorage(tmp_path / "rerun")
+    rerun = compute_change_products_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=current,
+        methodology=methodology,
+        storage=rerun_storage,
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    frozen = next(p for p in rerun if p.change_type == "delta_nbr")
+    assert frozen.change_raster.id == delta_nbr.id
+    assert frozen.delta_image is None  # nothing recomputed
+    # Only the unfrozen ΔNDVI product was re-exported.
+    assert [key.product for _, key, _ in rerun_storage.exports] == ["delta_ndvi"]
+    # The frozen raster's provenance is untouched.
+    sources_after = {
+        (s.change_raster_id, s.index_raster_id)
+        for s in db_session.execute(select(ChangeRasterSource)).scalars()
+        if s.change_raster_id == delta_nbr.id
+    }
+    assert sources_after == sources_before
+
+
 def test_rerun_replaces_sources(db_session: Session, tmp_path: Path) -> None:
     fake_ee = FakeEarthEngine()
     aoi, observations, methodology = _build_history(db_session, [1, 2, 3], fake_ee, tmp_path)

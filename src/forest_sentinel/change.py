@@ -16,6 +16,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, indices
+from forest_sentinel.candidates import change_raster_is_frozen
 from forest_sentinel.models import (
     Aoi,
     ChangeRaster,
@@ -40,7 +41,9 @@ class ChangeProduct:
     """A persisted change raster plus the EE delta image it was computed from.
 
     The pipeline (#42) reuses ``delta_image`` for candidate extraction (#41) without
-    rebuilding it.
+    rebuilding it. For a **frozen** raster (its candidates are tracked into events)
+    ``delta_image`` is ``None``: nothing was recomputed, and candidate extraction
+    short-circuits before touching it.
     """
 
     change_type: str
@@ -69,31 +72,51 @@ def compute_change_products_for_observation(
     results: list[ChangeProduct] = []
 
     # The baseline window and the masked source images are identical for every change
-    # type, so query and build them once and derive each index from the shared images.
-    baseline_obs = (
-        session.execute(
-            select(Observation)
-            .where(Observation.aoi_id == aoi.id)
-            .where(Observation.acquired_at < observation.acquired_at)
-            .order_by(Observation.acquired_at.desc())
-            .limit(baseline_window)
-        )
-        .scalars()
-        .all()
-    )
-    if not baseline_obs:
-        return []
-
-    masked_images = {
-        obs.id: indices.build_masked_image(obs, ee_module=ee_module)
-        for obs in (observation, *baseline_obs)
-    }
+    # type, so query and build them once (lazily — a fully frozen observation needs
+    # neither) and derive each index from the shared images.
+    baseline_obs: list[Observation] | None = None
+    masked_images: dict[int, Any] = {}
 
     def index_image(obs: Observation, index_type: str) -> Any:
         nd_bands = indices.index_bands(obs.sensor)[index_type]
         return ee_module.normalized_difference(masked_images[obs.id], nd_bands)
 
     for change_type, index_type in CHANGE_TYPES.items():
+        # Frozen: the existing raster is evidence for tracked candidates. Recomputing
+        # would overwrite its COG (same path) and rewrite its recorded sources with a
+        # different baseline — silently invalidating the events derived from it.
+        existing = _get_change_raster(
+            session,
+            observation_id=observation.id,
+            change_type=change_type,
+            methodology_version_id=methodology.id,
+        )
+        if existing is not None and change_raster_is_frozen(session, existing.id):
+            results.append(
+                ChangeProduct(change_type=change_type, change_raster=existing, delta_image=None)
+            )
+            continue
+
+        if baseline_obs is None:
+            baseline_obs = list(
+                session.execute(
+                    select(Observation)
+                    .where(Observation.aoi_id == aoi.id)
+                    .where(Observation.acquired_at < observation.acquired_at)
+                    .order_by(Observation.acquired_at.desc())
+                    .limit(baseline_window)
+                )
+                .scalars()
+                .all()
+            )
+            if not baseline_obs:
+                # No baseline: nothing (further) can be computed for this observation.
+                return results
+            masked_images = {
+                obs.id: indices.build_masked_image(obs, ee_module=ee_module)
+                for obs in (observation, *baseline_obs)
+            }
+
         current_image = index_image(observation, index_type)
         baseline_images = [index_image(prior, index_type) for prior in baseline_obs]
         baseline_median = ee_module.median_of(baseline_images)
@@ -144,6 +167,21 @@ def compute_change_products_for_observation(
     return results
 
 
+def _get_change_raster(
+    session: Session,
+    *,
+    observation_id: int,
+    change_type: str,
+    methodology_version_id: int,
+) -> ChangeRaster | None:
+    return session.execute(
+        select(ChangeRaster)
+        .where(ChangeRaster.observation_id == observation_id)
+        .where(ChangeRaster.change_type == change_type)
+        .where(ChangeRaster.methodology_version_id == methodology_version_id)
+    ).scalar_one_or_none()
+
+
 def _upsert_change_raster(
     session: Session,
     *,
@@ -154,12 +192,12 @@ def _upsert_change_raster(
     baseline_window: int,
     valid_pixel_fraction: float | None,
 ) -> ChangeRaster:
-    existing = session.execute(
-        select(ChangeRaster)
-        .where(ChangeRaster.observation_id == observation_id)
-        .where(ChangeRaster.change_type == change_type)
-        .where(ChangeRaster.methodology_version_id == methodology_version_id)
-    ).scalar_one_or_none()
+    existing = _get_change_raster(
+        session,
+        observation_id=observation_id,
+        change_type=change_type,
+        methodology_version_id=methodology_version_id,
+    )
     if existing is not None:
         existing.cog_path = cog_path
         existing.baseline_window = baseline_window

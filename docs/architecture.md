@@ -327,7 +327,9 @@ the `methodology_version.parameters` and on the `change_raster` row.
 **`change_raster_source`** (migration `0006`): composite PK `(change_raster_id, index_raster_id)`,
 `ON DELETE CASCADE` from `change_raster`. Records every contributing `index_raster` — the current
 observation's index plus each baseline observation's index — so a change product's provenance is
-explicit. Re-runs replace the source set.
+explicit. Re-runs replace the source set — unless the raster is **frozen** (any of its candidates
+is tracked into an event, §5.7): a frozen raster's COG and source set are event evidence and are
+never recomputed, even if a late-arriving observation would change the baseline.
 
 ### 5.7 Disturbance candidates
 
