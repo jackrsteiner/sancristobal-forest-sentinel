@@ -33,7 +33,11 @@ EE_SCRIPT_VERSION = "slice1-optical-change-v1"
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments and dispatch. Returns a process exit code."""
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if (args.since is None) != (args.until is None):
+        # A lone window flag used to fall through to the Slice 0 load silently.
+        parser.error("--since and --until must be provided together")
     if args.since is not None and args.until is not None:
         return _run_pipeline(args)
     return _run_slice0(args.aoi)

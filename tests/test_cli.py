@@ -38,6 +38,16 @@ def test_run_with_bad_config_exits_nonzero(
     assert "error:" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("flag", ["--since", "--until"])
+def test_lone_window_flag_is_a_usage_error(flag: str, capsys: pytest.CaptureFixture[str]) -> None:
+    """A single window flag used to fall through silently to the Slice 0 load
+    (audit BUG-8); it must be rejected as a usage error."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(["run", "--aoi", str(SAMPLE_AOI), flag, "2026-01-01"])
+    assert excinfo.value.code == 2
+    assert "--since and --until must be provided together" in capsys.readouterr().err
+
+
 def test_run_with_duplicate_aoi_exits_nonzero(
     migrated_database: Engine, capsys: pytest.CaptureFixture[str]
 ) -> None:
