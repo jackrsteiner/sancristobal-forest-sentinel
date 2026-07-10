@@ -218,6 +218,31 @@ def test_pipeline_mode_reports_methodology_mismatch(
     assert "bump the version" in capsys.readouterr().err
 
 
+def test_pipeline_mode_reports_concurrent_creation_race(
+    migrated_database: Engine,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-AOI lock can't cover the AOI/methodology creation itself; a losing
+    first-ever run must get a friendly message, not a traceback (re-audit round 3,
+    finding 3)."""
+    from sqlalchemy.exc import IntegrityError
+
+    from forest_sentinel import cli
+
+    def racing_get_or_create(session: object, config: object) -> object:
+        raise IntegrityError("INSERT INTO aoi ...", {}, Exception("duplicate key uq_aoi_name"))
+
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    monkeypatch.setattr(cli, "get_or_create_aoi", racing_get_or_create)
+    exit_code = main(
+        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    )
+    assert exit_code == 1
+    assert "concurrent run created this AOI" in capsys.readouterr().err
+
+
 def test_pipeline_mode_reports_storage_misconfiguration(
     migrated_database: Engine,
     capsys: pytest.CaptureFixture[str],

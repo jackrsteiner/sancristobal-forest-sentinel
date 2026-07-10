@@ -188,6 +188,16 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         except (StorageError, EarthEngineError, MethodologyVersionMismatch) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+        except IntegrityError:
+            # First-ever run for an AOI racing another run: the per-AOI advisory lock
+            # can only be taken once the AOI row exists, so the get-or-creates above
+            # can collide. Nothing was committed; a re-run reuses the winner's rows.
+            print(
+                "error: a concurrent run created this AOI or methodology at the same "
+                "time; re-run to reuse it",
+                file=sys.stderr,
+            )
+            return 1
         except OperationalError as exc:
             print(f"error: could not connect to the database ({exc})", file=sys.stderr)
             return 1
