@@ -17,7 +17,7 @@ from typing import Any
 
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel import candidates, change, earthengine, events, indices
@@ -30,6 +30,21 @@ logger = logging.getLogger(__name__)
 
 # Candidates are extracted from the ΔNBR product (NBR drop = disturbance).
 CANDIDATE_CHANGE_TYPE = "delta_nbr"
+
+# Namespace for the per-AOI advisory run lock (arbitrary app-wide constant).
+AOI_RUN_LOCK_CLASS = 0x0F5
+
+
+def _acquire_aoi_run_lock(session: Session, aoi_id: int) -> None:
+    """Serialize pipeline runs per AOI for the duration of this transaction.
+
+    Discovery is race-safe on its own (ON CONFLICT), but the later upserts
+    (quality_mask, index/change rasters, candidate replacement) are read-then-write:
+    a manual run alongside the systemd timer would hit duplicate-key errors or double
+    candidate sets. The transaction-scoped Postgres advisory lock makes the second
+    run wait until the first commits; it then sees the committed rows and skips.
+    """
+    session.execute(select(func.pg_advisory_xact_lock(AOI_RUN_LOCK_CLASS, aoi_id)))
 
 
 @dataclass(frozen=True)
@@ -62,6 +77,7 @@ def run_pipeline(
     ee_module: Any = earthengine,
 ) -> PipelineSummary:
     """Run discover → indices → change → candidates → events for one AOI and window."""
+    _acquire_aoi_run_lock(session, aoi.id)
     region = mapping(to_shape(aoi.geometry))
 
     discovery = discover_observations(session, aoi, since=since, until=until, ee_module=ee_module)

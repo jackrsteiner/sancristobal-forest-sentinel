@@ -166,6 +166,47 @@ def test_one_failing_export_does_not_starve_the_run(db_session: Session, tmp_pat
     assert summary.events_created == 1
 
 
+def test_concurrent_runs_are_serialized_per_aoi(db_session: Session, tmp_path: Path) -> None:
+    """run_pipeline takes a per-AOI advisory lock so a manual run alongside the
+    systemd timer waits instead of racing the read-then-write upserts (re-audit
+    round 2, finding 2)."""
+    from sqlalchemy import func
+    from sqlalchemy import select as sa_select
+
+    from forest_sentinel.pipeline import AOI_RUN_LOCK_CLASS
+
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=FakeStorage(tmp_path),
+        ee_module=_fake_ee((1,)),
+    )
+    # The lock is transaction-scoped and still held (no commit yet): a concurrent
+    # session cannot take it...
+    engine = db_session.get_bind()
+    with Session(engine) as other:
+        assert (
+            other.execute(
+                sa_select(func.pg_try_advisory_xact_lock(AOI_RUN_LOCK_CLASS, aoi.id))
+            ).scalar_one()
+            is False
+        )
+    db_session.commit()
+    # ...and can once the first run's transaction ends.
+    with Session(engine) as other:
+        assert (
+            other.execute(
+                sa_select(func.pg_try_advisory_xact_lock(AOI_RUN_LOCK_CLASS, aoi.id))
+            ).scalar_one()
+            is True
+        )
+
+
 def test_ee_failure_in_candidate_stage_is_isolated(db_session: Session, tmp_path: Path) -> None:
     """A raw Earth Engine failure during candidate extraction must be skipped and
     counted like a storage failure, not abort the run (re-audit round 2, finding 1)."""
