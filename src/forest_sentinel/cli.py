@@ -2,9 +2,9 @@
 
 ``forest-sentinel run --aoi <config>`` loads a configured AOI, persists it, and prints a
 summary (the Slice 0 walking skeleton). Adding ``--since`` and ``--until`` runs the full
-Slice 1 optical-change pipeline for that AOI over the window: discover HLS observations →
-NBR/NDVI indices → ΔNBR/ΔNDVI change products → candidate disturbance polygons, all through
-Earth Engine, persisting results to PostGIS.
+optical-change pipeline for that AOI over the window: discover HLS observations →
+NBR/NDVI indices → ΔNBR/ΔNDVI change products → candidate disturbance polygons → tracked
+disturbance events, all through Earth Engine, persisting results to PostGIS.
 """
 
 import argparse

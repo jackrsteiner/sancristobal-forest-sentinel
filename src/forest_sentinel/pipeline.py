@@ -1,10 +1,11 @@
-"""Slice 1 end-to-end orchestration: discover → indices → change → candidates.
+"""End-to-end orchestration: discover → indices → change → candidates → events.
 
 Because compute runs in Earth Engine, each export is an asynchronous task; the storage
 seam blocks and polls each export to completion before the dependent step, so a single
-``run_pipeline`` call drives the whole slice synchronously (a submit-and-return mode is a
-later bead if needed). This module is pure orchestration over the building blocks and is
-fully injectable, so the hallway test runs it against stubbed EE/storage.
+``run_pipeline`` call drives the whole thread synchronously (a submit-and-return mode is a
+later bead if needed). Event tracking (Slice 2) runs as the final stage. This module is
+pure orchestration over the building blocks and is fully injectable, so the hallway test
+runs it against stubbed EE/storage.
 """
 
 from dataclasses import dataclass
@@ -53,7 +54,7 @@ def run_pipeline(
     scale: int = indices.DEFAULT_SCALE_METERS,
     ee_module: Any = earthengine,
 ) -> PipelineSummary:
-    """Run discover → indices → change → candidates for one AOI and time window."""
+    """Run discover → indices → change → candidates → events for one AOI and window."""
     region = mapping(to_shape(aoi.geometry))
 
     discovery = discover_observations(session, aoi, since=since, until=until, ee_module=ee_module)

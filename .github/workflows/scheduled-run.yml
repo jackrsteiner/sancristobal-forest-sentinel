@@ -5,7 +5,8 @@
 #
 # This is the GitHub-Actions-cron path from docs/architecture.md. The VM owns the
 # Earth Engine credentials and the COG store; this workflow just kicks the run via
-# SSH so no secrets beyond the SSH key live in CI.
+# SSH, so the only secret in CI is the GCP service-account credential (GCP_SA_KEY,
+# which gcloud uses to mint ephemeral SSH access).
 #
 # Required repository secrets:
 #   GCP_PROJECT       GCP project id
