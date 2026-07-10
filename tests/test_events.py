@@ -4,7 +4,6 @@ import pytest
 from geoalchemy2.shape import to_shape
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
-from tests.fakes import make_aoi, make_candidate, make_methodology
 
 from forest_sentinel.events import (
     EVENT_STATUS_NEW,
@@ -18,6 +17,7 @@ from forest_sentinel.models import (
     EventObservation,
     MethodologyVersion,
 )
+from tests.fakes import make_aoi, make_candidate, make_methodology
 
 
 def _aoi_and_methodology(session: Session) -> tuple[Aoi, MethodologyVersion]:

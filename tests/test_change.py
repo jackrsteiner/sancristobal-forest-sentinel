@@ -2,13 +2,6 @@ from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from tests.fakes import (
-    FakeEarthEngine,
-    FakeStorage,
-    make_aoi,
-    make_methodology,
-    make_observation,
-)
 
 from forest_sentinel import indices
 from forest_sentinel.change import (
@@ -21,6 +14,13 @@ from forest_sentinel.models import (
     ChangeRasterSource,
     MethodologyVersion,
     Observation,
+)
+from tests.fakes import (
+    FakeEarthEngine,
+    FakeStorage,
+    make_aoi,
+    make_methodology,
+    make_observation,
 )
 
 

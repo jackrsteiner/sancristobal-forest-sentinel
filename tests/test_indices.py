@@ -3,13 +3,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from tests.fakes import (
-    FakeEarthEngine,
-    FakeStorage,
-    make_aoi,
-    make_methodology,
-    make_observation,
-)
 
 from forest_sentinel import indices
 from forest_sentinel.indices import compute_indices_for_observation, index_bands
@@ -21,6 +14,13 @@ from forest_sentinel.models import (
     QualityMask,
 )
 from forest_sentinel.storage import CogKey
+from tests.fakes import (
+    FakeEarthEngine,
+    FakeStorage,
+    make_aoi,
+    make_methodology,
+    make_observation,
+)
 
 
 def _setup(session: Session, sensor: str) -> tuple[Aoi, Observation, MethodologyVersion]:

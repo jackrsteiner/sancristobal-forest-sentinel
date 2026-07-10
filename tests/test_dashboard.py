@@ -4,11 +4,11 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from tests.fakes import make_aoi, make_candidate, make_methodology
 
 from forest_sentinel.dashboard.app import app, get_session
 from forest_sentinel.events import footprint_area_m2, track_events_for_aoi
 from forest_sentinel.models import Aoi, DisturbanceEvent
+from tests.fakes import make_aoi, make_candidate, make_methodology
 
 _PATCH = [(0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.1, 0.2), (0.1, 0.1)]
 _PATCH_GROWN = [(0.15, 0.1), (0.3, 0.1), (0.3, 0.2), (0.15, 0.2), (0.15, 0.1)]

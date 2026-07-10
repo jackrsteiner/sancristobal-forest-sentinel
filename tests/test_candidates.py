@@ -3,13 +3,6 @@ from typing import Any
 from geoalchemy2.shape import to_shape
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from tests.fakes import (
-    FakeEarthEngine,
-    make_aoi,
-    make_change_raster,
-    make_methodology,
-    make_observation,
-)
 
 from forest_sentinel.candidates import (
     DEFAULT_DELTA_NBR_THRESHOLD,
@@ -25,6 +18,13 @@ from forest_sentinel.models import (
     DisturbanceCandidate,
     MethodologyVersion,
     Observation,
+)
+from tests.fakes import (
+    FakeEarthEngine,
+    make_aoi,
+    make_change_raster,
+    make_methodology,
+    make_observation,
 )
 
 _REGION = {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]}

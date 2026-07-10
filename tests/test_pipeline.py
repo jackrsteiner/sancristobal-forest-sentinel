@@ -14,7 +14,6 @@ from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from tests.fakes import FakeEarthEngine, FakeStorage, make_aoi, make_methodology
 
 from forest_sentinel.models import (
     ChangeRaster,
@@ -24,6 +23,7 @@ from forest_sentinel.models import (
     Observation,
 )
 from forest_sentinel.pipeline import run_pipeline
+from tests.fakes import FakeEarthEngine, FakeStorage, make_aoi, make_methodology
 
 # A small candidate polygon inside the AOI bbox, returned by the stubbed vectorizer.
 _CANDIDATE_RING = [[0.2, 0.2], [0.25, 0.2], [0.25, 0.25], [0.2, 0.25], [0.2, 0.2]]
