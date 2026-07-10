@@ -154,6 +154,44 @@ def test_pipeline_mode_reuses_existing_aoi(
         assert len(session.execute(select(Aoi)).scalars().all()) == 1
 
 
+def test_pipeline_mode_reports_earth_engine_failure(
+    migrated_database: Engine,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failing_initialize(project: str | None = None) -> None:
+        raise earthengine.EarthEngineError("Earth Engine initialization failed: no credentials")
+
+    monkeypatch.setattr(earthengine, "initialize", failing_initialize)
+    exit_code = main(
+        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    )
+    assert exit_code == 1
+    assert "Earth Engine initialization failed" in capsys.readouterr().err
+
+
+def test_pipeline_mode_reports_methodology_mismatch(
+    migrated_database: Engine,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-running with different parameters but the same version is a user error and
+    must print the 'bump the version' guidance, not a traceback (audit BUG-13)."""
+    with Session(migrated_database) as session:
+        session.add(
+            MethodologyVersion(name="optical-change", version="1.0.0", parameters={"other": 1})
+        )
+        session.commit()
+
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    exit_code = main(
+        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    )
+    assert exit_code == 1
+    assert "bump the version" in capsys.readouterr().err
+
+
 def test_pipeline_mode_reports_storage_misconfiguration(
     migrated_database: Engine,
     capsys: pytest.CaptureFixture[str],

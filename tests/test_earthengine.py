@@ -29,6 +29,16 @@ def test_initialize_falls_back_to_env(fake_ee: MagicMock, monkeypatch: pytest.Mo
     fake_ee.Initialize.assert_called_once_with(project="env-project")
 
 
+def test_initialize_wraps_ee_failures(fake_ee: MagicMock) -> None:
+    class FakeEEException(Exception):
+        pass
+
+    fake_ee.EEException = FakeEEException
+    fake_ee.Initialize.side_effect = FakeEEException("no credentials")
+    with pytest.raises(earthengine.EarthEngineError, match="initialization failed"):
+        earthengine.initialize("my-project")
+
+
 def test_start_image_export_submits_cog_task(fake_ee: MagicMock) -> None:
     task = fake_ee.batch.Export.image.toCloudStorage.return_value
     returned = earthengine.start_image_export_to_gcs(

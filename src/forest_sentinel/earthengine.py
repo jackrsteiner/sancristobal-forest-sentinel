@@ -29,9 +29,18 @@ class EarthEngineError(RuntimeError):
 
 
 def initialize(project: str | None = None) -> None:
-    """Initialize the Earth Engine client for ``project`` (or the configured default)."""
+    """Initialize the Earth Engine client for ``project`` (or the configured default).
+
+    Raises ``EarthEngineError`` when initialization fails (missing/invalid credentials,
+    unregistered project), so callers can report it without a raw EE traceback.
+    """
     resolved = project or os.environ.get(GEE_PROJECT_ENV_VAR)
-    ee.Initialize(project=resolved)
+    try:
+        ee.Initialize(project=resolved)
+    except ee.EEException as exc:
+        raise EarthEngineError(
+            f"Earth Engine initialization failed for project {resolved!r}: {exc}"
+        ) from exc
 
 
 def start_image_export_to_gcs(

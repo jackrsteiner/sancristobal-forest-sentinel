@@ -22,8 +22,12 @@ from forest_sentinel.aoi import AoiConfigError, get_or_create_aoi, load_aoi_conf
 from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.change import DEFAULT_BASELINE_WINDOW
 from forest_sentinel.db import get_engine
+from forest_sentinel.earthengine import EarthEngineError
 from forest_sentinel.hls import HLS_COLLECTIONS
-from forest_sentinel.methodology import get_or_create_methodology_version
+from forest_sentinel.methodology import (
+    MethodologyVersionMismatch,
+    get_or_create_methodology_version,
+)
 from forest_sentinel.models import Aoi
 from forest_sentinel.storage import StorageError
 
@@ -156,6 +160,12 @@ def _run_pipeline(args: argparse.Namespace) -> int:
             session.commit()
     except StorageError as exc:
         print(f"error: storage is not configured ({exc})", file=sys.stderr)
+        return 1
+    except EarthEngineError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except MethodologyVersionMismatch as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
     except OperationalError as exc:
         print(f"error: could not connect to the database ({exc})", file=sys.stderr)
