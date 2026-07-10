@@ -24,6 +24,9 @@ from forest_sentinel import earthengine
 COG_ROOT_ENV_VAR = "FOREST_SENTINEL_COG_ROOT"
 GCS_STAGING_BUCKET_ENV_VAR = "FOREST_SENTINEL_GCS_STAGING_BUCKET"
 DEFAULT_COG_ROOT = "data/cogs/"
+# A stuck (non-terminal) EE task must not wedge the pipeline forever; generous
+# because large-AOI exports can legitimately take a long time.
+DEFAULT_EXPORT_TIMEOUT_SECONDS = 3600.0
 
 _SAFE_COMPONENT = re.compile(r"[^a-z0-9._-]+")
 
@@ -112,6 +115,7 @@ class LocalDiskStorage:
         *,
         ee_module: Any = earthengine,
         poll_interval_seconds: float = 5.0,
+        timeout_seconds: float | None = DEFAULT_EXPORT_TIMEOUT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._root = root
@@ -119,6 +123,7 @@ class LocalDiskStorage:
         self._staging = staging
         self._ee = ee_module
         self._poll_interval = poll_interval_seconds
+        self._timeout = timeout_seconds
         self._sleep = sleep
 
     def path_for(self, key: CogKey) -> Path:
@@ -145,11 +150,18 @@ class LocalDiskStorage:
         return destination
 
     def _await_completion(self, task: Any, prefix: str) -> None:
+        waited = 0.0
         state = self._ee.export_task_state(task)
         while state != earthengine.TASK_STATE_COMPLETED:
             if self._ee.is_terminal_failure(state):
                 raise StorageError(f"Earth Engine export {prefix!r} ended in state {state}")
+            if self._timeout is not None and waited >= self._timeout:
+                raise StorageError(
+                    f"Earth Engine export {prefix!r} timed out after {self._timeout:.0f}s "
+                    f"in state {state}"
+                )
             self._sleep(self._poll_interval)
+            waited += self._poll_interval
             state = self._ee.export_task_state(task)
 
 
