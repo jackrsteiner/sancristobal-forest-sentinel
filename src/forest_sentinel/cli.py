@@ -18,7 +18,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from forest_sentinel import earthengine, pipeline, storage
+from forest_sentinel import earthengine, indices, pipeline, qa, storage
 from forest_sentinel.aoi import (
     AoiConfig,
     AoiConfigError,
@@ -152,6 +152,10 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         "baseline_window": args.baseline_window,
         "delta_nbr_threshold": threshold,
         "min_area_m2": min_area,
+        # Everything that shapes the output belongs in the provenance record: the
+        # export / reduceToVectors scale and the Fmask categories masked out.
+        "scale_m": indices.DEFAULT_SCALE_METERS,
+        "masked_categories": list(qa.MASK_CATEGORIES),
     }
 
     with _disposing_engine() as engine:

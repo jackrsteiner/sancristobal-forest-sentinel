@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
-from forest_sentinel import earthengine, pipeline, storage
+from forest_sentinel import earthengine, indices, pipeline, qa, storage
 from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.cli import main
 from forest_sentinel.models import Aoi, MethodologyVersion
@@ -129,11 +129,14 @@ def test_pipeline_mode_defaults_are_resolved_and_recorded(
     # The resolved defaults are threaded into the pipeline...
     assert captured["threshold"] == DEFAULT_DELTA_NBR_THRESHOLD
     assert captured["min_area_m2"] == DEFAULT_MIN_AREA_M2
-    # ...and recorded in the methodology provenance (no nulls).
+    # ...and recorded in the methodology provenance (no nulls), together with the
+    # scale and mask categories that also shape the output.
     with Session(migrated_database) as session:
         methodology = session.execute(select(MethodologyVersion)).scalar_one()
     assert methodology.parameters["delta_nbr_threshold"] == DEFAULT_DELTA_NBR_THRESHOLD
     assert methodology.parameters["min_area_m2"] == DEFAULT_MIN_AREA_M2
+    assert methodology.parameters["scale_m"] == indices.DEFAULT_SCALE_METERS
+    assert methodology.parameters["masked_categories"] == list(qa.MASK_CATEGORIES)
 
 
 def test_pipeline_mode_reuses_existing_aoi(
