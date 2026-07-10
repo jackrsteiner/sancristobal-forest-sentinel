@@ -1,18 +1,20 @@
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from geoalchemy2.shape import from_shape
-from shapely.geometry import MultiPolygon, Polygon
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from tests.fakes import (
+    FakeEarthEngine,
+    FakeStorage,
+    make_aoi,
+    make_methodology,
+    make_observation,
+)
 
 from forest_sentinel import indices
 from forest_sentinel.change import (
     CHANGE_TYPES,
     compute_change_products_for_observation,
 )
-from forest_sentinel.methodology import get_or_create_methodology_version
 from forest_sentinel.models import (
     Aoi,
     ChangeRaster,
@@ -20,81 +22,15 @@ from forest_sentinel.models import (
     MethodologyVersion,
     Observation,
 )
-from forest_sentinel.storage import CogKey
-
-
-class FakeEarthEngine:
-    def __init__(self) -> None:
-        self.median_sizes: list[int] = []
-
-    def image_by_id(self, image_id: str) -> dict[str, Any]:
-        return {"id": image_id}
-
-    def apply_fmask_mask(self, image: Any) -> dict[str, Any]:
-        return {"masked": image}
-
-    def valid_pixel_fraction(self, image: Any, band: str, region: Any, scale: int) -> float:
-        return 0.9
-
-    def normalized_difference(self, image: Any, bands: list[str]) -> dict[str, Any]:
-        return {"nd": tuple(bands), "image": image}
-
-    def median_of(self, images: list[Any]) -> dict[str, Any]:
-        self.median_sizes.append(len(images))
-        return {"median": len(images)}
-
-    def subtract(self, image: Any, other: Any) -> dict[str, Any]:
-        return {"delta": (image, other)}
-
-
-class FakeStorage:
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.exports: list[CogKey] = []
-
-    def path_for(self, key: CogKey) -> Path:
-        return self.root / key.relative_path()
-
-    def export_image(
-        self, image: Any, key: CogKey, *, scale: int | None = None, region: Any = None
-    ) -> Path:
-        self.exports.append(key)
-        return self.path_for(key)
-
-
-def _aoi(session: Session) -> Aoi:
-    square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
-    aoi = Aoi(name="Test AOI", geometry=from_shape(MultiPolygon([square]), srid=4326))
-    session.add(aoi)
-    session.flush()
-    return aoi
-
-
-def _observation(session: Session, aoi: Aoi, day: int) -> Observation:
-    obs = Observation(
-        aoi_id=aoi.id,
-        sensor="HLSL30",
-        acquired_at=datetime(2026, 1, day, tzinfo=UTC),
-        source_scene_id=f"scene-{day}",
-    )
-    session.add(obs)
-    session.flush()
-    return obs
-
-
-def _methodology(session: Session) -> MethodologyVersion:
-    return get_or_create_methodology_version(
-        session, name="optical-change", version="1.0.0", parameters={"baseline_window": 5}
-    )
 
 
 def _build_history(
     session: Session, days: list[int], fake_ee: FakeEarthEngine, tmp_path: Path
 ) -> tuple[Aoi, list[Observation], MethodologyVersion]:
     """Create observations on the given days and compute their index rasters."""
-    aoi = _aoi(session)
-    methodology = _methodology(session)
-    observations = [_observation(session, aoi, day) for day in days]
+    aoi = make_aoi(session)
+    methodology = make_methodology(session, parameters={"baseline_window": 5})
+    observations = [make_observation(session, aoi, day=day) for day in days]
     storage = FakeStorage(tmp_path / "indices")
     for obs in observations:
         indices.compute_indices_for_observation(

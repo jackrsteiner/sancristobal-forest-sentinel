@@ -1,10 +1,15 @@
-from datetime import UTC, datetime
 from typing import Any
 
-from geoalchemy2.shape import from_shape, to_shape
-from shapely.geometry import MultiPolygon, Polygon
+from geoalchemy2.shape import to_shape
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from tests.fakes import (
+    FakeEarthEngine,
+    make_aoi,
+    make_change_raster,
+    make_methodology,
+    make_observation,
+)
 
 from forest_sentinel.candidates import (
     DEFAULT_DELTA_NBR_THRESHOLD,
@@ -14,7 +19,6 @@ from forest_sentinel.candidates import (
     resolve_threshold,
 )
 from forest_sentinel.events import track_events_for_aoi
-from forest_sentinel.methodology import get_or_create_methodology_version
 from forest_sentinel.models import (
     Aoi,
     ChangeRaster,
@@ -41,51 +45,15 @@ def _poly_feature(offset: float, area_m2: float) -> dict[str, Any]:
     }
 
 
-class FakeEarthEngine:
-    def __init__(self, features: list[dict[str, Any]]) -> None:
-        self._features = features
-        self.calls: list[dict[str, Any]] = []
-
-    def threshold_and_vectorize(
-        self,
-        delta_image: Any,
-        *,
-        threshold: float,
-        scale: int,
-        region: Any,
-        min_area_m2: float,
-    ) -> list[dict[str, Any]]:
-        self.calls.append({"threshold": threshold, "scale": scale, "min_area_m2": min_area_m2})
-        return self._features
-
-
 def _setup(
     session: Session, *, parameters: dict[str, Any] | None = None
 ) -> tuple[ChangeRaster, MethodologyVersion, Observation]:
-    square = Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
-    aoi = Aoi(name="Test AOI", geometry=from_shape(MultiPolygon([square]), srid=4326))
-    session.add(aoi)
-    session.flush()
-    obs = Observation(
-        aoi_id=aoi.id,
-        sensor="HLSL30",
-        acquired_at=datetime(2026, 1, 6, tzinfo=UTC),
-        source_scene_id="scene-6",
+    aoi = make_aoi(session)
+    obs = make_observation(session, aoi, day=6)
+    methodology = make_methodology(session, parameters=parameters)
+    change = make_change_raster(
+        session, obs, methodology, cog_path="/data/cogs/aoi/delta_nbr/2026-01-06/delta_nbr.tif"
     )
-    session.add(obs)
-    session.flush()
-    methodology = get_or_create_methodology_version(
-        session, name="optical-change", version="1.0.0", parameters=parameters or {}
-    )
-    change = ChangeRaster(
-        observation_id=obs.id,
-        methodology_version_id=methodology.id,
-        change_type="delta_nbr",
-        cog_path="/data/cogs/aoi/delta_nbr/2026-01-06/delta_nbr.tif",
-        baseline_window=5,
-    )
-    session.add(change)
-    session.flush()
     return change, methodology, obs
 
 
@@ -119,7 +87,7 @@ def test_resolvers_treat_stored_null_as_absent() -> None:
 
 def test_extracts_candidates_with_provenance(db_session: Session) -> None:
     change, methodology, obs = _setup(db_session)
-    fake = FakeEarthEngine([_poly_feature(0.1, 10_000), _poly_feature(0.3, 20_000)])
+    fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000), _poly_feature(0.3, 20_000)])
 
     candidates = extract_candidates_for_change_raster(
         db_session,
@@ -157,7 +125,7 @@ def test_no_features_yields_no_candidates(db_session: Session) -> None:
         change_raster=change,
         delta_image="img",
         region=_REGION,
-        ee_module=FakeEarthEngine([]),
+        ee_module=FakeEarthEngine(features=[]),
     )
     assert candidates == []
     assert db_session.execute(select(DisturbanceCandidate)).scalars().all() == []
@@ -165,7 +133,7 @@ def test_no_features_yields_no_candidates(db_session: Session) -> None:
 
 def test_sub_minimum_area_polygons_are_dropped(db_session: Session) -> None:
     change, _, _ = _setup(db_session)
-    fake = FakeEarthEngine([_poly_feature(0.1, 100.0), _poly_feature(0.3, 50_000.0)])
+    fake = FakeEarthEngine(features=[_poly_feature(0.1, 100.0), _poly_feature(0.3, 50_000.0)])
     candidates = extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
@@ -181,7 +149,7 @@ def test_methodology_parameters_drive_extraction(db_session: Session) -> None:
     change, _, _ = _setup(
         db_session, parameters={"delta_nbr_threshold": -0.4, "min_area_m2": 9_000}
     )
-    fake = FakeEarthEngine([_poly_feature(0.1, 10_000)])
+    fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
     extract_candidates_for_change_raster(
         db_session, change_raster=change, delta_image="img", region=_REGION, ee_module=fake
     )
@@ -193,7 +161,7 @@ def test_explicit_overrides_win(db_session: Session) -> None:
     change, _, _ = _setup(
         db_session, parameters={"delta_nbr_threshold": -0.4, "min_area_m2": 9_000}
     )
-    fake = FakeEarthEngine([_poly_feature(0.1, 10_000)])
+    fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
     extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
@@ -215,7 +183,7 @@ def test_rerun_replaces_candidates(db_session: Session) -> None:
             change_raster=change,
             delta_image="img",
             region=_REGION,
-            ee_module=FakeEarthEngine([_poly_feature(0.1, 10_000)]),
+            ee_module=FakeEarthEngine(features=[_poly_feature(0.1, 10_000)]),
         )
         db_session.commit()
     assert len(db_session.execute(select(DisturbanceCandidate)).scalars().all()) == 1
@@ -230,14 +198,14 @@ def test_tracked_candidates_are_frozen_on_rerun(db_session: Session) -> None:
         change_raster=change,
         delta_image="img",
         region=_REGION,
-        ee_module=FakeEarthEngine([_poly_feature(0.1, 10_000)]),
+        ee_module=FakeEarthEngine(features=[_poly_feature(0.1, 10_000)]),
     )
     db_session.commit()
     aoi = db_session.execute(select(Aoi)).scalar_one()
     track_events_for_aoi(db_session, aoi=aoi)
     db_session.commit()
 
-    fake = FakeEarthEngine([_poly_feature(0.3, 20_000)])
+    fake = FakeEarthEngine(features=[_poly_feature(0.3, 20_000)])
     rerun = extract_candidates_for_change_raster(
         db_session,
         change_raster=change,

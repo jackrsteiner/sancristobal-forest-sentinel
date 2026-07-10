@@ -1,82 +1,27 @@
 from collections.abc import Iterator
-from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from geoalchemy2.shape import from_shape
-from shapely.geometry import MultiPolygon, Polygon
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from tests.fakes import make_aoi, make_candidate, make_methodology
 
 from forest_sentinel.dashboard.app import app, get_session
 from forest_sentinel.events import footprint_area_m2, track_events_for_aoi
-from forest_sentinel.methodology import get_or_create_methodology_version
-from forest_sentinel.models import (
-    Aoi,
-    ChangeRaster,
-    DisturbanceCandidate,
-    DisturbanceEvent,
-    MethodologyVersion,
-    Observation,
-)
+from forest_sentinel.models import Aoi, DisturbanceEvent
 
 _PATCH = [(0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.1, 0.2), (0.1, 0.1)]
 _PATCH_GROWN = [(0.15, 0.1), (0.3, 0.1), (0.3, 0.2), (0.15, 0.2), (0.15, 0.1)]
 
 
 def _seed_event(session: Session) -> Aoi:
-    aoi = Aoi(
-        name="Seeded AOI",
-        geometry=from_shape(
-            MultiPolygon([Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])]), srid=4326
-        ),
-    )
-    session.add(aoi)
-    session.flush()
-    methodology = get_or_create_methodology_version(
-        session, name="optical-change", version="1.0.0", parameters={}
-    )
+    aoi = make_aoi(session, name="Seeded AOI")
+    methodology = make_methodology(session)
     for day, ring, area in ((1, _PATCH, 10_000.0), (8, _PATCH_GROWN, 15_000.0)):
-        _candidate(session, aoi, methodology, day=day, ring=ring, area_m2=area)
+        make_candidate(session, aoi, methodology, day=day, ring=ring, area_m2=area)
     track_events_for_aoi(session, aoi=aoi)
     session.flush()
     return aoi
-
-
-def _candidate(
-    session: Session,
-    aoi: Aoi,
-    methodology: MethodologyVersion,
-    *,
-    day: int,
-    ring: list[tuple[float, float]],
-    area_m2: float,
-) -> None:
-    detected = datetime(2026, 1, day, tzinfo=UTC)
-    obs = Observation(
-        aoi_id=aoi.id, sensor="HLSL30", acquired_at=detected, source_scene_id=f"scene-{day}"
-    )
-    session.add(obs)
-    session.flush()
-    change = ChangeRaster(
-        observation_id=obs.id,
-        methodology_version_id=methodology.id,
-        change_type="delta_nbr",
-        cog_path=f"/cogs/{day}.tif",
-        baseline_window=5,
-    )
-    session.add(change)
-    session.flush()
-    session.add(
-        DisturbanceCandidate(
-            change_raster_id=change.id,
-            methodology_version_id=methodology.id,
-            geometry=from_shape(Polygon(ring), srid=4326),
-            detected_at=detected,
-            area_m2=area_m2,
-        )
-    )
-    session.flush()
 
 
 @pytest.fixture
