@@ -65,6 +65,9 @@
       async function loadEvents(aoiId) {
         const collection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
         if (eventsLayer) map.removeLayer(eventsLayer);
+        // Drop layer references from the previous AOI so clicks can't zoom to
+        // layers that are no longer on the map.
+        Object.keys(layersById).forEach((id) => delete layersById[id]);
         eventsLayer = L.geoJSON(collection, {
           style: (f) => ({
             color: f.properties.status === "ongoing" ? "#c0392b" : "#2980b9",
