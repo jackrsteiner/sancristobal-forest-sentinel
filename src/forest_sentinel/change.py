@@ -91,9 +91,10 @@ def compute_change_products_for_observation(
         baseline_median = ee_module.median_of(baseline_images)
         delta = ee_module.subtract(current_image, baseline_median)
 
-        # As with index COGs, the scene id keeps same-day observations from colliding.
+        # As with index COGs (see indices.py), the scene id and AOI id keep paths
+        # collision-free.
         key = CogKey(
-            aoi=aoi.name,
+            aoi=f"{aoi.id}-{aoi.name}",
             product=change_type,
             date=date,
             filename=f"{change_type}-{observation.source_scene_id}.tif",

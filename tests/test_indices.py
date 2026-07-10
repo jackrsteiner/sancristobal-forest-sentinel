@@ -177,6 +177,41 @@ def test_same_day_observations_export_to_distinct_paths(
     assert len(set(paths)) == 4
 
 
+def test_aois_with_colliding_sanitized_names_get_distinct_paths(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """'My AOI' and 'my-aoi' both sanitize to 'my-aoi'; the AOI id prefix must keep
+    their COG trees separate (audit BUG-12)."""
+    _, obs, methodology = _setup(db_session, "HLSL30")
+    keys: list[CogKey] = []
+    for name in ("My AOI", "my-aoi"):
+        aoi = Aoi(name=name, geometry=db_session.execute(select(Aoi.geometry)).scalars().first())
+        db_session.add(aoi)
+        db_session.flush()
+        obs2 = Observation(
+            aoi_id=aoi.id,
+            sensor="HLSL30",
+            acquired_at=obs.acquired_at,
+            source_scene_id="HLS.scene.X",
+        )
+        db_session.add(obs2)
+        db_session.flush()
+        storage = FakeStorage(tmp_path)
+        compute_indices_for_observation(
+            db_session,
+            aoi=aoi,
+            observation=obs2,
+            methodology=methodology,
+            storage=storage,
+            ee_module=FakeEarthEngine(),
+        )
+        keys.extend(key for _, key, _ in storage.exports)
+
+    paths = {str(key.relative_path()) for key in keys}
+    assert len(paths) == 4  # 2 AOIs x (NBR, NDVI) — no shared tree
+    assert all(path.split("/", 1)[0].split("-", 1)[0].isdigit() for path in paths)
+
+
 def test_records_quality_mask_coverage(db_session: Session, tmp_path: Path) -> None:
     aoi, obs, methodology = _setup(db_session, "HLSL30")
     compute_indices_for_observation(

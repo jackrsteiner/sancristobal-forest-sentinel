@@ -103,9 +103,10 @@ def compute_indices_for_observation(
     for index_type, nd_bands in index_bands(observation.sensor).items():
         index_image = ee_module.normalized_difference(masked, nd_bands)
         # The scene id keeps same-day observations (both sensors, adjacent tiles) from
-        # exporting to the same path and silently overwriting each other.
+        # exporting to the same path and silently overwriting each other; the AOI id
+        # keeps distinct AOI names that sanitize identically from sharing a tree.
         key = CogKey(
-            aoi=aoi.name,
+            aoi=f"{aoi.id}-{aoi.name}",
             product=index_type,
             date=date,
             filename=f"{index_type.lower()}-{observation.source_scene_id}.tif",
