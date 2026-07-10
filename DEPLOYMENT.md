@@ -9,6 +9,10 @@ For *what the system is and how it works*, read [`README.md`](README.md) and
 [`docs/architecture.md`](docs/architecture.md). This document is the operational
 counterpart: how to configure, provision, secure, and automate it.
 
+> **No local tooling?** The same provisioning can be done entirely from a web
+> browser via Google Cloud Shell — follow
+> [`docs/cloud-shell-setup.md`](docs/cloud-shell-setup.md) instead.
+
 ---
 
 ## What runs today vs. what's planned

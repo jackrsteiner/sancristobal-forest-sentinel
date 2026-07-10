@@ -234,7 +234,9 @@ Its practical advantage depends not only on low cost, but also on **temporal cur
 ## Usage
 
 > Standing this up for your own AOI — credentials, the $0 GCP infrastructure, and
-> scheduled runs? See **[DEPLOYMENT.md](DEPLOYMENT.md)**, which scripts the setup.
+> scheduled runs? See **[DEPLOYMENT.md](DEPLOYMENT.md)**, which scripts the setup —
+> or **[docs/cloud-shell-setup.md](docs/cloud-shell-setup.md)** to do it all from a
+> browser with no local tooling.
 
 An AOI is a GeoJSON file containing a single `Feature` whose geometry is the area to monitor and whose `properties.name` identifies it — see `examples/aoi-sample.geojson`.
 
