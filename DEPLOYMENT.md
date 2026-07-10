@@ -229,9 +229,12 @@ systemctl status forest-sentinel-pipeline.timer    # is it scheduled?
 sudo systemctl start forest-sentinel-pipeline      # run on demand
 ```
 
-Change the cadence by editing `OnCalendar=` in
-`scripts/systemd/forest-sentinel-pipeline.timer` (re-run `vm_setup.sh` or
-`systemctl daemon-reload` after editing on the VM).
+Change the cadence by editing `OnCalendar=` in the **installed** unit —
+`sudo systemctl edit --full forest-sentinel-pipeline.timer` (systemd reloads it for
+you) — or edit `scripts/systemd/forest-sentinel-pipeline.timer` in the repo and
+re-run `vm_setup.sh` to reinstall it. (Editing the repo copy alone does nothing:
+the unit is *copied* to `/etc/systemd/system` at install time, and `daemon-reload`
+only re-reads installed units.)
 
 ### From GitHub Actions (intended direction — E11)
 
