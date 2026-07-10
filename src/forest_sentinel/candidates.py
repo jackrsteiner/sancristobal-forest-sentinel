@@ -20,6 +20,7 @@ from forest_sentinel.models import (
     AOI_SRID,
     ChangeRaster,
     DisturbanceCandidate,
+    EventObservation,
     MethodologyVersion,
     Observation,
 )
@@ -63,8 +64,15 @@ def extract_candidates_for_change_raster(
     """Extract and persist candidate polygons from one change raster's ΔNBR image.
 
     Re-runs replace the candidate set for this change raster so the rows reflect the
-    latest parameters.
+    latest parameters — but only while none of it has been tracked into events. Once a
+    candidate is referenced by an ``event_observation`` it is part of event history:
+    the set is frozen and returned as-is (deleting it would violate the
+    ``event_observation`` FK and silently invalidate event footprints).
     """
+    # Frozen: this raster's candidates are already event history; skip re-extraction.
+    if _any_candidate_tracked(session, change_raster.id):
+        return _existing_candidates(session, change_raster.id)
+
     methodology = session.get(MethodologyVersion, change_raster.methodology_version_id)
     if methodology is None:
         raise ValueError(f"change_raster {change_raster.id} has no methodology version")
@@ -104,6 +112,31 @@ def extract_candidates_for_change_raster(
 
     session.flush()
     return candidates
+
+
+def _existing_candidates(session: Session, change_raster_id: int) -> list[DisturbanceCandidate]:
+    return list(
+        session.execute(
+            select(DisturbanceCandidate)
+            .where(DisturbanceCandidate.change_raster_id == change_raster_id)
+            .order_by(DisturbanceCandidate.id)
+        ).scalars()
+    )
+
+
+def _any_candidate_tracked(session: Session, change_raster_id: int) -> bool:
+    return (
+        session.execute(
+            select(DisturbanceCandidate.id)
+            .join(
+                EventObservation,
+                EventObservation.disturbance_candidate_id == DisturbanceCandidate.id,
+            )
+            .where(DisturbanceCandidate.change_raster_id == change_raster_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
 
 
 def _delete_existing(session: Session, change_raster_id: int) -> None:

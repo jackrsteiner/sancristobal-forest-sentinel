@@ -325,7 +325,12 @@ minimum area is enforced both server-side (the EE `Filter`) and client-side as a
 **`disturbance_candidate`** (migration `0007`): `id`, `change_raster_id` (FK, ON DELETE CASCADE),
 `methodology_version_id` (FK), `geometry` (PostGIS `POLYGON` SRID 4326), `detected_at` (the source
 observation's `acquired_at`), `area_m2`, `created_at`; indexed on `change_raster_id`. Re-runs
-delete and re-insert the candidate set for a change raster so rows reflect the latest parameters.
+delete and re-insert the candidate set for a change raster so rows reflect the latest parameters —
+but only while none of that set has been tracked into events. Once any candidate is referenced by
+an `event_observation` (§5.9) it is event history: the raster's candidate set is frozen and
+re-runs return it unchanged, so event footprints and timelines are never invalidated. Applying
+new detection parameters to already-tracked rasters requires a new `methodology_version` (new
+change rasters), not an in-place rewrite.
 
 ### 5.8 Pipeline orchestration
 

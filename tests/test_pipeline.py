@@ -151,3 +151,37 @@ def test_run_full_pipeline_produces_candidates(db_session: Session, tmp_path: Pa
     # The candidate dumps cleanly to GeoJSON for eyeballing on a map.
     geojson = json.dumps(mapping(geometry))
     assert json.loads(geojson)["type"] == "Polygon"
+
+
+def test_rerunning_full_pipeline_is_idempotent(db_session: Session, tmp_path: Path) -> None:
+    """A second run over the same window must succeed and add nothing (audit BUG-2):
+    tracked candidates are event history and survive candidate re-extraction."""
+    aoi = _make_aoi(db_session)
+    methodology = get_or_create_methodology_version(
+        db_session, name="optical-change", version="1.0.0", parameters={}
+    )
+    fake_ee = FakeEarthEngine([_scene(day) for day in (1, 2, 3, 4, 5, 6)])
+
+    def run() -> Any:
+        return run_pipeline(
+            db_session,
+            aoi=aoi,
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            methodology=methodology,
+            storage=FakeStorage(tmp_path),
+            baseline_window=5,
+            ee_module=fake_ee,
+        )
+
+    run()
+    db_session.commit()
+    second = run()
+    db_session.commit()
+
+    # Candidates are frozen once tracked; events and measurements are unchanged.
+    assert second.candidates == 5  # the existing (frozen) candidate set is reported
+    assert second.events_created == 0
+    assert second.event_observations == 0
+    assert len(db_session.execute(select(DisturbanceCandidate)).scalars().all()) == 5
+    assert len(db_session.execute(select(DisturbanceEvent)).scalars().all()) == 1

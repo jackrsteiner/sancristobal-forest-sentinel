@@ -13,6 +13,7 @@ from forest_sentinel.candidates import (
     resolve_min_area,
     resolve_threshold,
 )
+from forest_sentinel.events import track_events_for_aoi
 from forest_sentinel.methodology import get_or_create_methodology_version
 from forest_sentinel.models import (
     Aoi,
@@ -217,4 +218,35 @@ def test_rerun_replaces_candidates(db_session: Session) -> None:
             ee_module=FakeEarthEngine([_poly_feature(0.1, 10_000)]),
         )
         db_session.commit()
+    assert len(db_session.execute(select(DisturbanceCandidate)).scalars().all()) == 1
+
+
+def test_tracked_candidates_are_frozen_on_rerun(db_session: Session) -> None:
+    """Once a candidate is tracked into an event, re-extraction must not touch the
+    set (audit BUG-2): no FK violation, no duplicates, no Earth Engine call."""
+    change, _, _ = _setup(db_session)
+    first = extract_candidates_for_change_raster(
+        db_session,
+        change_raster=change,
+        delta_image="img",
+        region=_REGION,
+        ee_module=FakeEarthEngine([_poly_feature(0.1, 10_000)]),
+    )
+    db_session.commit()
+    aoi = db_session.execute(select(Aoi)).scalar_one()
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.commit()
+
+    fake = FakeEarthEngine([_poly_feature(0.3, 20_000)])
+    rerun = extract_candidates_for_change_raster(
+        db_session,
+        change_raster=change,
+        delta_image="img",
+        region=_REGION,
+        ee_module=fake,
+    )
+    db_session.commit()
+
+    assert fake.calls == []  # frozen set: extraction short-circuits before EE
+    assert [c.id for c in rerun] == [first[0].id]
     assert len(db_session.execute(select(DisturbanceCandidate)).scalars().all()) == 1
