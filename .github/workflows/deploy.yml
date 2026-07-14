@@ -1,0 +1,149 @@
+# One-click deployment for Open Forest Sentinel INSTANCE repos (created from
+# this repo via GitHub's "Use this template"). Run it from the Actions tab after
+# the manual bootstrap described in INSTANCE_DEPLOYMENT.md:
+#
+#   1. GCP console: create the project, attach billing, register it for Earth
+#      Engine at https://code.earthengine.google.com/register
+#   2. Cloud Shell: run scripts/setup_wif.sh (prints the values below)
+#   3. Repo variables: WIF_PROVIDER, PROVISIONER_SA
+#      Repo secret:    OFS_ADMIN_TOKEN (fine-grained PAT, Contents + Workflows
+#                      read/write on this repo — used only for the history graft)
+#   4. Commit config/instance.env (PROJECT_ID at minimum) and config/aoi.geojson
+#
+# What it does: grafts the template's commit history onto the instance repo (so
+# `git pull upstream main` works for future updates), then provisions GCP
+# (setup_gcp.sh) and the always-free VM (provision_vm.sh) via Workload Identity
+# Federation — short-lived OIDC tokens, no service-account keys. The VM
+# self-configures on first boot (scripts/vm_startup.sh) and this workflow waits
+# for it to report done.
+
+name: Deploy instance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC token for Workload Identity Federation
+  contents: write   # push the grafted history
+
+env:
+  BASE_REPO: jackrsteiner/open-forest-sentinel
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out instance repo (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # The default GITHUB_TOKEN cannot push commits that touch
+          # .github/workflows/, which the grafted template history does.
+          token: ${{ secrets.OFS_ADMIN_TOKEN || github.token }}
+
+      - name: Refuse to deploy the template repo itself
+        run: |
+          if [ "$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" = "$BASE_REPO" ]; then
+            echo "::error::This workflow provisions INSTANCE repos. Create one with 'Use this template' first."
+            exit 1
+          fi
+
+      - name: Graft template history (one-time, so upstream updates can be pulled)
+        env:
+          HAS_ADMIN_TOKEN: ${{ secrets.OFS_ADMIN_TOKEN != '' }}
+        run: |
+          git remote add upstream "https://github.com/${BASE_REPO}.git"
+          git fetch upstream main
+          if git merge-base HEAD upstream/main >/dev/null 2>&1; then
+            echo "History already grafted — skipping."
+            exit 0
+          fi
+          if [ "$HAS_ADMIN_TOKEN" != "true" ]; then
+            echo "::error::The one-time history graft needs the OFS_ADMIN_TOKEN secret (fine-grained PAT with Contents + Workflows read/write). See INSTANCE_DEPLOYMENT.md."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          INSTANCE_HEAD="$(git rev-parse HEAD)"
+          git checkout -B main upstream/main
+          # Carry the committed instance config over onto the grafted history.
+          for path in config aois; do
+            git checkout "$INSTANCE_HEAD" -- "$path" 2>/dev/null || true
+          done
+          git commit --allow-empty -m "Instance configuration for ${GITHUB_REPOSITORY}"
+          git push --force origin main
+
+      - name: Load instance config
+        run: |
+          grep -E '^[A-Za-z_][A-Za-z0-9_]*=' config/instance.env >> "$GITHUB_ENV"
+          # shellcheck disable=SC1091
+          . config/instance.env
+          if [ -z "${PROJECT_ID:-}" ]; then
+            echo "::error::Set PROJECT_ID in config/instance.env and commit it."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PROVISIONER_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Provision GCP resources (keyless)
+        run: ./scripts/setup_gcp.sh
+
+      - name: Create the VM (self-configures via startup script)
+        env:
+          REPO_URL: https://github.com/${{ github.repository }}.git
+          # Short-lived job token so a private instance repo can be cloned on
+          # first boot; empty (and unused) for public repos.
+          CLONE_TOKEN: ${{ github.event.repository.private && github.token || '' }}
+        run: ./scripts/provision_vm.sh
+
+      - name: Wait for on-VM setup to finish
+        run: |
+          INSTANCE_NAME="${INSTANCE_NAME:-forest-sentinel-vm}"
+          ZONE="${ZONE:-us-west1-a}"
+          echo "Polling guest attribute ofs/setup-status (up to 20 minutes)..."
+          for i in $(seq 1 40); do
+            status="$(gcloud compute instances get-guest-attributes "$INSTANCE_NAME" \
+              --zone "$ZONE" --query-path ofs/setup-status \
+              --format 'value(value)' 2>/dev/null || true)"
+            echo "  [$i/40] setup-status: ${status:-<not reported yet>}"
+            if [ "$status" = "done" ]; then
+              echo "VM setup finished."
+              exit 0
+            fi
+            if [ "$status" = "failed" ]; then
+              echo "::error::On-VM setup failed. Serial console tail follows."
+              gcloud compute instances get-serial-port-output "$INSTANCE_NAME" \
+                --zone "$ZONE" 2>/dev/null | tail -n 120 || true
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "::error::Timed out waiting for the VM to report setup-status=done."
+          exit 1
+
+      - name: Write summary
+        run: |
+          INSTANCE_NAME="${INSTANCE_NAME:-forest-sentinel-vm}"
+          ZONE="${ZONE:-us-west1-a}"
+          PORT="${DASHBOARD_PORT:-8000}"
+          {
+            echo "## Instance deployed"
+            echo ""
+            echo "Open an SSH tunnel to the dashboard:"
+            echo ""
+            echo '```'
+            echo "gcloud compute ssh ${INSTANCE_NAME} --project ${PROJECT_ID} --zone ${ZONE} -- -L ${PORT}:localhost:${PORT}"
+            echo '```'
+            echo ""
+            echo "then browse to http://localhost:${PORT}"
+            echo ""
+            echo "The pipeline timer runs daily at 03:00 UTC; the initial run was"
+            echo "started during setup (\`journalctl -u forest-sentinel-pipeline -f\` on the VM)."
+          } >> "$GITHUB_STEP_SUMMARY"

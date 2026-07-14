@@ -234,7 +234,9 @@ Its practical advantage depends not only on low cost, but also on **temporal cur
 ## Usage
 
 > Standing this up for your own AOI — credentials, the $0 GCP infrastructure, and
-> scheduled runs? See **[DEPLOYMENT.md](DEPLOYMENT.md)**, which scripts the setup —
+> scheduled runs? The fastest path is **[INSTANCE_DEPLOYMENT.md](INSTANCE_DEPLOYMENT.md)**:
+> create your own repo with "Use this template" and let a GitHub Action provision
+> everything (keyless). For the manual route see **[DEPLOYMENT.md](DEPLOYMENT.md)** —
 > or **[docs/cloud-shell-setup.md](docs/cloud-shell-setup.md)** to do it all from a
 > browser with no local tooling.
 
@@ -270,7 +272,7 @@ Earth Engine access requires a GCP service account with Earth Engine enabled and
 | `FOREST_SENTINEL_GEE_PROJECT` | EE-registered GCP project id (or pass `--gee-project`) |
 | `FOREST_SENTINEL_GCS_STAGING_BUCKET` | transient bucket Earth Engine exports COGs into |
 | `FOREST_SENTINEL_COG_ROOT` | local canonical COG directory (default `data/cogs/`) |
-| `GOOGLE_APPLICATION_CREDENTIALS` | service-account key (or run `earthengine authenticate`) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | optional service-account key for local dev — credentials are otherwise ambient (attached service account on the VM, `gcloud auth application-default login` locally) |
 
 The run also tracks candidates into disturbance events (overlapping candidates across dates become one event with a growing footprint and a per-date timeline).
 
