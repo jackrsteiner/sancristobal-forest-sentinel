@@ -13,7 +13,7 @@ this one is a linear checklist of the *how*.
 **What you'll have at the end:**
 
 - A GCP project with the Earth Engine, Storage, and Compute APIs enabled.
-- The `forest-sentinel` service account, its key, and the transient GCS staging bucket.
+- The `forest-sentinel-pipeline` service account, its key, and the transient GCS staging bucket.
 - An always-free `e2-micro` VM running PostgreSQL + PostGIS, the dashboard, and a
   systemd timer that runs the pipeline daily at 03:00 UTC.
 - (Optional) the GitHub Actions scheduled-run workflow wired up.
@@ -78,7 +78,7 @@ export PROJECT_ID=my-forest-sentinel
 The script is idempotent (safe to re-run) and, as described in `DEPLOYMENT.md` §3:
 
 - enables the `earthengine`, `storage`, and `compute` APIs,
-- creates the **`forest-sentinel` service account** with `roles/earthengine.writer`
+- creates the **`forest-sentinel-pipeline` service account** with `roles/earthengine.writer`
   and `roles/storage.objectAdmin`,
 - creates the transient staging bucket `gs://<PROJECT_ID>-ofs-staging` with a 1-day
   auto-delete lifecycle,
@@ -229,7 +229,7 @@ the same systemd run.
 so far). From Cloud Shell:
 
 ```sh
-SA=forest-sentinel@${PROJECT_ID}.iam.gserviceaccount.com
+SA=forest-sentinel-pipeline@${PROJECT_ID}.iam.gserviceaccount.com
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member "serviceAccount:${SA}" --role roles/compute.instanceAdmin.v1 \
     --condition=None

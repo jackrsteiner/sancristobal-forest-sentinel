@@ -86,7 +86,7 @@ export PROJECT_ID=your-gcp-project-id
 `setup_gcp.sh` is idempotent and:
 
 - enables the `earthengine`, `storage`, and `compute` APIs,
-- creates the `forest-sentinel` service account and grants it `earthengine.writer`
+- creates the `forest-sentinel-pipeline` service account and grants it `earthengine.writer`
   and `storage.objectAdmin`,
 - creates the transient GCS staging bucket with a 1-day delete lifecycle (staging is
   short-lived by design — see [`docs/architecture.md`](docs/architecture.md) §4b),
