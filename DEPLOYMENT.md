@@ -13,6 +13,12 @@ counterpart: how to configure, provision, secure, and automate it.
 > browser via Google Cloud Shell — follow
 > [`docs/cloud-shell-setup.md`](docs/cloud-shell-setup.md) instead.
 
+> **Deploying your own instance?** The recommended path is the template-repo
+> workflow in [`INSTANCE_DEPLOYMENT.md`](INSTANCE_DEPLOYMENT.md): create a repo
+> with "Use this template", run one bootstrap script, and a GitHub Action
+> provisions everything keylessly. This guide remains the manual/operational
+> reference behind it.
+
 ---
 
 ## What runs today vs. what's planned
@@ -75,8 +81,10 @@ Engine credentials — set those up in §3 first.
 
 ## 3. Configure credentials & store them safely
 
-The pipeline authenticates to Google Earth Engine and Cloud Storage with a **GCP
-service account**. Provision everything with:
+The pipeline authenticates to Google Earth Engine and Cloud Storage as the
+**`forest-sentinel-pipeline` service account**, using ambient [Application
+Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
+— **no key file by default**. Provision everything with:
 
 ```sh
 export PROJECT_ID=your-gcp-project-id
@@ -89,22 +97,29 @@ export PROJECT_ID=your-gcp-project-id
 - creates the `forest-sentinel-pipeline` service account and grants it `earthengine.writer`
   and `storage.objectAdmin`,
 - creates the transient GCS staging bucket with a 1-day delete lifecycle (staging is
-  short-lived by design — see [`docs/architecture.md`](docs/architecture.md) §4b),
-- creates a service-account key at `./gcp-service-account.json` (mode `600`).
+  short-lived by design — see [`docs/architecture.md`](docs/architecture.md) §4b).
 
 **One manual step Earth Engine requires:** register the project at
 <https://code.earthengine.google.com/register>, choosing the **noncommercial /
 unpaid** usage. EE access cannot be enabled non-interactively.
 
-### Storing secrets safely
+### Where credentials come from
 
-The service-account key is a credential — treat it like a password.
+- **On the VM:** nothing to install — `provision_vm.sh` attaches the pipeline
+  service account to the instance, and ADC comes from the metadata server.
+- **Local development:** run `gcloud auth application-default login` (keyless),
+  or mint a key with `CREATE_KEY=1 ./scripts/setup_gcp.sh` and point
+  `GOOGLE_APPLICATION_CREDENTIALS` at it. If you do use a key, keep it mode
+  `600`; `.gitignore` already excludes `.env`, `gcp-service-account.json`, and
+  `*-service-account.json`. Never paste keys into code, docs, or commit messages.
+- **Automation (CI):** no keys in CI either — workflows authenticate via
+  **Workload Identity Federation** (short-lived OIDC tokens; see
+  `scripts/setup_wif.sh` and §7).
 
-- **Local / VM:** keep the key as a file with mode `600`. `.gitignore` already
-  excludes `.env`, `gcp-service-account.json`, and `*-service-account.json`, so they
-  cannot be committed. Never paste keys into code, docs, or commit messages.
-- **Configuration:** copy `.env.example` to `.env` and fill it in. Everything (the
-  app and the scripts) reads the same variables:
+### Configuration
+
+Copy `.env.example` to `.env` and fill it in. Everything (the app and the
+scripts) reads the same variables:
 
   | Variable | Purpose | Required for |
   |----------|---------|--------------|
@@ -112,12 +127,11 @@ The service-account key is a credential — treat it like a password.
   | `FOREST_SENTINEL_GEE_PROJECT` | EE-registered GCP project id | pipeline |
   | `FOREST_SENTINEL_GCS_STAGING_BUCKET` | transient COG export bucket | pipeline |
   | `FOREST_SENTINEL_COG_ROOT` | local canonical COG dir (default `data/cogs/`) | pipeline |
-  | `GOOGLE_APPLICATION_CREDENTIALS` | path to the service-account key | pipeline |
+  | `GOOGLE_APPLICATION_CREDENTIALS` | path to a service-account key — **only** for key-based local dev | optional |
 
-- **Automation (CI):** don't put the key on disk in CI. Store it as an encrypted
-  **GitHub Actions secret** and let the workflow authenticate from it (§7).
-- **Hardening (optional):** store the key in **GCP Secret Manager** and fetch it at
-  boot instead of keeping a long-lived file on the VM.
+On the VM, `.env` is **generated** by `vm_setup.sh` from `.env.example` plus the
+committed [`config/instance.env`](config/instance.env) — make persistent changes
+there, not in `.env` (see §6).
 
 ---
 
@@ -176,37 +190,46 @@ export ZONE=us-west1-a
 ./scripts/provision_vm.sh
 ```
 
-`provision_vm.sh` creates the VM (Debian 12, e2-micro, 30 GB standard disk) and, if
-you set `OPEN_DASHBOARD=1`, a firewall rule for the dashboard port. By default the
-dashboard is **not** exposed publicly — reach it over an SSH tunnel instead.
+`provision_vm.sh` creates the VM (Debian 12, e2-micro, 30 GB standard disk) **with
+the pipeline service account attached** (run `setup_gcp.sh` first), so the VM needs
+no credential files. If you set `OPEN_DASHBOARD=1`, it also creates a firewall rule
+for the dashboard port. By default the dashboard is **not** exposed publicly — reach
+it over an SSH tunnel instead.
 
-Then finish setup on the VM:
+Two ways to finish setup:
 
-```sh
-# Copy the service-account key up:
-gcloud compute scp gcp-service-account.json forest-sentinel-vm:~/ --zone "$ZONE"
+- **Self-configuring (what the deploy Action uses):** set `REPO_URL` when
+  provisioning and the VM runs `scripts/vm_startup.sh` → `vm_setup.sh` on first
+  boot, no SSH needed:
 
-# SSH in and run the on-VM provisioning:
-gcloud compute ssh forest-sentinel-vm --zone "$ZONE"
-#   on the VM:
-git clone https://github.com/jackrsteiner/open-forest-sentinel.git
-cd open-forest-sentinel && ./scripts/vm_setup.sh
-```
+  ```sh
+  REPO_URL=https://github.com/<owner>/<repo>.git ./scripts/provision_vm.sh
+  ```
+
+- **Manually over SSH:**
+
+  ```sh
+  gcloud compute ssh forest-sentinel-vm --zone "$ZONE"
+  #   on the VM:
+  git clone https://github.com/jackrsteiner/open-forest-sentinel.git
+  cd open-forest-sentinel && ./scripts/vm_setup.sh
+  ```
 
 `vm_setup.sh` installs Docker + uv, starts PostgreSQL + PostGIS, creates `/data/cogs`,
-applies migrations, writes a starter `.env`, and installs + enables the systemd units
-for the dashboard and the scheduled pipeline.
+applies migrations, generates `.env` (from `.env.example` + `config/instance.env`),
+and installs + enables the systemd units for the dashboard and the scheduled pipeline.
 
 ---
 
 ## 6. Run on the VM & serve the dashboard
 
-After `vm_setup.sh`, edit `~/open-forest-sentinel/.env` on the VM to set
-`FOREST_SENTINEL_GEE_PROJECT`, `FOREST_SENTINEL_GCS_STAGING_BUCKET`, and the
-scheduled-run settings (`AOI_PATH`, `WINDOW_DAYS`), then:
+`vm_setup.sh` generates `~/open-forest-sentinel/.env` from `.env.example` plus the
+committed `config/instance.env` (project, bucket, AOI, window). To change settings,
+edit `config/instance.env` (and/or `config/aoi.geojson`) and re-run
+`./scripts/vm_setup.sh` — it regenerates `.env` and restarts the dashboard. Direct
+`.env` edits work for quick experiments but are overwritten on the next re-run.
 
 ```sh
-sudo systemctl restart forest-sentinel-dashboard   # pick up new env
 sudo systemctl start   forest-sentinel-pipeline    # trigger one run now
 journalctl -u forest-sentinel-pipeline -f          # watch it
 ```
@@ -244,11 +267,16 @@ only re-reads installed units.)
 
 [`.github/workflows/scheduled-run.yml`](.github/workflows/scheduled-run.yml) is the
 GitHub-Actions-cron path from the architecture. It SSHes to the VM and triggers the
-same systemd run, so the only secret in CI is the GCP credential. It ships
-**disabled** (guarded by `if: false` and a commented `schedule`). To enable it:
+same systemd run, authenticating via Workload Identity Federation — no keys in CI.
+It ships **disabled** (guarded by `if: false` and a commented `schedule`). To enable it:
 
-1. Add repo secrets `GCP_PROJECT`, `GCE_INSTANCE`, `GCE_ZONE`, `GCP_SA_KEY`.
-2. Remove the `if: ${{ false }}` guard and uncomment the `schedule:` trigger.
+1. Run `scripts/setup_wif.sh` (once per instance) and add the repo **variables**
+   `WIF_PROVIDER` and `PROVISIONER_SA` it prints (see
+   [`INSTANCE_DEPLOYMENT.md`](INSTANCE_DEPLOYMENT.md) — instance repos already
+   have these after their first deploy).
+2. Make sure `PROJECT_ID` (and, if not default, `INSTANCE_NAME`/`ZONE`) are set
+   in `config/instance.env`.
+3. Remove the `if: ${{ false }}` guard and uncomment the `schedule:` trigger.
 
 > The pipeline currently runs **synchronously** (it submits each Earth Engine export
 > and polls it to completion). A submit-and-return mode is future work; until then,
@@ -270,6 +298,9 @@ same systemd run, so the only secret in CI is the GCP credential. It ships
   the GCS bucket inside its 5 GB-month free tier (the 1-day lifecycle rule helps),
   stay on the Earth Engine noncommercial tier, mind dashboard egress, and don't let
   the disk spill to metered storage.
+- **Teardown.** `PROJECT_ID=… ./scripts/teardown_gcp.sh` deletes the created
+  resources (VM, firewall rule, bucket, service accounts, WIF pool); add `--nuke`
+  to delete the entire project instead.
 
 ---
 
@@ -278,7 +309,7 @@ same systemd run, so the only secret in CI is the GCP credential. It ships
 | Symptom | Cause / fix |
 |---------|-------------|
 | `could not connect to the database` | Postgres isn't up. `docker compose up -d`; on the VM check `docker compose ps`. |
-| `earthengine authenticate ... ee.Authenticate()` | EE isn't initialized. Set `GOOGLE_APPLICATION_CREDENTIALS` and `FOREST_SENTINEL_GEE_PROJECT`, and register the project at code.earthengine.google.com/register. EE auth is checked **before** the storage bucket. |
+| `earthengine authenticate ... ee.Authenticate()` | EE isn't initialized. Make sure ADC is available (attached service account on the VM; `gcloud auth application-default login` or a key + `GOOGLE_APPLICATION_CREDENTIALS` locally), set `FOREST_SENTINEL_GEE_PROJECT`, and register the project at code.earthengine.google.com/register. EE auth is checked **before** the storage bucket. |
 | `FOREST_SENTINEL_GCS_STAGING_BUCKET is not set` (StorageError) | Export staging bucket missing. Run `scripts/setup_gcp.sh` and set the variable. |
 | `an AOI named '…' already exists` | The AOI name is unique. The Slice 0 load rejects duplicates; the pipeline reuses the existing AOI by name. |
 | Pipeline reports 0 observations | No HLS scenes for the AOI/window, or all cloud-masked. Widen the window or pick a less cloudy period. |

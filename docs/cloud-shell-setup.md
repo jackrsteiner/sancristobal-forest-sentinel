@@ -13,10 +13,15 @@ this one is a linear checklist of the *how*.
 **What you'll have at the end:**
 
 - A GCP project with the Earth Engine, Storage, and Compute APIs enabled.
-- The `forest-sentinel-pipeline` service account, its key, and the transient GCS staging bucket.
+- The `forest-sentinel-pipeline` service account (no key — the VM uses it via
+  attachment) and the transient GCS staging bucket.
 - An always-free `e2-micro` VM running PostgreSQL + PostGIS, the dashboard, and a
   systemd timer that runs the pipeline daily at 03:00 UTC.
 - (Optional) the GitHub Actions scheduled-run workflow wired up.
+
+> Deploying a **per-instance repo created from the template**? The GitHub-Action
+> path in [`INSTANCE_DEPLOYMENT.md`](../INSTANCE_DEPLOYMENT.md) automates §3–§7
+> of this guide; you only need §1–§2 here plus `scripts/setup_wif.sh`.
 
 ---
 
@@ -81,16 +86,12 @@ The script is idempotent (safe to re-run) and, as described in `DEPLOYMENT.md` �
 - creates the **`forest-sentinel-pipeline` service account** with `roles/earthengine.writer`
   and `roles/storage.objectAdmin`,
 - creates the transient staging bucket `gs://<PROJECT_ID>-ofs-staging` with a 1-day
-  auto-delete lifecycle,
-- writes the service-account key to `./gcp-service-account.json` (mode `600`).
+  auto-delete lifecycle.
 
-It finishes by printing the three environment values you'll need in §7 — keep that
-output visible or scroll back to it later.
-
-> **Key hygiene.** The key file now sits in Cloud Shell's persistent `$HOME`. Treat it
-> like a password: it goes to the VM in §5 (and optionally into a GitHub secret in
-> §9), and then you delete it from Cloud Shell. Never commit it — `.gitignore`
-> already excludes it.
+No key file is created: the VM will use this service account by **attachment**
+(credentials come from the metadata server), so there is nothing to copy around
+or delete afterwards. (Key-based local development is still possible with
+`CREATE_KEY=1` — see `DEPLOYMENT.md` §3.)
 
 ---
 
@@ -110,14 +111,13 @@ it through a tunnel instead. If you ever want it public, re-run with `OPEN_DASHB
 
 ---
 
-## 5. Copy the key up and run the on-VM setup
+## 5. Run the on-VM setup
 
 ```sh
-gcloud compute scp gcp-service-account.json forest-sentinel-vm:~/ --zone "$ZONE"
 gcloud compute ssh forest-sentinel-vm --zone "$ZONE"
 ```
 
-> The first `gcloud compute ssh`/`scp` generates an SSH key for you — accept the
+> The first `gcloud compute ssh` generates an SSH key for you — accept the
 > prompts (an empty passphrase is fine for this use).
 
 You now have a shell **on the VM**. Run:
@@ -128,17 +128,13 @@ cd open-forest-sentinel && ./scripts/vm_setup.sh
 ```
 
 `vm_setup.sh` (idempotent) installs Docker + uv, starts PostgreSQL + PostGIS with a
-persistent data volume, creates the canonical COG store at `/data/cogs`, installs the
-key you copied up, writes a starter `.env`, applies the database migrations, and
-enables two systemd units: the dashboard service and the daily 03:00 UTC pipeline
-timer.
+persistent data volume, creates the canonical COG store at `/data/cogs`, generates
+`.env` (project id and staging bucket are auto-detected from the VM's metadata and
+`config/instance.env`), applies the database migrations, and enables two systemd
+units: the dashboard service and the daily 03:00 UTC pipeline timer. No credentials
+are involved — the attached service account provides them.
 
-Stay on the VM for §6–§7. Once the key is safely on the VM (and, if you plan to do
-§9, in a GitHub secret), remove it from Cloud Shell — back in the Cloud Shell tab:
-
-```sh
-rm ~/open-forest-sentinel/gcp-service-account.json
-```
+Stay on the VM for §6–§7.
 
 ---
 
@@ -149,13 +145,15 @@ it lands exactly where the scheduler will look for it:
 
 ```sh
 cd ~/open-forest-sentinel
-mkdir -p aois
 uv run python scripts/make_aoi.py \
     --bbox 159.0 -9.6 159.3 -9.3 \
     --name "Guadalcanal North Coast" \
-    --out aois/my-aoi.geojson
+    --out config/aoi.geojson
 ```
 
+This overwrites the sample AOI at `config/aoi.geojson`, which is where the
+generated `.env` points `AOI_PATH`. (You can also build one interactively at
+<https://jackrsteiner.github.io/aoi-maker/> and paste it into that file.)
 `--bbox` is `min_lon min_lat max_lon max_lat` (WGS 84). The file is validated with the
 same loader the pipeline uses, so it's guaranteed to be accepted. Keep the AOI small —
 the `e2-micro` VM has 1 GB RAM and a 30 GB disk shared with Postgres and the COG store
@@ -163,34 +161,27 @@ the `e2-micro` VM has 1 GB RAM and a 30 GB disk shared with Postgres and the COG
 
 > Prefer working in Cloud Shell? `uv sync` there (uv:
 > `curl -LsSf https://astral.sh/uv/install.sh | sh`), run the same `make_aoi.py`
-> command, then `gcloud compute scp aois/my-aoi.geojson forest-sentinel-vm:~/open-forest-sentinel/aois/ --zone "$ZONE"`.
+> command, then `gcloud compute scp config/aoi.geojson forest-sentinel-vm:~/open-forest-sentinel/config/ --zone "$ZONE"`.
 
 ---
 
-## 7. Configure `.env` and run the pipeline once
+## 7. Adjust settings and run the pipeline once
 
-Still on the VM, edit the environment file (`nano .env` works):
+`vm_setup.sh` already generated `.env` with the project id and staging bucket
+auto-detected from the VM's metadata, and `AOI_PATH` pointing at
+`config/aoi.geojson`. To change the window or tuning values, edit the committed
+config and re-run the setup (it regenerates `.env` and restarts the dashboard):
 
 ```sh
 cd ~/open-forest-sentinel
-nano .env
+nano config/instance.env      # e.g. WINDOW_DAYS=30, THRESHOLD, MIN_AREA
+./scripts/vm_setup.sh
 ```
 
-Set these (the COG root and key path are already appended by `vm_setup.sh`):
+Then trigger one pipeline run now rather than waiting for the 03:00 UTC timer:
 
 ```sh
-FOREST_SENTINEL_GEE_PROJECT=my-forest-sentinel
-FOREST_SENTINEL_GCS_STAGING_BUCKET=my-forest-sentinel-ofs-staging
-AOI_PATH=aois/my-aoi.geojson
-WINDOW_DAYS=30
-```
-
-Then restart the dashboard (to pick up the env) and trigger one pipeline run now
-rather than waiting for the 03:00 UTC timer:
-
-```sh
-sudo systemctl restart forest-sentinel-dashboard
-sudo systemctl start   forest-sentinel-pipeline
+sudo systemctl start forest-sentinel-pipeline
 journalctl -u forest-sentinel-pipeline -f        # watch it (Ctrl-C to stop watching)
 ```
 
@@ -223,35 +214,32 @@ tunnel when done.
 The VM's systemd timer already runs the pipeline daily, so this section is optional —
 it wires up the repo's [`scheduled-run.yml`](../.github/workflows/scheduled-run.yml)
 workflow (`DEPLOYMENT.md` §7), which SSHes to the VM on a GitHub-side cron and triggers
-the same systemd run.
+the same systemd run. Authentication uses **Workload Identity Federation** — no
+key JSON ever touches GitHub.
 
-**a. Grant the service account SSH rights** (it only has Earth Engine + Storage roles
-so far). From Cloud Shell:
+**a. Set up WIF** (skip if you already ran this for the repo). From Cloud Shell,
+in your fork/instance of the repo:
 
 ```sh
-SA=forest-sentinel-pipeline@${PROJECT_ID}.iam.gserviceaccount.com
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member "serviceAccount:${SA}" --role roles/compute.instanceAdmin.v1 \
-    --condition=None
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member "serviceAccount:${SA}" --role roles/iam.serviceAccountUser \
-    --condition=None
+PROJECT_ID=my-forest-sentinel GITHUB_REPO=<owner/repo-exact-casing> ./scripts/setup_wif.sh
 ```
 
-(`instanceAdmin.v1` lets `gcloud compute ssh` manage the instance's SSH-key metadata;
-`serviceAccountUser` is required because the VM has a service account attached. A
-tighter setup — a dedicated CI service account, or OS Login/IAP-scoped roles — is a
-good hardening step later.)
+The script creates a workload identity pool + provider locked to that one GitHub
+repo and a `forest-sentinel-provisioner` service account for workflows to
+impersonate (its `compute.admin` + `iam.serviceAccountUser` roles cover
+`gcloud compute ssh`). A tighter setup — a dedicated runner SA with only
+OS Login/IAP-scoped roles — is a good hardening step later.
 
-**b. Add the four repository secrets** in GitHub → repo → *Settings → Secrets and
-variables → Actions*:
+**b. Add the two repository variables** it prints, in GitHub → repo → *Settings →
+Secrets and variables → Actions → Variables*:
 
-| Secret | Value |
-|--------|-------|
-| `GCP_PROJECT` | your project ID |
-| `GCE_INSTANCE` | `forest-sentinel-vm` |
-| `GCE_ZONE` | e.g. `us-west1-a` |
-| `GCP_SA_KEY` | the full JSON of the key — `cat gcp-service-account.json` in Cloud Shell (before you delete it there; afterwards, `cat` it on the VM) and paste |
+| Variable | Value |
+|----------|-------|
+| `WIF_PROVIDER` | `projects/<number>/locations/global/workloadIdentityPools/github/providers/github-oidc` |
+| `PROVISIONER_SA` | `forest-sentinel-provisioner@<project>.iam.gserviceaccount.com` |
+
+Also make sure `PROJECT_ID` is set in the committed `config/instance.env` (the
+workflow reads the VM name/zone from there too).
 
 **c. Enable the workflow.** Edit `.github/workflows/scheduled-run.yml` — doable
 entirely in the GitHub web editor: delete the `if: ${{ false }}` guard line and
