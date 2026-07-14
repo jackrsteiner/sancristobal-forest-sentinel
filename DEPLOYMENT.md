@@ -184,10 +184,10 @@ Then finish setup on the VM:
 
 ```sh
 # Copy the service-account key up:
-gcloud compute scp gcp-service-account.json forest-sentinel:~/ --zone "$ZONE"
+gcloud compute scp gcp-service-account.json forest-sentinel-vm:~/ --zone "$ZONE"
 
 # SSH in and run the on-VM provisioning:
-gcloud compute ssh forest-sentinel --zone "$ZONE"
+gcloud compute ssh forest-sentinel-vm --zone "$ZONE"
 #   on the VM:
 git clone https://github.com/jackrsteiner/open-forest-sentinel.git
 cd open-forest-sentinel && ./scripts/vm_setup.sh
@@ -214,7 +214,7 @@ journalctl -u forest-sentinel-pipeline -f          # watch it
 Reach the dashboard via an SSH tunnel (no public exposure):
 
 ```sh
-gcloud compute ssh forest-sentinel --zone "$ZONE" -- -L 8000:localhost:8000
+gcloud compute ssh forest-sentinel-vm --zone "$ZONE" -- -L 8000:localhost:8000
 # then open http://localhost:8000
 ```
 

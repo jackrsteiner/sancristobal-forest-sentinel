@@ -101,7 +101,7 @@ export ZONE=us-central1-a
 ./scripts/provision_vm.sh
 ```
 
-This creates a VM named `forest-sentinel` (Debian 12, `e2-micro`, 30 GB standard
+This creates a VM named `forest-sentinel-vm` (Debian 12, `e2-micro`, 30 GB standard
 disk). The always-free tier **only** applies in `us-west1`, `us-central1`, and
 `us-east1` — the script warns if you pick a zone outside them.
 
@@ -113,8 +113,8 @@ it through a tunnel instead. If you ever want it public, re-run with `OPEN_DASHB
 ## 5. Copy the key up and run the on-VM setup
 
 ```sh
-gcloud compute scp gcp-service-account.json forest-sentinel:~/ --zone "$ZONE"
-gcloud compute ssh forest-sentinel --zone "$ZONE"
+gcloud compute scp gcp-service-account.json forest-sentinel-vm:~/ --zone "$ZONE"
+gcloud compute ssh forest-sentinel-vm --zone "$ZONE"
 ```
 
 > The first `gcloud compute ssh`/`scp` generates an SSH key for you — accept the
@@ -163,7 +163,7 @@ the `e2-micro` VM has 1 GB RAM and a 30 GB disk shared with Postgres and the COG
 
 > Prefer working in Cloud Shell? `uv sync` there (uv:
 > `curl -LsSf https://astral.sh/uv/install.sh | sh`), run the same `make_aoi.py`
-> command, then `gcloud compute scp aois/my-aoi.geojson forest-sentinel:~/open-forest-sentinel/aois/ --zone "$ZONE"`.
+> command, then `gcloud compute scp aois/my-aoi.geojson forest-sentinel-vm:~/open-forest-sentinel/aois/ --zone "$ZONE"`.
 
 ---
 
@@ -208,7 +208,7 @@ Shell tab (not the VM), open a tunnel from Cloud Shell port 8080 to the dashboar
 the VM:
 
 ```sh
-gcloud compute ssh forest-sentinel --zone "$ZONE" -- -N -L 8080:localhost:8000
+gcloud compute ssh forest-sentinel-vm --zone "$ZONE" -- -N -L 8080:localhost:8000
 ```
 
 Leave that running, click the **Web Preview** button (the eye/window icon in the Cloud
@@ -249,7 +249,7 @@ variables → Actions*:
 | Secret | Value |
 |--------|-------|
 | `GCP_PROJECT` | your project ID |
-| `GCE_INSTANCE` | `forest-sentinel` |
+| `GCE_INSTANCE` | `forest-sentinel-vm` |
 | `GCE_ZONE` | e.g. `us-central1-a` |
 | `GCP_SA_KEY` | the full JSON of the key — `cat gcp-service-account.json` in Cloud Shell (before you delete it there; afterwards, `cat` it on the VM) and paste |
 
@@ -262,7 +262,7 @@ uncomment the `schedule:` block. Test it from the repo's *Actions* tab with
 
 ## 10. Verify everything
 
-From Cloud Shell (`gcloud compute ssh forest-sentinel --zone "$ZONE"`), on the VM:
+From Cloud Shell (`gcloud compute ssh forest-sentinel-vm --zone "$ZONE"`), on the VM:
 
 | Check | Command | Expect |
 |-------|---------|--------|

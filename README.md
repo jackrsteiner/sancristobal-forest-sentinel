@@ -188,7 +188,7 @@ flowchart LR
         ee["Earth Engine<br/>noncommercial tier — free"]
         gcs["Cloud Storage<br/>transient export staging"]
         subgraph VM["e2-micro VM — always-free"]
-            orch["forest-sentinel<br/>orchestrator"]
+            orch["forest-sentinel-vm<br/>orchestrator"]
             db[("PostgreSQL<br/>+ PostGIS")]
             disk[("COGs on 30 GB<br/>free disk")]
         end

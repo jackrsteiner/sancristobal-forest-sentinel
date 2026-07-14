@@ -9,14 +9,14 @@
 # Configure via environment variables:
 #   PROJECT_ID     GCP project id                          (required)
 #   ZONE           always-free zone        (default: us-central1-a)
-#   INSTANCE_NAME  VM name             (default: forest-sentinel)
+#   INSTANCE_NAME  VM name             (default: forest-sentinel-vm)
 #   DASHBOARD_PORT firewall port for the dashboard         (default: 8000)
 #   OPEN_DASHBOARD set to 1 to open DASHBOARD_PORT to 0.0.0.0/0 (default: 0)
 set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:?set PROJECT_ID to your GCP project id}"
 ZONE="${ZONE:-us-central1-a}"
-INSTANCE_NAME="${INSTANCE_NAME:-forest-sentinel}"
+INSTANCE_NAME="${INSTANCE_NAME:-forest-sentinel-vm}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8000}"
 OPEN_DASHBOARD="${OPEN_DASHBOARD:-0}"
 
