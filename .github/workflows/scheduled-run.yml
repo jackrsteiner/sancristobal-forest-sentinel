@@ -11,7 +11,7 @@
 # Required repository secrets:
 #   GCP_PROJECT       GCP project id
 #   GCE_INSTANCE      VM name (e.g. forest-sentinel-vm)
-#   GCE_ZONE          VM zone (e.g. us-central1-a)
+#   GCE_ZONE          VM zone (e.g. us-west1-a)
 #   GCP_SA_KEY        service-account key JSON (for `gcloud` auth in CI)
 
 name: Scheduled pipeline run

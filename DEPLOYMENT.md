@@ -172,7 +172,7 @@ PostGIS, and the canonical COG store. The always-free tier only applies in
 
 ```sh
 export PROJECT_ID=your-gcp-project-id
-export ZONE=us-central1-a
+export ZONE=us-west1-a
 ./scripts/provision_vm.sh
 ```
 

@@ -11,7 +11,7 @@
 #
 # Configure via environment variables (all optional except PROJECT_ID):
 #   PROJECT_ID            GCP project id                      (required)
-#   REGION                bucket location          (default: us-central1)
+#   REGION                bucket location          (default: us-west1)
 #   SERVICE_ACCOUNT_NAME  service account id     (default: forest-sentinel-pipeline)
 #   STAGING_BUCKET        GCS staging bucket name  (default: ${PROJECT_ID}-ofs-staging)
 #   KEY_FILE              output path for the SA key (default: ./gcp-service-account.json)
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:?set PROJECT_ID to your GCP project id}"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-us-west1}"
 SERVICE_ACCOUNT_NAME="${SERVICE_ACCOUNT_NAME:-forest-sentinel-pipeline}"
 STAGING_BUCKET="${STAGING_BUCKET:-${PROJECT_ID}-ofs-staging}"
 KEY_FILE="${KEY_FILE:-./gcp-service-account.json}"

@@ -97,7 +97,7 @@ output visible or scroll back to it later.
 ## 4. Create the always-free VM
 
 ```sh
-export ZONE=us-central1-a
+export ZONE=us-west1-a
 ./scripts/provision_vm.sh
 ```
 
@@ -250,7 +250,7 @@ variables → Actions*:
 |--------|-------|
 | `GCP_PROJECT` | your project ID |
 | `GCE_INSTANCE` | `forest-sentinel-vm` |
-| `GCE_ZONE` | e.g. `us-central1-a` |
+| `GCE_ZONE` | e.g. `us-west1-a` |
 | `GCP_SA_KEY` | the full JSON of the key — `cat gcp-service-account.json` in Cloud Shell (before you delete it there; afterwards, `cat` it on the VM) and paste |
 
 **c. Enable the workflow.** Edit `.github/workflows/scheduled-run.yml` — doable
