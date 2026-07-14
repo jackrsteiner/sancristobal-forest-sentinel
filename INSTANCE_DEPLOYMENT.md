@@ -14,6 +14,21 @@ For general operations (tuning, systemd, backups, troubleshooting) see
 
 ---
 
+## At a glance
+
+1. Base repo, once ever: enable **Template repository** → [§0](#0-one-time-on-the-base-repo-maintainers)
+2. **Use this template** → create a *public* instance repo (note exact `owner/name` casing) → [§1](#1-create-the-instance-repo)
+3. GCP console: create project, attach billing, register for Earth Engine → [§2](#2-manual-gcp-bootstrap-once-per-instance)
+4. Cloud Shell: `PROJECT_ID=… GITHUB_REPO=… ./scripts/setup_wif.sh` → [§2](#2-manual-gcp-bootstrap-once-per-instance)
+5. Repo settings: variables `WIF_PROVIDER` + `PROVISIONER_SA`; PAT → secret `OFS_ADMIN_TOKEN` → [§3](#3-wire-up-the-instance-repo)
+6. Edit + commit `config/instance.env` (`PROJECT_ID`) and `config/aoi.geojson` → [§4](#4-commit-your-configuration)
+7. Actions → run **Deploy instance** (graft → WIF auth → provision GCP + VM → wait) → [§5](#5-run-the-deploy-instance-workflow)
+8. SSH tunnel → dashboard at `http://localhost:8000` → [§6](#6-view-the-dashboard)
+9. Later: pull template updates with `git pull --no-rebase upstream main` → [Updating an instance later](#updating-an-instance-later)
+10. Done with it: `./scripts/teardown_gcp.sh` (or `--nuke`) → [Tear it all down](#tear-it-all-down)
+
+---
+
 ## How it fits together
 
 | Piece | Role |
