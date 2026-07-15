@@ -113,7 +113,7 @@ cat <<EOF
 
 Workload Identity Federation ready. Finish wiring the instance repo:
 
-1. Repo Settings -> Secrets and variables -> Actions -> Variables. Add:
+1. Repo Settings -> Secrets and variables -> Actions -> Variables. New repository variable to add:
      WIF_PROVIDER    ${WIF_PROVIDER}
      PROVISIONER_SA  ${PROVISIONER_SA}
    (These are identifiers, not secrets — variables are fine.)
