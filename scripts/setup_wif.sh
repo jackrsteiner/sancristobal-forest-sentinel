@@ -113,13 +113,13 @@ cat <<EOF
 
 Workload Identity Federation ready. Finish wiring the instance repo:
 
-1. Repo Settings -> Secrets and variables -> Actions -> Variables. Add:
+1. Repo Settings -> Secrets and variables -> Actions -> Variables. New repository variable to add:
      WIF_PROVIDER    ${WIF_PROVIDER}
      PROVISIONER_SA  ${PROVISIONER_SA}
    (These are identifiers, not secrets — variables are fine.)
 
-2. Create a fine-grained personal access token for the history-graft step
-   (github.com -> Settings -> Developer settings -> Fine-grained tokens):
+2. Generate a new fine-grained personal access token for the history-graft step
+   (github.com -> Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens):
      Repository access:  only ${GITHUB_REPO}
      Permissions:        Contents: Read and write, Workflows: Read and write
    Save it as the repository SECRET:
