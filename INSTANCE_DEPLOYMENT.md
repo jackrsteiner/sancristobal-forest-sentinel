@@ -98,7 +98,10 @@ Edit and commit (both files live outside the base machinery and survive the
 history graft):
 
 - **`config/instance.env`** — set `PROJECT_ID` (required); optionally `ZONE`,
-  `INSTANCE_NAME`, `WINDOW_DAYS`, thresholds, etc.
+  `INSTANCE_NAME`, `WINDOW_DAYS`, thresholds, etc. When `setup_wif.sh` runs
+  inside your instance clone it sets and commits `PROJECT_ID` for you (and
+  pushes it if the shell has GitHub credentials), so usually only the AOI is
+  left to provide.
 - **`config/aoi.geojson`** — your Area of Interest. Build one at
   <https://jackrsteiner.github.io/aoi-maker/>, or with
   `uv run python scripts/make_aoi.py --bbox … --name … --out config/aoi.geojson`.

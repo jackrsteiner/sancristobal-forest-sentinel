@@ -164,6 +164,53 @@ done <<EOF
 ${stale_members}
 EOF
 
+# --- Sync PROJECT_ID into the committed instance config (best-effort) -------
+# Only when this shell is inside a clone of the instance repo itself (origin
+# must match GITHUB_REPO), so a clone of the base repo or an unrelated checkout
+# is never touched. The edit and commit always work; the push needs GitHub
+# credentials in this shell and degrades to a "run git push" instruction.
+INSTANCE_ENV_FILE="config/instance.env"
+CONFIG_STATUS="manual" # manual | synced | committed | pushed
+AOI_IS_SAMPLE=0
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+origin_url="$(git remote get-url origin 2>/dev/null || true)"
+origin_lc="$(printf '%s' "${origin_url}" | tr '[:upper:]' '[:lower:]')"
+repo_lc="$(printf '%s' "${GITHUB_REPO}" | tr '[:upper:]' '[:lower:]')"
+case "${origin_lc}" in
+    *"/${repo_lc}" | *"/${repo_lc}.git" | *":${repo_lc}" | *":${repo_lc}.git")
+        if [ -n "${repo_root}" ] && [ -f "${repo_root}/${INSTANCE_ENV_FILE}" ]; then
+            current_project="$(sed -n 's/^PROJECT_ID=//p' "${repo_root}/${INSTANCE_ENV_FILE}" | head -n 1)"
+            if [ "${current_project}" = "${PROJECT_ID}" ]; then
+                echo "==> ${INSTANCE_ENV_FILE} already sets PROJECT_ID=${PROJECT_ID}"
+                CONFIG_STATUS="synced"
+            else
+                echo "==> Setting PROJECT_ID=${PROJECT_ID} in ${INSTANCE_ENV_FILE}"
+                sed -i "s|^PROJECT_ID=.*|PROJECT_ID=${PROJECT_ID}|" "${repo_root}/${INSTANCE_ENV_FILE}"
+                if ! git -C "${repo_root}" config user.email >/dev/null 2>&1; then
+                    git -C "${repo_root}" config user.name "setup_wif.sh"
+                    git -C "${repo_root}" config user.email "setup-wif@noreply.local"
+                fi
+                git -C "${repo_root}" commit -q \
+                    -m "Set PROJECT_ID=${PROJECT_ID} in config/instance.env" \
+                    -- "${INSTANCE_ENV_FILE}"
+                CONFIG_STATUS="committed"
+                branch="$(git -C "${repo_root}" rev-parse --abbrev-ref HEAD)"
+                if git -C "${repo_root}" push origin "${branch}" >/dev/null 2>&1; then
+                    echo "    (committed and pushed to ${GITHUB_REPO})"
+                    CONFIG_STATUS="pushed"
+                else
+                    echo "    (committed locally; push failed — no GitHub credentials in" >&2
+                    echo "     this shell? Authenticate and run: git push)" >&2
+                fi
+            fi
+            if [ -f "${repo_root}/examples/aoi-sample.geojson" ] \
+                    && cmp -s "${repo_root}/config/aoi.geojson" "${repo_root}/examples/aoi-sample.geojson"; then
+                AOI_IS_SAMPLE=1
+            fi
+        fi
+        ;;
+esac
+
 WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
 
 cat <<EOF
@@ -182,9 +229,50 @@ Workload Identity Federation ready. Finish wiring the instance repo:
    Save it as the repository SECRET:
      OFS_ADMIN_TOKEN
 
+EOF
+
+case "${CONFIG_STATUS}" in
+    pushed)
+        cat <<EOF
+3. config/instance.env now sets PROJECT_ID=${PROJECT_ID} (committed and pushed).
+   Make sure config/aoi.geojson is your own AOI (committed + pushed), then run
+   the "Deploy instance" workflow from the Actions tab.
+EOF
+        ;;
+    committed)
+        cat <<EOF
+3. config/instance.env now sets PROJECT_ID=${PROJECT_ID}, committed locally but
+   NOT pushed (authenticate to GitHub, then: git push). Make sure
+   config/aoi.geojson is your own AOI, push both, then run the
+   "Deploy instance" workflow from the Actions tab.
+EOF
+        ;;
+    synced)
+        cat <<EOF
+3. config/instance.env already sets PROJECT_ID=${PROJECT_ID}. Make sure it and
+   your config/aoi.geojson are pushed, then run the "Deploy instance" workflow
+   from the Actions tab.
+EOF
+        ;;
+    *)
+        cat <<EOF
 3. Commit your config (config/instance.env with PROJECT_ID=${PROJECT_ID}, and
    config/aoi.geojson), then run the "Deploy instance" workflow from the
    Actions tab.
+EOF
+        ;;
+esac
+
+if [ "${AOI_IS_SAMPLE}" = "1" ]; then
+    cat <<EOF
+
+Note: config/aoi.geojson is still the bundled sample AOI — replace it with
+your own (build one at https://jackrsteiner.github.io/aoi-maker/) before
+deploying.
+EOF
+fi
+
+cat <<EOF
 
 To revoke GitHub's provisioning access later, run scripts/teardown_gcp.sh or:
   gcloud iam workload-identity-pools providers delete ${PROVIDER_ID} \\
