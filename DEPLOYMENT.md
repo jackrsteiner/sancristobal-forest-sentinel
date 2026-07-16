@@ -233,6 +233,10 @@ committed `config/instance.env` (project, bucket, AOI, window). To change settin
 edit `config/instance.env` (and/or `config/aoi.geojson`) and re-run
 `./scripts/vm_setup.sh` — it regenerates `.env` and restarts the dashboard. Direct
 `.env` edits work for quick experiments but are overwritten on the next re-run.
+No SSH needed: the **Update instance** workflow
+([`.github/workflows/update-instance.yml`](.github/workflows/update-instance.yml))
+runs the same pull + `vm_setup.sh` on the VM from the Actions tab, and can merge
+template updates first (see `INSTANCE_DEPLOYMENT.md` → "Updating an instance later").
 
 ```sh
 sudo systemctl start   forest-sentinel-pipeline    # trigger one run now
