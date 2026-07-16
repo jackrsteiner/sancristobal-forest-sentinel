@@ -112,7 +112,7 @@ Schema changes are versioned with **Alembic**; each migration is reviewed and sh
 
 **Costs and risks accepted.**
 
-- **Asynchronous execution.** Exports are batch tasks (submit → poll → ingest), so the pipeline is a state machine rather than a synchronous function. The CLI entrypoint and the GitHub Actions cron must handle the task lifecycle.
+- **Asynchronous execution.** Exports are batch tasks (submit → poll → ingest). The pipeline currently consumes them **synchronously** — each export is submitted and polled to completion before the dependent step (`storage.py`), so a run blocks for its full duration; a submit-and-return mode is future work if run times demand it.
 - **EECU-hours are the compute cost dimension.** The project runs under the EE **noncommercial tiers**; the working assumption is the **Contributor** tier, to be confirmed once real per-run usage is measured. Commercial use would later require a paid license.
 - **Observation currency depends on EE's HLS ingestion lag**, which can run behind NASA LP DAAC. If the lag is large for the AOI, the README's "less than one week old" target may not hold; confirm against real data during implementation and adjust the target if needed.
 - **Reproducibility.** Because the compute substrate is Google's, `methodology_version` records must capture the EE script version / asset IDs so a run can be reproduced.
@@ -252,8 +252,11 @@ images as skipped. An empty window / no available scenes yields zero observation
 `DiscoveryResult(discovered, recorded, skipped)` reports the per-pass counts.
 
 **Auth.** Earth Engine needs a GCP service account with EE access and an EE-registered Cloud
-project: `FOREST_SENTINEL_GEE_PROJECT` (project id) plus ambient credentials
-(`GOOGLE_APPLICATION_CREDENTIALS`, or an interactive `earthengine authenticate`). The
+project: `FOREST_SENTINEL_GEE_PROJECT` (project id) plus ambient Application Default
+Credentials. On the VM those come from the **attached service account** via the metadata
+server (the keyless default — no credentials file exists; see `scripts/provision_vm.sh`);
+locally, use `gcloud auth application-default login`, or opt into a key file with
+`CREATE_KEY=1 scripts/setup_gcp.sh` + `GOOGLE_APPLICATION_CREDENTIALS`. The
 `FOREST_SENTINEL_GCS_STAGING_BUCKET` (used by storage) must be writable by the same account.
 CI exercises everything through stubs, so no credentials are needed to run the tests.
 

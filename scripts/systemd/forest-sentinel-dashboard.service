@@ -8,7 +8,7 @@ Type=simple
 User=@USER@
 WorkingDirectory=@APP_DIR@
 EnvironmentFile=@APP_DIR@/.env
-ExecStart=/home/@USER@/.local/bin/uv run uvicorn forest_sentinel.dashboard.app:app --host 0.0.0.0 --port 8000
+ExecStart=/home/@USER@/.local/bin/uv run uvicorn forest_sentinel.dashboard.app:app --host 0.0.0.0 --port @DASHBOARD_PORT@
 Restart=on-failure
 RestartSec=5
 

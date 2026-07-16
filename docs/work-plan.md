@@ -118,6 +118,13 @@ Run the end-to-end pipeline on a cron schedule on a Google Compute Engine VM, tr
 
 **Acceptance:** scheduled runs refresh the dashboard without manual intervention.
 
+> **Status: substantially delivered ahead of Slice 3.** Unattended scheduling ships today as a
+> systemd timer on the VM (`scripts/systemd/forest-sentinel-pipeline.timer`, daily 03:00 UTC,
+> installed by `vm_setup.sh`) with failure handling via the CLI's nonzero exit and `journalctl`
+> logging; VM provisioning is automated end to end (see E18). The GitHub-Actions cron path
+> exists as `.github/workflows/scheduled-run.yml` (WIF-authenticated, shipped **disabled**);
+> enabling it is the remaining E11 work.
+
 ### E12 — Raster storage layout
 Store COGs on the **VM's local filesystem** (e.g. `/data/cogs/`) with a deterministic layout, behind a storage abstraction, for $0 cost. Earth Engine exports COGs to a transient GCS staging area (`Export.image.toCloudStorage`); the abstraction owns the EE export-task lifecycle (submit, poll, locate output), copies the finished COG to local disk, clears the staging object, and provides the local COG path to the metadata catalog. (Future path: keep COGs in GCS once volume outgrows the free disk — a backend swap behind the same interface.)
 
@@ -174,6 +181,36 @@ Join legal, administrative, and infrastructure context to disturbance events (RE
 
 **Acceptance:** disturbance events are joined to configured context layers, and the dashboard can show how a detection relates to concessions, roads, rivers, and other features.
 
+### E18 — Instance deployment & operations
+Make standing up (and tearing down) a complete instance a repeatable, largely automated
+workflow on the $0 GCP footprint. This epic was delivered outside the bead system (PRs
+#68–#73) and is recorded here retroactively; future deployment/ops work is filed as beads
+under it.
+
+**Delivered:**
+
+- Template-instance model: create an instance repo with "Use this template"; the deploy
+  workflow grafts this repo's history onto it so instances can pull future updates
+  (`INSTANCE_DEPLOYMENT.md`).
+- Keyless auth end to end: GitHub Actions → GCP via Workload Identity Federation
+  (`scripts/setup_wif.sh`, self-healing on re-run), and the VM via its attached service
+  account — no service-account keys anywhere (`CREATE_KEY=1` remains for local dev).
+- One-click provisioning: `.github/workflows/deploy.yml` runs `setup_gcp.sh` +
+  `provision_vm.sh`; the VM self-configures on first boot (`vm_startup.sh` → `vm_setup.sh`)
+  and reports status via a guest attribute.
+- Committed per-instance config (`config/instance.env`, `config/aoi.geojson`) from which
+  the VM regenerates `.env` on every setup run.
+- Teardown (`scripts/teardown_gcp.sh`: resource-level or `--nuke`) and a scaling / cost
+  analysis with an efficiency roadmap (`docs/scaling.md`).
+
+**Candidate future beads:** an "update from template" workflow in instance repos;
+CI-published container images (GHCR) so instances run released artifacts; multi-AOI
+scheduling; the `docs/scaling.md` efficiency roadmap (skip unchanged exports, per-scene
+region clipping, concurrent export submission).
+
+**Acceptance:** a new instance goes from "Use this template" to a running dashboard with
+one manual bootstrap script and one workflow run; teardown removes everything it created.
+
 ## Dependency map
 
 The pipeline imposes a natural ordering. Each arrow reads "is required by".
@@ -196,14 +233,14 @@ This map is the *horizontal* view. The "Vertical slices" section below is the *d
 
 The epics above describe *where code lives*. Vertical slices describe *what working capability ships and when*. Each slice is a thin end-to-end thread across several epics and ends in a concrete hallway test. Build the thinnest slice first (a "walking skeleton") and deepen it; do not finish one horizontal epic at a time. Each slice is tracked as a GitHub milestone.
 
-Slices 0–2 are complete: Slice 1 shipped as beads #35–#42 (plus QA masking, #54, pulled forward from E14), and Slice 2 shipped event tracking and the FastAPI + Leaflet dashboard (see `docs/architecture.md` §5.9–§5.10 for the resolved designs). Slice 3 has a bead outline that requires a dedicated planning pass before implementation; Slices 4–6 are sketched at the table level only.
+Slices 0–2 are complete: Slice 1 shipped as beads #35–#42 (plus QA masking, #54, pulled forward from E14), and Slice 2 shipped event tracking and the FastAPI + Leaflet dashboard (see `docs/architecture.md` §5.9–§5.10 for the resolved designs). Slice 3's *scheduling* half shipped early — the systemd timer (E11) and the full instance-deployment machinery (E18) are live — so its remaining scope is manual review (E8) plus enabling the Actions cron; it still needs a planning pass for the review work. Slices 4–6 are sketched at the table level only.
 
 | Slice | Capability delivered | Epics touched | Hallway test |
 |-------|----------------------|---------------|--------------|
 | **Slice 0 — Walking skeleton** | Project foundations plus the thinnest end-to-end thread: load a configured AOI, persist it, report it. | E1, E13, E2, E11 (thin) | `forest-sentinel run --aoi <fixture>` loads a configured AOI, persists it to PostGIS, and prints a summary; CI is green on pull requests. |
 | **Slice 1 — Optical change detection** | AOI → HLS observations → NBR/NDVI COGs → ΔNBR vs. baseline → candidate disturbance polygons in PostGIS. | E3, E4, E5, E6, E12, E9, E13 | Run over a small test AOI and eyeball the emitted candidate polygons on a map or GeoJSON dump. |
 | **Slice 2 — Events + dashboard** | Track candidates over time into disturbance events with per-date measurements; stand up the lightweight web dashboard. | E7, E10 | Open the dashboard and see events on a map with timelines, sizes, and status. |
-| **Slice 3 — Scheduling + review** | Run the pipeline on a GitHub Actions cron schedule; let a human validate detections. | E11, E8 | A scheduled run refreshes the dashboard unattended; a reviewer can mark an event reviewed, false-positive, or uncertain. |
+| **Slice 3 — Scheduling + review** | Run the pipeline on a schedule (systemd timer: **shipped**; Actions cron: scaffolded, disabled); let a human validate detections. | E11, E8 | A scheduled run refreshes the dashboard unattended (✓ via the timer); a reviewer can mark an event reviewed, false-positive, or uncertain. |
 | **Slice 4 — QA & confidence hardening** | A transparent confidence model on outputs, plus the remaining QA hardening (Fmask masking itself shipped early, inside Slice 1 — see E14; what remains is surfacing quality metadata in the dashboard). | E14 (residual), E15 | Detections show honest quality metadata and an explained confidence level in the dashboard. |
 | **Slice 5 — Radar augmentation** | Sentinel-1 GRD backscatter change feeding the existing event model. | E16, E13 | The pipeline produces radar change products and radar-derived candidates for a configured AOI. |
 | **Slice 6 — Context layers** | Concessions, roads, rivers, and other context joined to disturbance events. | E17, E10 | The dashboard shows how a detection relates to concessions, protected areas, roads, and rivers. |
@@ -251,8 +288,11 @@ Depends on Slice 2. Open questions to resolve first: the review UI shape (tied t
 
 - `manual_review` table + model (E8, E13).
 - Review actions surfaced in the dashboard (E8, E10).
-- GitHub Actions cron workflow + scheduled pipeline run (E11).
-- Run logging + failure handling (E11).
+- GitHub Actions cron workflow + scheduled pipeline run (E11) — *largely shipped:* the
+  systemd-timer scheduler is live and `.github/workflows/scheduled-run.yml` exists
+  (WIF-based, disabled); the remaining bead is enabling/validating the Actions path.
+- Run logging + failure handling (E11) — *shipped:* nonzero exit on export failures,
+  `journalctl` logging via the systemd units.
 
 ## Open questions
 
