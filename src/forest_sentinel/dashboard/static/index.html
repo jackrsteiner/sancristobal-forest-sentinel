@@ -24,6 +24,13 @@
       .timeline { font-size: 13px; margin: 6px 0; }
       .evidence { font-size: 12px; color: #555; }
       .muted { color: #888; }
+      #runs { margin: 12px 0; }
+      .run { border: 1px solid #ddd; border-radius: 6px; padding: 8px; margin: 8px 0; font-size: 13px; }
+      .run-line { font-size: 12px; color: #555; margin: 2px 0; }
+      .run-status-running { color: #2980b9; }
+      .run-status-succeeded { color: #27ae60; }
+      .run-status-partial { color: #e67e22; }
+      .run-status-failed, .run-status-interrupted { color: #c0392b; }
     </style>
   </head>
   <body>
@@ -31,6 +38,7 @@
       <h1>Open Forest Sentinel</h1>
       <label>AOI: <select id="aoi-select"></select></label>
       <div id="summary" class="muted"></div>
+      <div id="runs"></div>
       <div id="events"></div>
     </div>
     <div id="map"></div>
@@ -48,6 +56,10 @@
 
       let eventsLayer = null;
       const layersById = {};
+      let currentAoiId = null;
+      // A "running" run whose last progress event is older than this is likely dead
+      // (SIGKILL / systemd timeout before the next run flips it to "interrupted").
+      const STALE_RUN_MS = 2 * 60 * 60 * 1000;
 
       async function loadAois() {
         const aois = await (await fetch("/api/aois")).json();
@@ -63,6 +75,8 @@
       }
 
       async function loadEvents(aoiId) {
+        currentAoiId = aoiId;
+        loadRuns(aoiId);
         const collection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
         if (eventsLayer) map.removeLayer(eventsLayer);
         // Drop layer references from the previous AOI so clicks can't zoom to
@@ -83,6 +97,75 @@
         document.getElementById("summary").textContent = `${features.length} disturbance events`;
         renderEventList(features);
         if (features.length) map.fitBounds(eventsLayer.getBounds(), { maxZoom: 12 });
+      }
+
+      function runStatusLabel(run) {
+        if (
+          run.status === "running" &&
+          run.last_event_at &&
+          Date.now() - Date.parse(run.last_event_at) > STALE_RUN_MS
+        ) {
+          return "running (stale — possibly interrupted)";
+        }
+        return run.status;
+      }
+
+      function describeEvent(ev) {
+        const where =
+          ev.batch_index != null ? `${ev.stage} batch ${ev.batch_index}/${ev.batch_total}` : ev.stage;
+        let what = ev.outcome === "info" ? ev.message : ev.outcome;
+        if (ev.outcome === "submitted") {
+          what = `${ev.exports} export${ev.exports === 1 ? "" : "s"} submitted, waiting on Earth Engine`;
+        } else if (ev.outcome !== "info" && ev.message) {
+          what = `${ev.outcome} — ${ev.message}`;
+        }
+        return `${fmtDateTime(ev.occurred_at)} · ${where}: ${what}`;
+      }
+
+      async function loadRuns(aoiId) {
+        const runs = await (await fetch(`/api/aois/${aoiId}/runs`)).json();
+        const container = document.getElementById("runs");
+        container.innerHTML = "";
+        if (!runs.length) return;
+
+        const latest = runs[0];
+        const card = document.createElement("div");
+        card.className = "run";
+        card.innerHTML =
+          `<strong>Pipeline run</strong> ` +
+          `<span class="run-status-${latest.status}">${runStatusLabel(latest)}</span>` +
+          `<div class="muted">started ${fmtDateTime(latest.started_at)} · ` +
+          `window ${fmtDate(latest.since)} → ${fmtDate(latest.until)}</div>`;
+        // The live tail: for a running run show its recent batch events so the
+        // long Earth Engine queue waits are visible from the browser.
+        if (latest.status === "running") {
+          const detail = await (await fetch(`/api/runs/${latest.id}`)).json();
+          detail.events.slice(-5).forEach((ev) => {
+            const line = document.createElement("div");
+            line.className = "run-line";
+            line.textContent = describeEvent(ev);
+            card.appendChild(line);
+          });
+        } else if (latest.summary) {
+          const s = latest.summary;
+          const line = document.createElement("div");
+          line.className = "run-line";
+          line.textContent =
+            `${s.index_rasters} indices (${s.index_rasters_reused} reused) · ` +
+            `${s.change_rasters} changes (${s.change_rasters_reused} reused) · ` +
+            `${s.export_failures} export failures`;
+          card.appendChild(line);
+        }
+        container.appendChild(card);
+
+        runs.slice(1, 5).forEach((run) => {
+          const line = document.createElement("div");
+          line.className = "run-line muted";
+          line.innerHTML =
+            `${fmtDateTime(run.started_at)} · ` +
+            `<span class="run-status-${run.status}">${runStatusLabel(run)}</span>`;
+          container.appendChild(line);
+        });
       }
 
       function renderEventList(features) {
@@ -138,6 +221,9 @@
       function fmtDate(iso) {
         return iso ? iso.slice(0, 10) : "—";
       }
+      function fmtDateTime(iso) {
+        return iso ? iso.slice(0, 16).replace("T", " ") : "—";
+      }
       function fmtArea(m2) {
         return m2 == null ? "—" : `${(m2 / 10000).toFixed(2)} ha`;
       }
@@ -145,6 +231,11 @@
       document.getElementById("aoi-select").addEventListener("change", (e) =>
         loadEvents(e.target.value),
       );
+      // Only the runs panel refreshes itself: it is the live view of an executing
+      // run, while events/map stay event-driven off the selector and clicks.
+      setInterval(() => {
+        if (currentAoiId != null) loadRuns(currentAoiId);
+      }, 15000);
       loadAois();
     </script>
   </body>

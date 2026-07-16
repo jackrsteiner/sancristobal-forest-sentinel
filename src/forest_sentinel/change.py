@@ -7,6 +7,7 @@ the storage seam and recorded as a ``change_raster`` with provenance to the sour
 the methodology version, and every contributing ``index_raster`` (current + baseline).
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,7 @@ def compute_change_products_for_observation(
     baseline_window: int = DEFAULT_BASELINE_WINDOW,
     scale: int = indices.DEFAULT_SCALE_METERS,
     ee_module: Any = earthengine,
+    on_export_submit: Callable[[int], None] | None = None,
 ) -> list[ChangeProduct]:
     """Compute and persist ΔNBR/ΔNDVI for one observation against its trailing baseline.
 
@@ -73,6 +75,10 @@ def compute_change_products_for_observation(
     median always matches the recorded ``change_raster_source`` provenance. An
     observation with no such priors has no baseline and is skipped (the next run, with
     one more indexed prior observation, produces deltas).
+
+    ``on_export_submit`` (if given) is called with the number of export requests
+    immediately before they are handed to Earth Engine — only when this observation
+    actually submits work (frozen/reused deltas submit nothing).
     """
     region = mapping(to_shape(aoi.geometry))
     date = observation.acquired_at.date().isoformat()
@@ -173,6 +179,8 @@ def compute_change_products_for_observation(
     # observation as failed, matching the pre-batch behavior.
     export_error: StorageError | None = None
     if pending:
+        if on_export_submit is not None:
+            on_export_submit(len(pending))
         export_results = storage.export_images(
             [
                 ExportRequest(delta, key, scale=scale, region=region)

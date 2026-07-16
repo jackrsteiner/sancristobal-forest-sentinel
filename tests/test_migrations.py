@@ -258,3 +258,53 @@ def test_downgrade_removes_event_tables(alembic_config: Config, clean_database: 
     tables = set(inspect(clean_database).get_table_names())
     assert "disturbance_event" not in tables
     assert "event_observation" not in tables
+
+
+def test_migrations_create_pipeline_run_tables(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+
+    inspector = inspect(clean_database)
+    tables = set(inspector.get_table_names())
+    assert {"pipeline_run", "pipeline_run_event"} <= tables
+
+    run_columns = {column["name"] for column in inspector.get_columns("pipeline_run")}
+    assert {
+        "id",
+        "aoi_id",
+        "started_at",
+        "finished_at",
+        "status",
+        "since",
+        "until",
+        "summary",
+    } <= run_columns
+    run_indexes = {index["name"] for index in inspector.get_indexes("pipeline_run")}
+    assert "ix_pipeline_run_aoi_id_started_at" in run_indexes
+
+    event_columns = {column["name"] for column in inspector.get_columns("pipeline_run_event")}
+    assert {
+        "id",
+        "run_id",
+        "occurred_at",
+        "stage",
+        "batch_index",
+        "batch_total",
+        "exports",
+        "outcome",
+        "message",
+    } <= event_columns
+    event_indexes = {index["name"] for index in inspector.get_indexes("pipeline_run_event")}
+    assert "ix_pipeline_run_event_run_id" in event_indexes
+
+
+def test_downgrade_removes_pipeline_run_tables(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "base")
+
+    tables = set(inspect(clean_database).get_table_names())
+    assert "pipeline_run" not in tables
+    assert "pipeline_run_event" not in tables

@@ -32,7 +32,13 @@ from forest_sentinel.models import (
     DisturbanceCandidate,
     DisturbanceEvent,
     EventObservation,
+    PipelineRun,
+    PipelineRunEvent,
 )
+
+# How many runs / progress events the runs endpoints return.
+RUNS_LIMIT = 20
+RUN_EVENTS_LIMIT = 50
 
 
 @lru_cache(maxsize=1)
@@ -120,6 +126,37 @@ def create_app() -> FastAPI:
             ],
         }
 
+    @app.get("/api/aois/{aoi_id}/runs")
+    def aoi_runs(aoi_id: int, session: SessionDep) -> list[dict[str, Any]]:
+        """Recent pipeline runs for an AOI, newest first.
+
+        Runs commit their progress events live, so polling this endpoint shows
+        an executing run advancing batch by batch; ``last_event_at`` lets the
+        UI flag a ``running`` row whose run actually died (stale heartbeat).
+        """
+        if session.get(Aoi, aoi_id) is None:
+            raise HTTPException(status_code=404, detail=f"AOI {aoi_id} not found")
+        rows = session.execute(
+            select(PipelineRun, func.max(PipelineRunEvent.occurred_at))
+            .outerjoin(PipelineRunEvent, PipelineRunEvent.run_id == PipelineRun.id)
+            .where(PipelineRun.aoi_id == aoi_id)
+            .group_by(PipelineRun.id)
+            .order_by(PipelineRun.started_at.desc())
+            .limit(RUNS_LIMIT)
+        ).all()
+        return [_run_summary(run, last_event_at) for run, last_event_at in rows]
+
+    @app.get("/api/runs/{run_id}")
+    def run_detail(run_id: int, session: SessionDep) -> dict[str, Any]:
+        """One run with the tail of its progress events (oldest first)."""
+        run = session.get(PipelineRun, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+        last_event_at = session.execute(
+            select(func.max(PipelineRunEvent.occurred_at)).where(PipelineRunEvent.run_id == run_id)
+        ).scalar_one()
+        return {**_run_summary(run, last_event_at), "events": _run_events(session, run_id)}
+
     @app.get("/api/events/{event_id}")
     def event_detail(event_id: int, session: SessionDep) -> dict[str, Any]:
         """One event with its measurement timeline and supporting evidence."""
@@ -182,6 +219,46 @@ def _timeline(session: Session, event_id: int) -> list[dict[str, Any]]:
             "candidate_id": obs.disturbance_candidate_id,
         }
         for obs in observations
+    ]
+
+
+def _run_summary(run: PipelineRun, last_event_at: Any) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "aoi_id": run.aoi_id,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "status": run.status,
+        "since": run.since,
+        "until": run.until,
+        "summary": run.summary,
+        "last_event_at": last_event_at,
+    }
+
+
+def _run_events(session: Session, run_id: int) -> list[dict[str, Any]]:
+    # The most recent events, returned oldest-first for chronological display.
+    tail = (
+        session.execute(
+            select(PipelineRunEvent)
+            .where(PipelineRunEvent.run_id == run_id)
+            .order_by(PipelineRunEvent.id.desc())
+            .limit(RUN_EVENTS_LIMIT)
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "occurred_at": event.occurred_at,
+            "stage": event.stage,
+            "batch_index": event.batch_index,
+            "batch_total": event.batch_total,
+            "exports": event.exports,
+            "outcome": event.outcome,
+            "message": event.message,
+        }
+        for event in reversed(tail)
     ]
 
 
