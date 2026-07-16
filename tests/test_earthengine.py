@@ -41,8 +41,9 @@ def test_initialize_wraps_ee_failures(fake_ee: MagicMock) -> None:
 
 def test_start_image_export_submits_cog_task(fake_ee: MagicMock) -> None:
     task = fake_ee.batch.Export.image.toCloudStorage.return_value
+    region = {"type": "MultiPolygon", "coordinates": []}
     returned = earthengine.start_image_export_to_gcs(
-        "image", bucket="b", file_name_prefix="a/b/c", scale=30, region={"type": "Polygon"}
+        "image", bucket="b", file_name_prefix="a/b/c", scale=30, region=region
     )
     assert returned is task
     task.start.assert_called_once_with()
@@ -51,6 +52,16 @@ def test_start_image_export_submits_cog_task(fake_ee: MagicMock) -> None:
     assert kwargs["fileNamePrefix"] == "a/b/c"
     assert kwargs["fileFormat"] == "GeoTIFF"
     assert kwargs["formatOptions"] == {"cloudOptimized": True}
+    # Export.image rejects a raw GeoJSON dict — the region must be an ee.Geometry.
+    fake_ee.Geometry.assert_called_once_with(region)
+    assert kwargs["region"] is fake_ee.Geometry.return_value
+
+
+def test_start_image_export_leaves_missing_region_unset(fake_ee: MagicMock) -> None:
+    earthengine.start_image_export_to_gcs("image", bucket="b", file_name_prefix="a/b/c")
+    fake_ee.Geometry.assert_not_called()
+    _, kwargs = fake_ee.batch.Export.image.toCloudStorage.call_args
+    assert kwargs["region"] is None
 
 
 def test_export_task_state_reads_status() -> None:
