@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from datetime import UTC, date, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from forest_sentinel.dashboard.app import app, get_session
 from forest_sentinel.events import footprint_area_m2, track_events_for_aoi
-from forest_sentinel.models import Aoi, DisturbanceEvent
+from forest_sentinel.models import Aoi, DisturbanceEvent, PipelineRun, PipelineRunEvent
 from tests.fakes import make_aoi, make_candidate, make_methodology
 
 _PATCH = [(0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.1, 0.2), (0.1, 0.1)]
@@ -86,6 +87,84 @@ def test_event_detail_has_timeline_and_evidence(client: TestClient, db_session: 
     assert len(detail["evidence"]) == 2
     assert all(item["change_type"] == "delta_nbr" for item in detail["evidence"])
     assert {item["cog_path"] for item in detail["evidence"]} == {"/cogs/1.tif", "/cogs/8.tif"}
+
+
+def _seed_run(
+    session: Session,
+    aoi: Aoi,
+    *,
+    started_at: datetime,
+    status: str = "running",
+    events: int = 0,
+) -> PipelineRun:
+    run = PipelineRun(
+        aoi_id=aoi.id,
+        started_at=started_at,
+        status=status,
+        since=date(2026, 6, 16),
+        until=date(2026, 7, 16),
+    )
+    session.add(run)
+    session.flush()
+    for index in range(events):
+        session.add(
+            PipelineRunEvent(
+                run_id=run.id,
+                stage="index",
+                batch_index=index + 1,
+                batch_total=events,
+                exports=4,
+                outcome="submitted",
+            )
+        )
+    session.flush()
+    return run
+
+
+def test_aoi_runs_lists_newest_first_with_last_event(
+    client: TestClient, db_session: Session
+) -> None:
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    older = _seed_run(
+        db_session, aoi, started_at=datetime(2026, 7, 15, 3, 0, tzinfo=UTC), status="succeeded"
+    )
+    newer = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC), events=2)
+    db_session.flush()
+
+    response = client.get(f"/api/aois/{aoi.id}/runs")
+    assert response.status_code == 200
+    runs = response.json()
+    assert [run["id"] for run in runs] == [newer.id, older.id]
+    assert runs[0]["status"] == "running"
+    assert runs[0]["since"] == "2026-06-16"
+    assert runs[0]["last_event_at"] is not None
+    assert runs[1]["status"] == "succeeded"
+    assert runs[1]["last_event_at"] is None  # no progress events seeded
+
+
+def test_run_detail_returns_events_in_order(client: TestClient, db_session: Session) -> None:
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    run = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC), events=3)
+
+    response = client.get(f"/api/runs/{run.id}")
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail["id"] == run.id
+    assert detail["status"] == "running"
+    events = detail["events"]
+    assert [event["batch_index"] for event in events] == [1, 2, 3]
+    assert all(event["stage"] == "index" for event in events)
+    assert all(event["outcome"] == "submitted" for event in events)
+    assert all(event["exports"] == 4 for event in events)
+    assert all(event["batch_total"] == 3 for event in events)
+
+
+def test_unknown_aoi_runs_is_404(client: TestClient) -> None:
+    assert client.get("/api/aois/999999/runs").status_code == 404
+
+
+def test_unknown_run_detail_is_404(client: TestClient) -> None:
+    assert client.get("/api/runs/999999").status_code == 404
 
 
 def test_unknown_aoi_events_is_404(client: TestClient) -> None:

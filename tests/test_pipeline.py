@@ -459,3 +459,199 @@ def test_pipeline_only_processes_observations_in_the_window(
     assert second.index_rasters == 0
     assert second.change_rasters == 0
     assert second.candidates == 0
+
+
+def _run_events(db_session: Session, run_id: int) -> list[Any]:
+    from forest_sentinel.models import PipelineRunEvent
+
+    return list(
+        db_session.execute(
+            select(PipelineRunEvent)
+            .where(PipelineRunEvent.run_id == run_id)
+            .order_by(PipelineRunEvent.id)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def test_run_is_recorded_with_labelled_batch_events(
+    db_session: Session, tmp_path: Path, caplog: Any
+) -> None:
+    """Every EE batch submit/success is recorded as a committed pipeline_run_event
+    and mirrored to the log with a `run <started> · <stage> batch i/N` label."""
+    import logging as logging_module
+
+    from forest_sentinel.models import PipelineRun
+
+    caplog.set_level(logging_module.INFO, logger="forest_sentinel.runlog")
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+
+    summary = run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=FakeStorage(tmp_path),
+        max_concurrent_exports=4,
+        ee_module=_fake_ee((1, 2, 3)),
+    )
+    db_session.commit()
+
+    run = db_session.execute(select(PipelineRun)).scalar_one()
+    assert run.aoi_id == aoi.id
+    assert run.status == "succeeded"
+    assert run.finished_at is not None
+    assert run.since == date(2026, 1, 1)
+    assert run.until == date(2026, 2, 1)
+    assert run.summary is not None
+    assert run.summary["index_rasters"] == summary.index_rasters == 6
+
+    events = _run_events(db_session, run.id)
+    # Index stage: 3 observations in chunks of 2 -> batch 1/2 (4 exports) and 2/2 (2).
+    submitted = [
+        (event.batch_index, event.batch_total, event.exports)
+        for event in events
+        if event.stage == "index" and event.outcome == "submitted"
+    ]
+    assert submitted == [(1, 2, 4), (2, 2, 2)]
+    succeeded = [
+        (event.batch_index, event.batch_total)
+        for event in events
+        if event.stage == "index" and event.outcome == "succeeded"
+    ]
+    assert succeeded == [(1, 2), (2, 2)]
+    # Change stage: one batch per observation; scene-1 has no baseline (no submit).
+    change_submitted = [
+        (event.batch_index, event.batch_total, event.exports)
+        for event in events
+        if event.stage == "change" and event.outcome == "submitted"
+    ]
+    assert change_submitted == [(2, 3, 2), (3, 3, 2)]
+    # Stage transitions are recorded too.
+    assert {event.stage for event in events if event.outcome == "info"} == {
+        "discovery",
+        "index",
+        "change",
+        "events",
+    }
+
+    # The journald-facing mirror carries the run-start datetime and batch position.
+    import re
+
+    assert any(
+        re.search(
+            r"run \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z · index batch 1/2: "
+            r"submitted 4 exports to Earth Engine",
+            record.getMessage(),
+        )
+        for record in caplog.records
+    )
+
+
+def test_failed_change_batch_records_failure_and_partial_status(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """A failed observation leaves a `failed` batch event and the run ends `partial`."""
+    from forest_sentinel.earthengine import EarthEngineError
+    from forest_sentinel.models import PipelineRun
+
+    class FailingVectorizeEE(FakeEarthEngine):
+        def threshold_and_vectorize(
+            self,
+            delta_image: Any,
+            *,
+            threshold: float,
+            scale: int,
+            region: Any,
+            min_area_m2: float,
+        ) -> list[dict[str, Any]]:
+            raise EarthEngineError("candidate vectorization failed: quota exceeded")
+
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = FailingVectorizeEE(
+        scenes={"NASA/HLS/HLSL30/v002": [_scene(day) for day in (1, 2)]},
+        features=[_CANDIDATE_FEATURE],
+        valid_fraction=0.95,
+    )
+
+    summary = run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=FakeStorage(tmp_path),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    assert summary.export_failures == 1
+    run = db_session.execute(select(PipelineRun)).scalar_one()
+    assert run.status == "partial"
+    failed = [event for event in _run_events(db_session, run.id) if event.outcome == "failed"]
+    assert len(failed) == 1
+    assert failed[0].stage == "change"
+    assert "quota exceeded" in (failed[0].message or "")
+
+
+def test_dying_run_is_stamped_failed_and_superseded_as_interrupted(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """An exception escaping the run stamps `failed`; a row left `running` by a
+    SIGKILLed process is flipped to `interrupted` by the next run for the AOI."""
+    import pytest
+
+    from forest_sentinel.models import PipelineRun
+
+    class DyingStorage(FakeStorage):
+        def export_images(self, requests: Any) -> list[Path | StorageError]:
+            raise RuntimeError("simulated crash")
+
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = _fake_ee((1,))
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        run_pipeline(
+            db_session,
+            aoi=aoi,
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            methodology=methodology,
+            storage=DyingStorage(tmp_path),
+            ee_module=fake_ee,
+        )
+    failed_run = db_session.execute(select(PipelineRun)).scalar_one()
+    assert failed_run.status == "failed"
+    assert failed_run.finished_at is not None
+
+    # Simulate a run killed without cleanup (SIGKILL / systemd timeout): the row
+    # stays "running" until the next run, holding the lock, supersedes it.
+    stale = PipelineRun(
+        aoi_id=aoi.id,
+        started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        status="running",
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+    )
+    db_session.add(stale)
+    db_session.commit()
+
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=FakeStorage(tmp_path),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+    db_session.refresh(stale)
+    assert stale.status == "interrupted"
+    statuses = db_session.execute(select(PipelineRun.status)).scalars().all()
+    assert sorted(statuses) == ["failed", "interrupted", "succeeded"]

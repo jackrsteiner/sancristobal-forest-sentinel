@@ -5,12 +5,13 @@ introduced incrementally, one bead at a time. See ``docs/architecture.md`` §5.1
 per-table reference.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from geoalchemy2 import Geometry
 from geoalchemy2.elements import WKBElement
 from sqlalchemy import (
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -281,3 +282,64 @@ class EventObservation(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class PipelineRun(Base):
+    """One pipeline invocation over an AOI and date window.
+
+    Written live: the row is created (``status='running'``) before the long
+    Earth Engine work begins and rides the run's checkpoint commits, so the
+    dashboard can show progress while the run executes. ``started_at`` doubles
+    as the human-facing run label in logs (``run 2026-07-16T09:58:48Z · …``).
+    A run killed without cleanup (SIGKILL, systemd timeout) is flipped to
+    ``interrupted`` by the next run for the same AOI, which holds the per-AOI
+    advisory lock and therefore knows no live run exists.
+    """
+
+    __tablename__ = "pipeline_run"
+    __table_args__ = (Index("ix_pipeline_run_aoi_id_started_at", "aoi_id", "started_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    aoi_id: Mapped[int] = mapped_column(ForeignKey("aoi.id"), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # running | succeeded | partial | failed | interrupted ("partial" = finished
+    # with export failures; partial results are committed, matching the CLI's exit 1).
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    since: Mapped[date] = mapped_column(Date, nullable=False)
+    until: Mapped[date] = mapped_column(Date, nullable=False)
+    # Final PipelineSummary counts (asdict), stamped when the run finishes.
+    summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class PipelineRunEvent(Base):
+    """Append-only progress log of a run: stage transitions and per-batch
+    Earth Engine submit/success/failure events, committed as they happen.
+    """
+
+    __tablename__ = "pipeline_run_event"
+    __table_args__ = (Index("ix_pipeline_run_event_run_id", "run_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("pipeline_run.id", ondelete="CASCADE"), nullable=False
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    # discovery | index | change | events | run
+    stage: Mapped[str] = mapped_column(String, nullable=False)
+    batch_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    batch_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Earth Engine export tasks in the batch (None for stage-level events).
+    exports: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # submitted | succeeded | failed | info
+    outcome: Mapped[str] = mapped_column(String, nullable=False)
+    message: Mapped[str | None] = mapped_column(String, nullable=True)

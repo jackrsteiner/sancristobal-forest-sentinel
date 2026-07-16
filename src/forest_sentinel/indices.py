@@ -9,6 +9,7 @@ source observation and the methodology version.
     NDVI = (NIR - RED)   / (NIR + RED)
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,7 @@ def compute_indices_for_observations(
     storage: Storage,
     scale: int = DEFAULT_SCALE_METERS,
     ee_module: Any = earthengine,
+    on_export_submit: Callable[[int], None] | None = None,
 ) -> IndexStageOutcome:
     """Compute and persist NBR + NDVI rasters for a chunk of observations.
 
@@ -142,6 +144,11 @@ def compute_indices_for_observations(
     concurrently. Failures stay per-observation: a failed export marks only its
     observation failed (in ``failures``); sibling artifacts that succeeded are
     persisted, exactly like the pre-batch behavior under upserts.
+
+    ``on_export_submit`` (if given) is called with the number of export requests
+    immediately before they are handed to Earth Engine — i.e. only when the
+    chunk actually submits work — so the caller can record/log the pending
+    batch before the long queue wait begins.
     """
     region = mapping(to_shape(aoi.geometry))
     outcome = IndexStageOutcome()
@@ -197,6 +204,8 @@ def compute_indices_for_observations(
             outcome.failures[observation.id] = exc
             outcome.rasters.pop(observation.id, None)
 
+    if requests and on_export_submit is not None:
+        on_export_submit(len(requests))
     export_results = storage.export_images(requests) if requests else []
     for (observation, index_type, fraction), result in zip(slots, export_results, strict=True):
         if observation.id in outcome.failures:

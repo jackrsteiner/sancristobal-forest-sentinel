@@ -1,0 +1,122 @@
+"""Run-progress recording: the DB-backed, journald-mirrored visibility layer.
+
+A :class:`RunRecorder` owns one ``pipeline_run`` row and appends
+``pipeline_run_event`` rows as the run progresses, committing each event so the
+dashboard (a separate session under READ COMMITTED) sees progress live — most
+importantly *while* the run is blocked waiting on Earth Engine's batch queue.
+Every event is mirrored to the log with a stable label carrying the run's start
+datetime and the batch position::
+
+    run 2026-07-16T09:58:48Z · index batch 3/6: submitted 4 exports to Earth Engine
+
+Commit discipline: ``record`` commits the session. Callers only invoke it at
+points where everything pending is safe to persist (the pipeline's checkpoint
+boundaries, or — for submit events — before the stage writes any rasters), so
+these commits are always valid checkpoints themselves.
+"""
+
+import logging
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+
+from sqlalchemy import select, update
+from sqlalchemy.orm import Session
+
+from forest_sentinel.models import Aoi, PipelineRun, PipelineRunEvent
+
+logger = logging.getLogger(__name__)
+
+# Terminal statuses for PipelineRun.status; "running" is the only live one.
+STATUS_RUNNING = "running"
+STATUS_SUCCEEDED = "succeeded"
+STATUS_PARTIAL = "partial"  # finished, but some observations failed to export
+STATUS_FAILED = "failed"
+STATUS_INTERRUPTED = "interrupted"  # killed without cleanup (SIGKILL, timeout)
+
+
+def start_run(session: Session, *, aoi: Aoi, since: date, until: date) -> "RunRecorder":
+    """Create the ``running`` row for a new run and return its recorder.
+
+    Any earlier row for this AOI still marked ``running`` is flipped to
+    ``interrupted`` first: the caller holds the per-AOI advisory lock, so a
+    lingering ``running`` row can only belong to a run that died without
+    cleanup (SIGKILL, systemd timeout past ``TimeoutStopSec``).
+    """
+    session.execute(
+        update(PipelineRun)
+        .where(PipelineRun.aoi_id == aoi.id)
+        .where(PipelineRun.status == STATUS_RUNNING)
+        .values(status=STATUS_INTERRUPTED)
+    )
+    run = PipelineRun(
+        aoi_id=aoi.id,
+        started_at=datetime.now(UTC),
+        status=STATUS_RUNNING,
+        since=since,
+        until=until,
+    )
+    session.add(run)
+    session.commit()
+    return RunRecorder(session=session, run=run)
+
+
+@dataclass
+class RunRecorder:
+    """Appends progress events for one run and stamps its terminal status."""
+
+    session: Session
+    run: PipelineRun
+
+    @property
+    def label(self) -> str:
+        """The run's log label: its start datetime, UTC, seconds precision."""
+        return f"run {self.run.started_at.astimezone(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+    def record(
+        self,
+        stage: str,
+        outcome: str,
+        *,
+        batch_index: int | None = None,
+        batch_total: int | None = None,
+        exports: int | None = None,
+        message: str | None = None,
+    ) -> None:
+        """Persist one progress event (committing it) and mirror it to the log."""
+        self.session.add(
+            PipelineRunEvent(
+                run_id=self.run.id,
+                stage=stage,
+                batch_index=batch_index,
+                batch_total=batch_total,
+                exports=exports,
+                outcome=outcome,
+                message=message,
+            )
+        )
+        self.session.commit()
+
+        where = stage
+        if batch_index is not None and batch_total is not None:
+            where = f"{stage} batch {batch_index}/{batch_total}"
+        if outcome == "submitted":
+            what = f"submitted {exports} export{'s' if exports != 1 else ''} to Earth Engine"
+        else:
+            what = outcome if message is None else f"{outcome} — {message}"
+        logger.info("%s · %s: %s", self.label, where, what)
+
+    def finish(self, status: str, summary: dict[str, object] | None = None) -> None:
+        """Stamp the run's terminal status (best-effort: never masks the run's error)."""
+        try:
+            # Re-select rather than mutate: on the failure path the session was
+            # rolled back and the identity-mapped instance may be stale/detached.
+            run = self.session.execute(
+                select(PipelineRun).where(PipelineRun.id == self.run.id)
+            ).scalar_one()
+            run.status = status
+            run.finished_at = datetime.now(UTC)
+            run.summary = summary
+            self.session.commit()
+            logger.info("%s · run: %s", self.label, status)
+        except Exception:  # pragma: no cover - dead-connection safety net
+            logger.warning("%s · run: could not record terminal status %r", self.label, status)

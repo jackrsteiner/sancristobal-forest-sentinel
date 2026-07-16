@@ -8,6 +8,7 @@ disturbance events, all through Earth Engine, persisting results to PostGIS.
 """
 
 import argparse
+import logging
 import os
 import sys
 from collections.abc import Iterator, Sequence
@@ -59,6 +60,10 @@ def _max_concurrent_exports() -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse arguments and dispatch. Returns a process exit code."""
+    # Without a configured handler only WARNING+ reaches stderr (Python's
+    # last-resort handler), which would drop the run-progress INFO lines
+    # (runlog.py) that journald is meant to capture. journald stamps times.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = _build_parser()
     args = parser.parse_args(argv)
     if (args.since is None) != (args.until is None):

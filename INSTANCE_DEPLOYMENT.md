@@ -24,7 +24,7 @@ For general operations (tuning, systemd, backups, troubleshooting) see
 6. Edit + commit `config/instance.env` (`PROJECT_ID`) and `config/aoi.geojson` → [§4](#4-commit-your-configuration)
 7. Actions → run **Deploy instance** (graft → WIF auth → provision GCP + VM → wait) → [§5](#5-run-the-deploy-instance-workflow)
 8. SSH tunnel → dashboard at `http://localhost:8000` → [§6](#6-view-the-dashboard)
-9. Later: pull template updates with `git pull --no-rebase upstream main` → [Updating an instance later](#updating-an-instance-later)
+9. Later: Actions → run **Update instance** (merges template updates + refreshes the VM) → [Updating an instance later](#updating-an-instance-later)
 10. Done with it: `./scripts/teardown_gcp.sh` (or `--nuke`) → [Tear it all down](#tear-it-all-down)
 
 ---
@@ -37,6 +37,7 @@ For general operations (tuning, systemd, backups, troubleshooting) see
 | `scripts/setup_wif.sh` | one-time manual bootstrap: Workload Identity Federation + provisioner service account |
 | `.github/workflows/deploy.yml` | the "Deploy instance" Action: history graft + `setup_gcp.sh` + `provision_vm.sh` |
 | `scripts/vm_startup.sh` → `scripts/vm_setup.sh` | the VM configures itself on first boot and starts the initial pipeline run |
+| `.github/workflows/update-instance.yml` | the "Update instance" Action: merge template updates + refresh the VM, no SSH needed |
 | `scripts/teardown_gcp.sh` | deletes everything again |
 
 ## 0. One-time, on the base repo (maintainers)
@@ -143,7 +144,23 @@ The pipeline also runs daily at 03:00 UTC via the VM's systemd timer.
 
 ## Updating an instance later
 
-Because your `main` carries the template's history after the graft:
+**Actions → Update instance → Run workflow.** One button does the whole
+rollout, with two toggles (both on by default):
+
+- **sync_upstream** — merges the template's latest `main` into your repo and
+  pushes (possible because the deploy graft gave your `main` the template's
+  history). On a merge conflict the run fails without pushing anything and the
+  run summary lists the conflicting files plus the local-resolution commands.
+- **update_vm** — authenticates via Workload Identity Federation and SSHes to
+  the VM (no keys, nothing to install locally) to `git pull` and re-run
+  `vm_setup.sh`: migrations applied, `.env` regenerated, systemd units
+  re-rendered, dashboard restarted. A running pipeline is left untouched.
+
+Untick `sync_upstream` to only refresh the VM (e.g. after committing a change
+to `config/instance.env`); untick `update_vm` to only bring the repo up to
+date.
+
+The manual equivalent, if you prefer it or need to resolve a merge conflict:
 
 ```sh
 git remote add upstream https://github.com/jackrsteiner/open-forest-sentinel.git
@@ -151,12 +168,8 @@ git pull --no-rebase upstream main   # ordinary merge; your config/ lives outsid
 git push
 ```
 
-To apply updated machinery on the VM, SSH in and re-run
-`./scripts/vm_setup.sh` (idempotent), or tear down and redeploy.
-
-Changing `config/instance.env` / `config/aoi.geojson`: commit, then either
-re-run `vm_setup.sh` on the VM (it regenerates `.env` and restarts the
-dashboard) — or tear down and redeploy.
+then SSH in and re-run `./scripts/vm_setup.sh` (idempotent), or tear down and
+redeploy.
 
 ## Tear it all down
 
