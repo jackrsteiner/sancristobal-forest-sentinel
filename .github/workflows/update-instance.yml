@@ -1,0 +1,159 @@
+# Update a running Open Forest Sentinel instance from the Actions tab — no local
+# git commands, no SSHing into the VM. Two independent toggles (both on by default):
+#
+#   sync_upstream  merge the template's latest main into this repo's main and push
+#                  (the automated form of `git pull --no-rebase upstream main && git push`)
+#   update_vm      SSH to the VM via Workload Identity Federation and re-run
+#                  scripts/vm_setup.sh (idempotent: pulls the repo, regenerates .env,
+#                  applies migrations, re-renders systemd units, restarts the dashboard)
+#
+# Untick sync_upstream to only refresh the VM (e.g. after editing config/instance.env);
+# untick update_vm to only bring the repo up to date with the template.
+#
+# The merge push may touch .github/workflows/, which the default GITHUB_TOKEN cannot
+# write — the OFS_ADMIN_TOKEN secret (same fine-grained PAT as the deploy graft) is
+# used when present. A merge conflict fails the run with instructions to resolve
+# locally; nothing is pushed in that case.
+
+name: Update instance
+
+on:
+  workflow_dispatch:
+    inputs:
+      sync_upstream:
+        description: "Merge template updates (upstream main) into this repo and push"
+        type: boolean
+        default: true
+      update_vm:
+        description: "Pull + re-run vm_setup.sh on the VM"
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write   # OIDC token for Workload Identity Federation
+  contents: write   # push the upstream merge
+
+env:
+  BASE_REPO: jackrsteiner/open-forest-sentinel
+
+jobs:
+  sync:
+    name: Sync template updates
+    runs-on: ubuntu-latest
+    if: ${{ inputs.sync_upstream }}
+    steps:
+      - name: Check out instance repo (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # The default GITHUB_TOKEN cannot push commits that touch
+          # .github/workflows/, which upstream template updates may include.
+          token: ${{ secrets.OFS_ADMIN_TOKEN || github.token }}
+
+      - name: Merge upstream main and push
+        run: |
+          if [ "$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" = "$BASE_REPO" ]; then
+            echo "This is the template repo itself — nothing to sync. Skipping."
+            exit 0
+          fi
+          git remote add upstream "https://github.com/${BASE_REPO}.git"
+          git fetch upstream main
+          if ! git merge-base HEAD upstream/main >/dev/null 2>&1; then
+            echo "::error::This repo does not share history with the template. Run the 'Deploy instance' workflow once first (it grafts the template history so updates can be merged)."
+            exit 1
+          fi
+          behind="$(git rev-list --count HEAD..upstream/main)"
+          if [ "$behind" -eq 0 ]; then
+            echo "Already up to date with upstream — nothing to merge." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git merge --no-edit upstream/main; then
+            {
+              echo "## Merge conflict with upstream"
+              echo ""
+              echo "Conflicting files:"
+              echo ""
+              echo '```'
+              git diff --name-only --diff-filter=U
+              echo '```'
+              echo ""
+              echo "Resolve locally, then re-run this workflow (or update the VM manually):"
+              echo ""
+              echo '```'
+              echo "git remote add upstream https://github.com/${BASE_REPO}.git"
+              echo "git pull --no-rebase upstream main   # resolve conflicts, commit"
+              echo "git push"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Merge conflict with upstream/main — nothing was pushed. See the run summary for the conflicting files and the local-resolution commands."
+            git merge --abort
+            exit 1
+          fi
+          git push origin main
+          echo "Merged ${behind} new commit(s) from upstream and pushed to main." | tee -a "$GITHUB_STEP_SUMMARY"
+
+  update-vm:
+    name: Update the VM
+    runs-on: ubuntu-latest
+    needs: sync
+    # Run when sync succeeded OR was skipped (toggle off), but not when it failed —
+    # never roll a half-merged repo onto the VM.
+    if: ${{ !cancelled() && !failure() && inputs.update_vm }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Load instance config
+        run: |
+          grep -E '^[A-Za-z_][A-Za-z0-9_]*=' config/instance.env >> "$GITHUB_ENV"
+          # shellcheck disable=SC1091
+          . config/instance.env
+          if [ -z "${PROJECT_ID:-}" ]; then
+            echo "::error::Set PROJECT_ID in config/instance.env and commit it."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PROVISIONER_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Pull and re-run vm_setup.sh on the VM
+        run: |
+          # Pull FIRST, then invoke the fresh script: bash reads scripts
+          # incrementally, so re-running a vm_setup.sh that a pull rewrites
+          # mid-execution would be unsafe. The pull inside vm_setup.sh then no-ops.
+          # vm_setup.sh is idempotent and never touches a running pipeline —
+          # it applies migrations (additive) and restarts only the dashboard.
+          gcloud compute ssh "${INSTANCE_NAME:-forest-sentinel-vm}" \
+            --project "${PROJECT_ID}" \
+            --zone "${ZONE:-us-west1-a}" \
+            --command "sudo -u ofs -H bash -c 'set -euo pipefail; cd /home/ofs/open-forest-sentinel && git fetch origin main && git checkout main && git pull --ff-only origin main && bash scripts/vm_setup.sh'"
+
+      - name: Write summary
+        run: |
+          INSTANCE_NAME="${INSTANCE_NAME:-forest-sentinel-vm}"
+          ZONE="${ZONE:-us-west1-a}"
+          PORT="${DASHBOARD_PORT:-8000}"
+          {
+            echo "## Instance updated"
+            echo ""
+            echo "The VM pulled the latest main and re-ran vm_setup.sh (migrations applied,"
+            echo "dashboard restarted; a running pipeline is left untouched)."
+            echo ""
+            echo "Open an SSH tunnel to the dashboard:"
+            echo ""
+            echo '```'
+            echo "gcloud compute ssh ${INSTANCE_NAME} --project ${PROJECT_ID} --zone ${ZONE} -- -L ${PORT}:localhost:${PORT}"
+            echo '```'
+            echo ""
+            echo "then browse to http://localhost:${PORT}"
+          } >> "$GITHUB_STEP_SUMMARY"
