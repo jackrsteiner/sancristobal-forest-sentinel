@@ -196,12 +196,12 @@ def test_pipeline_mode_reports_earth_engine_failure(
     assert "Earth Engine initialization failed" in capsys.readouterr().err
 
 
-def test_pipeline_mode_reports_methodology_mismatch(
+def test_pipeline_mode_reports_methodology_mismatch_for_explicit_version(
     migrated_database: Engine,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-running with different parameters but the same version is a user error and
+    """Pinning a version that exists with different parameters is a user error and
     must print the 'bump the version' guidance, not a traceback (audit BUG-13)."""
     with Session(migrated_database) as session:
         session.add(
@@ -212,10 +212,52 @@ def test_pipeline_mode_reports_methodology_mismatch(
     monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
     monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
     exit_code = main(
-        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+        [
+            "run",
+            "--aoi",
+            str(SAMPLE_AOI),
+            "--since",
+            "2026-01-01",
+            "--until",
+            "2026-02-01",
+            "--methodology-version",
+            "1.0.0",
+        ]
     )
     assert exit_code == 1
     assert "bump the version" in capsys.readouterr().err
+
+
+def test_pipeline_mode_auto_mints_methodology_when_parameters_change(
+    migrated_database: Engine,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an explicit --methodology-version, changed parameters mint a new
+    content-addressed version instead of erroring — the knobs in instance.env are
+    usable on a live instance."""
+    with Session(migrated_database) as session:
+        session.add(
+            MethodologyVersion(name="optical-change", version="1.0.0", parameters={"other": 1})
+        )
+        session.commit()
+
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "run_pipeline",
+        lambda session, **kwargs: PipelineSummary(0, 0, 0, 0, 0, 0, 0, 0),
+    )
+    exit_code = main(
+        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    )
+    assert exit_code == 0
+    assert "Methodology: optical-change @ auto-" in capsys.readouterr().out
+    with Session(migrated_database) as session:
+        versions = session.execute(select(MethodologyVersion.version)).scalars().all()
+    assert "1.0.0" in versions
+    assert any(version.startswith("auto-") for version in versions)
 
 
 def test_pipeline_mode_reports_concurrent_creation_race(

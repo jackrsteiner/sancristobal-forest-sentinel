@@ -238,6 +238,16 @@ No SSH needed: the **Update instance** workflow
 runs the same pull + `vm_setup.sh` on the VM from the Actions tab, and can merge
 template updates first (see `INSTANCE_DEPLOYMENT.md` → "Updating an instance later").
 
+**Detection tuning (`THRESHOLD`, `MIN_AREA`, `BASELINE_WINDOW`) is methodology,
+not just configuration.** The methodology version is content-addressed: a run
+whose parameter set matches a previous run reuses that methodology (and its
+rasters); a changed parameter set automatically mints a new `auto-<hash>`
+version, under which **nothing is reusable** — the next run re-exports the whole
+window from Earth Engine and logs/records a prominent warning saying so. The
+dashboard's run card shows each run's methodology and its full parameter set.
+Reverting the knobs re-matches the earlier methodology, so A/B-ing two
+parameter sets only pays the full recompute once per set.
+
 ```sh
 sudo systemctl start   forest-sentinel-pipeline    # trigger one run now
 journalctl -u forest-sentinel-pipeline -f          # watch it

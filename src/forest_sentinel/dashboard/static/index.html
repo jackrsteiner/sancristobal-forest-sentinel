@@ -145,10 +145,27 @@
           `<span class="run-status-${latest.status}">${runStatusLabel(latest)}</span>` +
           `<div class="muted">started ${fmtDateTime(latest.started_at)} · ` +
           `window ${fmtDate(latest.since)} → ${fmtDate(latest.until)}</div>`;
+        // The run's non-data inputs: methodology identity, expandable to the full
+        // parameter set (threshold, min area, baseline window, EE script version…).
+        const detail = await (await fetch(`/api/runs/${latest.id}`)).json();
+        if (detail.methodology) {
+          const m = detail.methodology;
+          const meth = document.createElement("details");
+          meth.className = "run-line";
+          const summary = document.createElement("summary");
+          summary.textContent = `methodology ${m.name} @ ${m.version}`;
+          meth.appendChild(summary);
+          Object.entries(m.parameters || {}).forEach(([key, value]) => {
+            const line = document.createElement("div");
+            line.className = "run-line muted";
+            line.textContent = `${key}: ${JSON.stringify(value)}`;
+            meth.appendChild(line);
+          });
+          card.appendChild(meth);
+        }
         // The live tail: for a running run show its recent batch events so the
         // long Earth Engine queue waits are visible from the browser.
         if (latest.status === "running") {
-          const detail = await (await fetch(`/api/runs/${latest.id}`)).json();
           detail.events.slice(-5).forEach((ev) => {
             const line = document.createElement("div");
             line.className = "run-line";

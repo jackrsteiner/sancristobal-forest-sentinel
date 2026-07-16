@@ -35,7 +35,7 @@ from forest_sentinel.earthengine import EarthEngineError
 from forest_sentinel.hls import HLS_COLLECTIONS
 from forest_sentinel.methodology import (
     MethodologyVersionMismatch,
-    get_or_create_methodology_version,
+    resolve_methodology_version,
 )
 from forest_sentinel.models import Aoi
 from forest_sentinel.storage import StorageConfigurationError, StorageError
@@ -101,7 +101,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="End of the observation window (exclusive). Enables the full pipeline.",
     )
     run_parser.add_argument("--methodology-name", default="optical-change")
-    run_parser.add_argument("--methodology-version", default="1.0.0")
+    run_parser.add_argument(
+        "--methodology-version",
+        default=None,
+        help=(
+            "Pin an explicit methodology version (strict: re-using a version with "
+            "different parameters is an error). Default: content-addressed — the "
+            "parameter set selects or mints the version automatically."
+        ),
+    )
     run_parser.add_argument("--baseline-window", type=int, default=DEFAULT_BASELINE_WINDOW)
     run_parser.add_argument("--threshold", type=float, default=None)
     run_parser.add_argument("--min-area", type=float, default=None, metavar="M2")
@@ -187,17 +195,18 @@ def _run_pipeline(args: argparse.Namespace) -> int:
             # and the lock lives on the connection (see pipeline._acquire_aoi_run_lock).
             with engine.connect() as connection, Session(bind=connection) as session:
                 aoi = get_or_create_aoi(session, config)
-                methodology = get_or_create_methodology_version(
+                methodology = resolve_methodology_version(
                     session,
                     name=args.methodology_name,
-                    version=args.methodology_version,
                     parameters=parameters,
+                    version=args.methodology_version,
                 )
                 # Commit the AOI/methodology rows before the (hours-long) pipeline
                 # body so the dashboard lists the AOI as soon as a run starts,
                 # rather than only after the first full run commits — and even if
                 # that run fails partway.
                 session.commit()
+                methodology_version = methodology.version
                 summary = pipeline.run_pipeline(
                     session,
                     aoi=aoi,
@@ -232,6 +241,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
             return 1
 
     print(f"Ran Slice 1 pipeline for AOI {config.name!r} ({args.since} → {args.until})")
+    print(f"Methodology: {args.methodology_name} @ {methodology_version}")
     print(
         "Observations: "
         f"{summary.observations_discovered} discovered, "

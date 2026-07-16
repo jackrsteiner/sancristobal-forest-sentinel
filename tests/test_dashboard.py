@@ -96,9 +96,11 @@ def _seed_run(
     started_at: datetime,
     status: str = "running",
     events: int = 0,
+    methodology_version_id: int | None = None,
 ) -> PipelineRun:
     run = PipelineRun(
         aoi_id=aoi.id,
+        methodology_version_id=methodology_version_id,
         started_at=started_at,
         status=status,
         since=date(2026, 6, 16),
@@ -125,10 +127,17 @@ def test_aoi_runs_lists_newest_first_with_last_event(
     client: TestClient, db_session: Session
 ) -> None:
     aoi = make_aoi(db_session, name="Seeded AOI")
+    methodology = make_methodology(db_session, parameters={"delta_nbr_threshold": -0.25})
     older = _seed_run(
         db_session, aoi, started_at=datetime(2026, 7, 15, 3, 0, tzinfo=UTC), status="succeeded"
     )
-    newer = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC), events=2)
+    newer = _seed_run(
+        db_session,
+        aoi,
+        started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC),
+        events=2,
+        methodology_version_id=methodology.id,
+    )
     db_session.flush()
 
     response = client.get(f"/api/aois/{aoi.id}/runs")
@@ -138,19 +147,35 @@ def test_aoi_runs_lists_newest_first_with_last_event(
     assert runs[0]["status"] == "running"
     assert runs[0]["since"] == "2026-06-16"
     assert runs[0]["last_event_at"] is not None
+    assert runs[0]["methodology"] == {
+        "id": methodology.id,
+        "name": "optical-change",
+        "version": "1.0.0",
+    }
     assert runs[1]["status"] == "succeeded"
     assert runs[1]["last_event_at"] is None  # no progress events seeded
+    assert runs[1]["methodology"] is None  # rows predating the provenance column
 
 
 def test_run_detail_returns_events_in_order(client: TestClient, db_session: Session) -> None:
     aoi = make_aoi(db_session, name="Seeded AOI")
-    run = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC), events=3)
+    methodology = make_methodology(db_session, parameters={"delta_nbr_threshold": -0.25})
+    run = _seed_run(
+        db_session,
+        aoi,
+        started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC),
+        events=3,
+        methodology_version_id=methodology.id,
+    )
 
     response = client.get(f"/api/runs/{run.id}")
     assert response.status_code == 200
     detail = response.json()
     assert detail["id"] == run.id
     assert detail["status"] == "running"
+    # The run's non-data inputs are inspectable from the dashboard.
+    assert detail["methodology"]["version"] == "1.0.0"
+    assert detail["methodology"]["parameters"] == {"delta_nbr_threshold": -0.25}
     events = detail["events"]
     assert [event["batch_index"] for event in events] == [1, 2, 3]
     assert all(event["stage"] == "index" for event in events)

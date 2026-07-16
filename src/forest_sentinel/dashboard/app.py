@@ -32,6 +32,7 @@ from forest_sentinel.models import (
     DisturbanceCandidate,
     DisturbanceEvent,
     EventObservation,
+    MethodologyVersion,
     PipelineRun,
     PipelineRunEvent,
 )
@@ -137,25 +138,46 @@ def create_app() -> FastAPI:
         if session.get(Aoi, aoi_id) is None:
             raise HTTPException(status_code=404, detail=f"AOI {aoi_id} not found")
         rows = session.execute(
-            select(PipelineRun, func.max(PipelineRunEvent.occurred_at))
+            select(PipelineRun, MethodologyVersion, func.max(PipelineRunEvent.occurred_at))
             .outerjoin(PipelineRunEvent, PipelineRunEvent.run_id == PipelineRun.id)
+            .outerjoin(
+                MethodologyVersion,
+                MethodologyVersion.id == PipelineRun.methodology_version_id,
+            )
             .where(PipelineRun.aoi_id == aoi_id)
-            .group_by(PipelineRun.id)
+            .group_by(PipelineRun.id, MethodologyVersion.id)
             .order_by(PipelineRun.started_at.desc())
             .limit(RUNS_LIMIT)
         ).all()
-        return [_run_summary(run, last_event_at) for run, last_event_at in rows]
+        return [
+            _run_summary(run, last_event_at, methodology)
+            for run, methodology, last_event_at in rows
+        ]
 
     @app.get("/api/runs/{run_id}")
     def run_detail(run_id: int, session: SessionDep) -> dict[str, Any]:
-        """One run with the tail of its progress events (oldest first)."""
+        """One run with the tail of its progress events (oldest first).
+
+        Includes the full methodology ``parameters`` — the run's non-data inputs
+        (threshold, min area, baseline window, EE script version, ...) — so the
+        provenance behind the results is inspectable from the dashboard.
+        """
         run = session.get(PipelineRun, run_id)
         if run is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+        methodology = (
+            session.get(MethodologyVersion, run.methodology_version_id)
+            if run.methodology_version_id is not None
+            else None
+        )
         last_event_at = session.execute(
             select(func.max(PipelineRunEvent.occurred_at)).where(PipelineRunEvent.run_id == run_id)
         ).scalar_one()
-        return {**_run_summary(run, last_event_at), "events": _run_events(session, run_id)}
+        detail = {**_run_summary(run, last_event_at, methodology)}
+        if methodology is not None:
+            detail["methodology"]["parameters"] = methodology.parameters
+        detail["events"] = _run_events(session, run_id)
+        return detail
 
     @app.get("/api/events/{event_id}")
     def event_detail(event_id: int, session: SessionDep) -> dict[str, Any]:
@@ -222,7 +244,9 @@ def _timeline(session: Session, event_id: int) -> list[dict[str, Any]]:
     ]
 
 
-def _run_summary(run: PipelineRun, last_event_at: Any) -> dict[str, Any]:
+def _run_summary(
+    run: PipelineRun, last_event_at: Any, methodology: MethodologyVersion | None
+) -> dict[str, Any]:
     return {
         "id": run.id,
         "aoi_id": run.aoi_id,
@@ -233,6 +257,11 @@ def _run_summary(run: PipelineRun, last_event_at: Any) -> dict[str, Any]:
         "until": run.until,
         "summary": run.summary,
         "last_event_at": last_event_at,
+        "methodology": (
+            {"id": methodology.id, "name": methodology.name, "version": methodology.version}
+            if methodology is not None
+            else None
+        ),
     }
 
 
