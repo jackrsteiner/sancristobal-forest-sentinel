@@ -83,8 +83,9 @@ export PROJECT_ID=my-forest-sentinel
 The script is idempotent (safe to re-run) and, as described in `DEPLOYMENT.md` §3:
 
 - enables the `earthengine`, `storage`, and `compute` APIs,
-- creates the **`forest-sentinel-pipeline` service account** with `roles/earthengine.writer`
-  and `roles/storage.objectAdmin`,
+- creates the **`forest-sentinel-pipeline` service account** with `roles/earthengine.writer`,
+  `roles/storage.objectAdmin`, and `roles/serviceusage.serviceUsageConsumer` (Earth
+  Engine requires the latter to use the project),
 - creates the transient staging bucket `gs://<PROJECT_ID>-ofs-staging` with a 1-day
   auto-delete lifecycle.
 

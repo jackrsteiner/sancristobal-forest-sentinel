@@ -74,8 +74,14 @@ else
     echo "    (already exists)"
 fi
 
-echo "==> Granting roles (Earth Engine + Storage)"
-for role in roles/earthengine.writer roles/storage.objectAdmin; do
+echo "==> Granting roles (Earth Engine + Storage + Service Usage)"
+# serviceUsageConsumer: Earth Engine refuses requests from an identity that
+# cannot "use" the project ("Caller does not have required permission to use
+# project ..."); earthengine.writer alone is not sufficient.
+for role in \
+    roles/earthengine.writer \
+    roles/storage.objectAdmin \
+    roles/serviceusage.serviceUsageConsumer; do
     gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
         --member "serviceAccount:${SA_EMAIL}" \
         --role "${role}" \
