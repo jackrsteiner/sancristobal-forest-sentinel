@@ -64,6 +64,13 @@ shows it** — casing matters for step 2.
 2. Register the project for Earth Engine at
    <https://code.earthengine.google.com/register> (choose **noncommercial /
    unpaid**). This cannot be automated.
+   Then set the project's Earth Engine **noncommercial tier to Contributor**
+   (Cloud console → Earth Engine settings; self-service). It is still free —
+   it only requires the billing account you just attached — and raises the
+   monthly compute quota from 150 to 1,000 EECU-hours plus the concurrent
+   batch-task limit, which the pipeline's batched exports exploit
+   (`docs/scaling.md` §2). The default Community tier works but makes the
+   first backfill painfully slow (~40 min/export observed).
 3. In [Cloud Shell](https://shell.cloud.google.com/) (or any authenticated
    `gcloud`):
 
@@ -170,6 +177,7 @@ redeploy. `--nuke` deletes the entire project (recoverable for ~30 days).
 | Graft step fails with "refusing to allow …workflows" or 403 | `OFS_ADMIN_TOKEN` missing/expired or lacks **Workflows: read/write**. |
 | Graft push rejected | Branch protection on `main` — disable it for the first deploy. |
 | `auth@v2` step fails with `unauthorized_client` | `WIF_PROVIDER`/`PROVISIONER_SA` variables wrong, or `GITHUB_REPO` was passed to `setup_wif.sh` with different casing than the real repo name. Re-run `setup_wif.sh` with the exact `owner/name` — it repoints the provider in place. |
+| Redeploying after a teardown or a wrong-repo setup | Just re-run `setup_wif.sh` — it self-heals: soft-deleted WIF pools/providers are undeleted, a provider locked to another repo is repointed, and stale cross-repo impersonation grants are pruned. |
 | Deploy re-run doesn't pick up VM changes | An existing VM's metadata/startup script is not refreshed — tear down and redeploy (or `gcloud compute instances add-metadata`). |
 | VM setup fails | The workflow prints the serial-console tail; on the VM see `/var/log/ofs-startup.log` and `journalctl`. |
 | Pipeline can't reach Earth Engine | Project not EE-registered (step 2.2), or `PROJECT_ID` not set in `config/instance.env`. |

@@ -9,7 +9,8 @@ source observation and the methodology version.
     NDVI = (NIR - RED)   / (NIR + RED)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from geoalchemy2.shape import to_shape
@@ -18,9 +19,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, qa
+from forest_sentinel.earthengine import EarthEngineError
 from forest_sentinel.hls import HLS_COLLECTIONS
 from forest_sentinel.models import Aoi, IndexRaster, MethodologyVersion, Observation
-from forest_sentinel.storage import CogKey, Storage
+from forest_sentinel.storage import CogKey, ExportRequest, Storage, StorageError
 
 # Native export resolution for HLS (metres).
 DEFAULT_SCALE_METERS = 30
@@ -85,6 +87,16 @@ def build_index_image(
     return ee_module.normalized_difference(masked, nd_bands)
 
 
+@dataclass
+class IndexStageOutcome:
+    """Per-chunk results of the index stage, keyed by observation id."""
+
+    rasters: dict[int, list[IndexRaster]] = field(default_factory=dict)
+    exported: int = 0
+    reused: int = 0
+    failures: dict[int, Exception] = field(default_factory=dict)
+
+
 def compute_indices_for_observation(
     session: Session,
     *,
@@ -96,40 +108,130 @@ def compute_indices_for_observation(
     ee_module: Any = earthengine,
 ) -> list[IndexRaster]:
     """Compute and persist NBR + NDVI index rasters for one observation."""
-    bands = _require_bands(observation.sensor)
+    outcome = compute_indices_for_observations(
+        session,
+        aoi=aoi,
+        observations=[observation],
+        methodology=methodology,
+        storage=storage,
+        scale=scale,
+        ee_module=ee_module,
+    )
+    if observation.id in outcome.failures:
+        raise outcome.failures[observation.id]
+    return outcome.rasters.get(observation.id, [])
 
+
+def compute_indices_for_observations(
+    session: Session,
+    *,
+    aoi: Aoi,
+    observations: list[Observation],
+    methodology: MethodologyVersion,
+    storage: Storage,
+    scale: int = DEFAULT_SCALE_METERS,
+    ee_module: Any = earthengine,
+) -> IndexStageOutcome:
+    """Compute and persist NBR + NDVI rasters for a chunk of observations.
+
+    Two cost levers live here (``docs/scaling.md`` §3.1/§3.3): an index raster
+    whose row *and* COG file already exist under this methodology is **reused**
+    (no export, no valid-fraction measurement — the stored fraction stands), and
+    everything that does need exporting across the chunk is submitted to Earth
+    Engine as **one batch** so the tasks progress through EE's queue
+    concurrently. Failures stay per-observation: a failed export marks only its
+    observation failed (in ``failures``); sibling artifacts that succeeded are
+    persisted, exactly like the pre-batch behavior under upserts.
+    """
     region = mapping(to_shape(aoi.geometry))
-    masked = build_masked_image(observation, ee_module=ee_module)
+    outcome = IndexStageOutcome()
+    requests: list[ExportRequest] = []
+    # Parallel to `requests`: which (observation, index type, fraction) each export lands.
+    slots: list[tuple[Observation, str, float]] = []
 
-    fraction = qa.measure_valid_fraction(masked, bands.red, region, scale, ee_module=ee_module)
-    qa.record_quality_mask(session, observation_id=observation.id, valid_pixel_fraction=fraction)
+    for observation in observations:
+        try:
+            bands = _require_bands(observation.sensor)
+            date = observation.acquired_at.date().isoformat()
+            reusable: dict[str, IndexRaster] = {}
+            missing: dict[str, list[str]] = {}
+            for index_type, nd_bands in index_bands(observation.sensor).items():
+                existing = _get_index_raster(
+                    session,
+                    observation_id=observation.id,
+                    methodology_version_id=methodology.id,
+                    index_type=index_type,
+                )
+                if existing is not None and Path(existing.cog_path).exists():
+                    reusable[index_type] = existing
+                else:
+                    missing[index_type] = nd_bands
 
-    date = observation.acquired_at.date().isoformat()
-    results: list[IndexRaster] = []
-    for index_type, nd_bands in index_bands(observation.sensor).items():
-        index_image = ee_module.normalized_difference(masked, nd_bands)
-        # The scene id keeps same-day observations (both sensors, adjacent tiles) from
-        # exporting to the same path and silently overwriting each other; the AOI id
-        # keeps distinct AOI names that sanitize identically from sharing a tree.
-        key = CogKey(
-            aoi=f"{aoi.id}-{aoi.name}",
-            product=index_type,
-            date=date,
-            filename=f"{index_type.lower()}-{observation.source_scene_id}.tif",
-        )
-        cog_path = storage.export_image(index_image, key, scale=scale, region=region)
-        results.append(
-            _upsert_index_raster(
-                session,
-                observation_id=observation.id,
-                methodology_version_id=methodology.id,
-                index_type=index_type,
-                cog_path=str(cog_path),
-                valid_pixel_fraction=fraction,
+            outcome.rasters[observation.id] = list(reusable.values())
+            outcome.reused += len(reusable)
+            if not missing:
+                continue
+
+            masked = build_masked_image(observation, ee_module=ee_module)
+            fraction = qa.measure_valid_fraction(
+                masked, bands.red, region, scale, ee_module=ee_module
             )
+            qa.record_quality_mask(
+                session, observation_id=observation.id, valid_pixel_fraction=fraction
+            )
+            for index_type, nd_bands in missing.items():
+                index_image = ee_module.normalized_difference(masked, nd_bands)
+                # The scene id keeps same-day observations (both sensors, adjacent
+                # tiles) from exporting to the same path and silently overwriting
+                # each other; the AOI id keeps distinct AOI names that sanitize
+                # identically from sharing a tree.
+                key = CogKey(
+                    aoi=f"{aoi.id}-{aoi.name}",
+                    product=index_type,
+                    date=date,
+                    filename=f"{index_type.lower()}-{observation.source_scene_id}.tif",
+                )
+                requests.append(ExportRequest(index_image, key, scale=scale, region=region))
+                slots.append((observation, index_type, fraction))
+        except (StorageError, EarthEngineError) as exc:
+            outcome.failures[observation.id] = exc
+            outcome.rasters.pop(observation.id, None)
+
+    export_results = storage.export_images(requests) if requests else []
+    for (observation, index_type, fraction), result in zip(slots, export_results, strict=True):
+        if observation.id in outcome.failures:
+            continue
+        if isinstance(result, StorageError):
+            outcome.failures[observation.id] = result
+            continue
+        raster = _upsert_index_raster(
+            session,
+            observation_id=observation.id,
+            methodology_version_id=methodology.id,
+            index_type=index_type,
+            cog_path=str(result),
+            valid_pixel_fraction=fraction,
         )
+        outcome.rasters.setdefault(observation.id, []).append(raster)
+        outcome.exported += 1
+
     session.flush()
-    return results
+    return outcome
+
+
+def _get_index_raster(
+    session: Session,
+    *,
+    observation_id: int,
+    methodology_version_id: int,
+    index_type: str,
+) -> IndexRaster | None:
+    return session.execute(
+        select(IndexRaster)
+        .where(IndexRaster.observation_id == observation_id)
+        .where(IndexRaster.index_type == index_type)
+        .where(IndexRaster.methodology_version_id == methodology_version_id)
+    ).scalar_one_or_none()
 
 
 def _upsert_index_raster(

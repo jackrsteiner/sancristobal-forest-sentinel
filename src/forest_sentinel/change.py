@@ -8,6 +8,7 @@ the methodology version, and every contributing ``index_raster`` (current + base
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from geoalchemy2.shape import to_shape
@@ -25,7 +26,7 @@ from forest_sentinel.models import (
     MethodologyVersion,
     Observation,
 )
-from forest_sentinel.storage import CogKey, Storage
+from forest_sentinel.storage import CogKey, ExportRequest, Storage, StorageError
 
 DEFAULT_BASELINE_WINDOW = 5
 
@@ -42,13 +43,16 @@ class ChangeProduct:
 
     The pipeline (#42) reuses ``delta_image`` for candidate extraction (#41) without
     rebuilding it. For a **frozen** raster (its candidates are tracked into events)
+    or a **reused** one (row + COG already persisted by an earlier run, #77)
     ``delta_image`` is ``None``: nothing was recomputed, and candidate extraction
-    short-circuits before touching it.
+    is skipped — a reused raster's candidates were committed in the same
+    checkpoint as the raster itself.
     """
 
     change_type: str
     change_raster: ChangeRaster
     delta_image: Any
+    reused: bool = False
 
 
 def compute_change_products_for_observation(
@@ -110,6 +114,9 @@ def compute_change_products_for_observation(
         nd_bands = indices.index_bands(obs.sensor)[index_type]
         return ee_module.normalized_difference(masked_image(obs), nd_bands)
 
+    # Pass 1: decide per change type — frozen / reused / needs export — and build
+    # the pending export requests so both deltas go to Earth Engine as one batch.
+    pending: list[tuple[str, str, Any, CogKey, list[Observation]]] = []
     for change_type, index_type in CHANGE_TYPES.items():
         # Frozen: the existing raster is evidence for tracked candidates. Recomputing
         # would overwrite its COG (same path) and rewrite its recorded sources with a
@@ -123,6 +130,19 @@ def compute_change_products_for_observation(
         if existing is not None and change_raster_is_frozen(session, existing.id):
             results.append(
                 ChangeProduct(change_type=change_type, change_raster=existing, delta_image=None)
+            )
+            continue
+        # Reused (#77): row + COG already persisted by an earlier run. The recorded
+        # baseline (change_raster_source) stands — it is not recomputed as new prior
+        # observations arrive; candidates were committed alongside the raster.
+        if existing is not None and Path(existing.cog_path).exists():
+            results.append(
+                ChangeProduct(
+                    change_type=change_type,
+                    change_raster=existing,
+                    delta_image=None,
+                    reused=True,
+                )
             )
             continue
 
@@ -145,40 +165,61 @@ def compute_change_products_for_observation(
             date=date,
             filename=f"{change_type}-{observation.source_scene_id}.tif",
         )
-        cog_path = storage.export_image(delta, key, scale=scale, region=region)
+        pending.append((change_type, index_type, delta, key, baseline_obs))
 
-        source_obs_ids = [observation.id, *(prior.id for prior in baseline_obs)]
-        index_rows = (
-            session.execute(
-                select(IndexRaster)
-                .where(IndexRaster.observation_id.in_(source_obs_ids))
-                .where(IndexRaster.index_type == index_type)
-                .where(IndexRaster.methodology_version_id == methodology.id)
+    # Pass 2: batch-export, then persist each success. Successes are recorded even
+    # when a sibling delta failed (rows are consistent under upserts and resume on
+    # the next run); the first failure is re-raised so the pipeline counts this
+    # observation as failed, matching the pre-batch behavior.
+    export_error: StorageError | None = None
+    if pending:
+        export_results = storage.export_images(
+            [
+                ExportRequest(delta, key, scale=scale, region=region)
+                for (_, _, delta, key, _) in pending
+            ]
+        )
+        for (change_type, index_type, delta, _key, baseline_obs), export_result in zip(
+            pending, export_results, strict=True
+        ):
+            if isinstance(export_result, StorageError):
+                export_error = export_error or export_result
+                continue
+
+            source_obs_ids = [observation.id, *(prior.id for prior in baseline_obs)]
+            index_rows = (
+                session.execute(
+                    select(IndexRaster)
+                    .where(IndexRaster.observation_id.in_(source_obs_ids))
+                    .where(IndexRaster.index_type == index_type)
+                    .where(IndexRaster.methodology_version_id == methodology.id)
+                )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        current_index = next(
-            (row for row in index_rows if row.observation_id == observation.id), None
-        )
-        fraction = current_index.valid_pixel_fraction if current_index is not None else None
+            current_index = next(
+                (row for row in index_rows if row.observation_id == observation.id), None
+            )
+            fraction = current_index.valid_pixel_fraction if current_index is not None else None
 
-        change = _upsert_change_raster(
-            session,
-            observation_id=observation.id,
-            methodology_version_id=methodology.id,
-            change_type=change_type,
-            cog_path=str(cog_path),
-            baseline_window=baseline_window,
-            valid_pixel_fraction=fraction,
-        )
-        session.flush()
-        _replace_sources(session, change.id, [row.id for row in index_rows])
-        results.append(
-            ChangeProduct(change_type=change_type, change_raster=change, delta_image=delta)
-        )
+            change = _upsert_change_raster(
+                session,
+                observation_id=observation.id,
+                methodology_version_id=methodology.id,
+                change_type=change_type,
+                cog_path=str(export_result),
+                baseline_window=baseline_window,
+                valid_pixel_fraction=fraction,
+            )
+            session.flush()
+            _replace_sources(session, change.id, [row.id for row in index_rows])
+            results.append(
+                ChangeProduct(change_type=change_type, change_raster=change, delta_image=delta)
+            )
 
     session.flush()
+    if export_error is not None:
+        raise export_error
     return results
 
 

@@ -195,6 +195,11 @@ def test_frozen_change_rasters_are_not_recomputed(db_session: Session, tmp_path:
 
     # A late-arriving observation lands inside the window (would change the baseline).
     make_observation(db_session, aoi, day=3)
+    # The ΔNDVI COG goes missing (e.g. pruned): its row alone no longer satisfies the
+    # reuse check (#77), so it is re-exported; the frozen ΔNBR raster is skipped
+    # regardless of its file.
+    delta_ndvi = next(p.change_raster for p in products if p.change_type == "delta_ndvi")
+    Path(delta_ndvi.cog_path).unlink()
     rerun_storage = FakeStorage(tmp_path / "rerun")
     rerun = compute_change_products_for_observation(
         db_session,
@@ -239,3 +244,38 @@ def test_rerun_replaces_sources(db_session: Session, tmp_path: Path) -> None:
     assert len(db_session.execute(select(ChangeRaster)).scalars().all()) == 2
     # current + 2 baselines = 3 sources per change type, not doubled on re-run.
     assert len(db_session.execute(select(ChangeRasterSource)).scalars().all()) == 6
+
+
+def test_persisted_change_rasters_are_reused_without_export(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """A non-frozen change raster whose row and COG both exist is reused (#77):
+    no export is submitted and its recorded baseline stands."""
+    fake_ee = FakeEarthEngine()
+    aoi, observations, methodology = _build_history(db_session, [1, 2, 3], fake_ee, tmp_path)
+    current = observations[-1]
+    storage = FakeStorage(tmp_path / "change")
+    compute_change_products_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=current,
+        methodology=methodology,
+        storage=storage,
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+    first_exports = len(storage.exports)
+    assert first_exports == 2
+
+    rerun_storage = FakeStorage(tmp_path / "rerun")
+    rerun = compute_change_products_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=current,
+        methodology=methodology,
+        storage=rerun_storage,
+        ee_module=fake_ee,
+    )
+    assert rerun_storage.exports == []
+    assert all(product.reused for product in rerun)
+    assert all(product.delta_image is None for product in rerun)

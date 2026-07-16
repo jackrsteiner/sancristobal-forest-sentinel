@@ -152,6 +152,10 @@ uv run python scripts/make_aoi.py \
     --out aois/guadalcanal.geojson
 ```
 
+(The `aois/` directory is not tracked in the repo — `make_aoi.py` creates it on demand.
+Instance repos conventionally use the committed `config/aoi.geojson` instead; see
+[`INSTANCE_DEPLOYMENT.md`](INSTANCE_DEPLOYMENT.md).)
+
 Keep AOIs small to stay inside the free tiers (the `e2-micro` VM has 1 GB RAM and a
 30 GB disk shared with Postgres and the COG store).
 

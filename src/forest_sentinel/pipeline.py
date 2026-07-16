@@ -36,15 +36,31 @@ AOI_RUN_LOCK_CLASS = 0x0F5
 
 
 def _acquire_aoi_run_lock(session: Session, aoi_id: int) -> None:
-    """Serialize pipeline runs per AOI for the duration of this transaction.
+    """Serialize pipeline runs per AOI for the duration of the run.
 
     Discovery is race-safe on its own (ON CONFLICT), but the later upserts
     (quality_mask, index/change rasters, candidate replacement) are read-then-write:
     a manual run alongside the systemd timer would hit duplicate-key errors or double
-    candidate sets. The transaction-scoped Postgres advisory lock makes the second
-    run wait until the first commits; it then sees the committed rows and skips.
+    candidate sets. The lock is **session-scoped** (not transaction-scoped): the run
+    checkpoints its progress with commits after each observation chunk (#77), and a
+    transaction-scoped lock would be released by the first of those commits. It is
+    held by the session's database connection until `_release_aoi_run_lock` (or
+    disconnect — a killed run releases it automatically). The CLI binds the session
+    to a single pinned connection so commits cannot migrate it to another one.
     """
-    session.execute(select(func.pg_advisory_xact_lock(AOI_RUN_LOCK_CLASS, aoi_id)))
+    session.execute(select(func.pg_advisory_lock(AOI_RUN_LOCK_CLASS, aoi_id)))
+
+
+def _release_aoi_run_lock(session: Session, aoi_id: int) -> None:
+    session.execute(select(func.pg_advisory_unlock(AOI_RUN_LOCK_CLASS, aoi_id)))
+
+
+# NBR + NDVI per observation.
+_EXPORTS_PER_OBSERVATION = 2
+
+
+def _chunked(items: list[Observation], size: int) -> list[list[Observation]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 @dataclass(frozen=True)
@@ -60,6 +76,8 @@ class PipelineSummary:
     events_created: int
     event_observations: int
     export_failures: int = 0  # observations skipped because an EE export failed
+    index_rasters_reused: int = 0  # persisted by an earlier run; no export submitted
+    change_rasters_reused: int = 0
 
 
 def run_pipeline(
@@ -74,18 +92,62 @@ def run_pipeline(
     threshold: float | None = None,
     min_area_m2: float | None = None,
     scale: int = indices.DEFAULT_SCALE_METERS,
+    max_concurrent_exports: int = 1,
     ee_module: Any = earthengine,
 ) -> PipelineSummary:
-    """Run discover → indices → change → candidates → events for one AOI and window."""
+    """Run discover → indices → change → candidates → events for one AOI and window.
+
+    Progress is **checkpointed**: the session is committed after each observation
+    chunk in the index stage and after each observation's change/candidate stage,
+    so a run killed partway (systemd timeout, SIGTERM) resumes on the next
+    invocation — already-persisted artifacts are reused (#77) instead of
+    re-exported. ``max_concurrent_exports`` bounds how many Earth Engine batch
+    tasks are put in flight together (#79).
+    """
     _acquire_aoi_run_lock(session, aoi.id)
+    try:
+        return _run_pipeline_locked(
+            session,
+            aoi=aoi,
+            since=since,
+            until=until,
+            methodology=methodology,
+            storage=storage,
+            baseline_window=baseline_window,
+            threshold=threshold,
+            min_area_m2=min_area_m2,
+            scale=scale,
+            max_concurrent_exports=max_concurrent_exports,
+            ee_module=ee_module,
+        )
+    finally:
+        _release_aoi_run_lock(session, aoi.id)
+
+
+def _run_pipeline_locked(
+    session: Session,
+    *,
+    aoi: Aoi,
+    since: date,
+    until: date,
+    methodology: MethodologyVersion,
+    storage: Storage,
+    baseline_window: int,
+    threshold: float | None,
+    min_area_m2: float | None,
+    scale: int,
+    max_concurrent_exports: int,
+    ee_module: Any,
+) -> PipelineSummary:
     region = mapping(to_shape(aoi.geometry))
 
     discovery = discover_observations(session, aoi, since=since, until=until, ee_module=ee_module)
+    session.commit()
 
     # Only the window's observations are (re)processed; without this filter every
     # scheduled run would re-export the AOI's entire history. The trailing baseline
     # still draws on all prior observations (change.py queries them itself).
-    observations = (
+    observations = list(
         session.execute(
             select(Observation)
             .where(Observation.aoi_id == aoi.id)
@@ -104,29 +166,34 @@ def run_pipeline(
     failed_observation_ids: set[int] = set()
 
     index_count = 0
-    for observation in observations:
-        try:
-            index_count += len(
-                indices.compute_indices_for_observation(
-                    session,
-                    aoi=aoi,
-                    observation=observation,
-                    methodology=methodology,
-                    storage=storage,
-                    scale=scale,
-                    ee_module=ee_module,
+    index_reused = 0
+    chunk_size = max(1, max_concurrent_exports // _EXPORTS_PER_OBSERVATION)
+    for chunk in _chunked(observations, chunk_size):
+        outcome = indices.compute_indices_for_observations(
+            session,
+            aoi=aoi,
+            observations=chunk,
+            methodology=methodology,
+            storage=storage,
+            scale=scale,
+            ee_module=ee_module,
+        )
+        index_count += outcome.exported
+        index_reused += outcome.reused
+        for observation in chunk:
+            if observation.id in outcome.failures:
+                export_failures += 1
+                failed_observation_ids.add(observation.id)
+                logger.warning(
+                    "skipping observation %s: index export failed (%s)",
+                    observation.source_scene_id,
+                    outcome.failures[observation.id],
                 )
-            )
-        except (StorageError, EarthEngineError) as exc:
-            export_failures += 1
-            failed_observation_ids.add(observation.id)
-            logger.warning(
-                "skipping observation %s: index export failed (%s)",
-                observation.source_scene_id,
-                exc,
-            )
+        # Checkpoint: a later kill (timeout, SIGTERM) keeps this chunk's artifacts.
+        session.commit()
 
     change_count = 0
+    change_reused = 0
     candidate_count = 0
     for observation in observations:
         if observation.id in failed_observation_ids:
@@ -142,11 +209,19 @@ def run_pipeline(
                 scale=scale,
                 ee_module=ee_module,
             )
-            change_count += len(products)
+            observation_candidates = 0
             for product in products:
                 if product.change_type != CANDIDATE_CHANGE_TYPE:
                     continue
-                candidate_count += len(
+                if product.delta_image is None:
+                    # Frozen or reused: the candidate set already exists (it commits
+                    # in the same checkpoint as the raster) — count it, don't
+                    # re-extract it.
+                    observation_candidates += candidates.count_candidates_for_change_raster(
+                        session, product.change_raster.id
+                    )
+                    continue
+                observation_candidates += len(
                     candidates.extract_candidates_for_change_raster(
                         session,
                         change_raster=product.change_raster,
@@ -158,6 +233,12 @@ def run_pipeline(
                         ee_module=ee_module,
                     )
                 )
+            change_count += len(products)
+            change_reused += sum(1 for product in products if product.reused)
+            candidate_count += observation_candidates
+            # Checkpoint the rasters together with their candidates: reuse of a
+            # change raster on a later run therefore implies its candidates exist.
+            session.commit()
         except (StorageError, EarthEngineError) as exc:
             export_failures += 1
             logger.warning(
@@ -165,6 +246,10 @@ def run_pipeline(
                 observation.source_scene_id,
                 exc,
             )
+            # Discard this observation's partial change-stage state so a committed
+            # (non-frozen) change raster always implies extracted candidates; its
+            # orphaned COGs are re-exported on retry (the exists-check needs the row).
+            session.rollback()
 
     tracking = events.track_events_for_aoi(session, aoi=aoi)
 
@@ -178,4 +263,6 @@ def run_pipeline(
         events_created=tracking.events_created,
         event_observations=tracking.observations_added,
         export_failures=export_failures,
+        index_rasters_reused=index_reused,
+        change_rasters_reused=change_reused,
     )

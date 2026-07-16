@@ -213,6 +213,7 @@ flowchart LR
 - `quality_mask`: cloud, shadow, haze, missing-data, water, or other observation-quality metadata
 - `index_raster`: derived NBR / NDVI raster metadata
 - `change_raster`: ΔNBR / ΔNDVI or anomaly raster metadata
+- `change_raster_source`: provenance link from a change raster to every index raster (current + baseline) that contributed to it
 - `radar_change_raster`: Sentinel-1-derived GRD backscatter/intensity, future SLC-based coherence, or other SAR change metadata
 - `disturbance_candidate`: raw detected disturbance polygon
 - `disturbance_event`: tracked logging/disturbance event over time

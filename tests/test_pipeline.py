@@ -23,7 +23,7 @@ from forest_sentinel.models import (
     Observation,
 )
 from forest_sentinel.pipeline import run_pipeline
-from forest_sentinel.storage import CogKey, StorageError
+from forest_sentinel.storage import StorageError
 from tests.fakes import FakeEarthEngine, FakeStorage, make_aoi, make_methodology
 
 # A small candidate polygon inside the AOI bbox, returned by the stubbed vectorizer.
@@ -136,12 +136,14 @@ def test_one_failing_export_does_not_starve_the_run(db_session: Session, tmp_pat
     run and roll everything back (re-audit R4)."""
 
     class FlakyStorage(FakeStorage):
-        def export_image(
-            self, image: Any, key: CogKey, *, scale: int | None = None, region: Any = None
-        ) -> Path:
-            if key.date == "2026-01-02":  # scene-2's exports always fail
-                raise StorageError("Earth Engine export ended in state FAILED")
-            return super().export_image(image, key, scale=scale, region=region)
+        def export_images(self, requests: Any) -> list[Path | StorageError]:
+            results = super().export_images(requests)
+            return [
+                StorageError("Earth Engine export ended in state FAILED")
+                if request.key.date == "2026-01-02"  # scene-2's exports always fail
+                else result
+                for request, result in zip(requests, results, strict=True)
+            ]
 
     aoi = make_aoi(db_session, name="Hallway AOI")
     methodology = make_methodology(db_session)
@@ -169,42 +171,63 @@ def test_one_failing_export_does_not_starve_the_run(db_session: Session, tmp_pat
 def test_concurrent_runs_are_serialized_per_aoi(db_session: Session, tmp_path: Path) -> None:
     """run_pipeline takes a per-AOI advisory lock so a manual run alongside the
     systemd timer waits instead of racing the read-then-write upserts (re-audit
-    round 2, finding 2)."""
-    from sqlalchemy import func
+    round 2, finding 2). The lock is session-scoped (#77: it must survive the
+    run's checkpoint commits) and released when the run finishes."""
+    from sqlalchemy import Engine, func
     from sqlalchemy import select as sa_select
 
-    from forest_sentinel.pipeline import AOI_RUN_LOCK_CLASS
+    from forest_sentinel.models import Aoi, MethodologyVersion
+    from forest_sentinel.pipeline import (
+        AOI_RUN_LOCK_CLASS,
+        _acquire_aoi_run_lock,
+        _release_aoi_run_lock,
+    )
 
     aoi = make_aoi(db_session, name="Hallway AOI")
     methodology = make_methodology(db_session)
-    run_pipeline(
-        db_session,
-        aoi=aoi,
-        since=date(2026, 1, 1),
-        until=date(2026, 2, 1),
-        methodology=methodology,
-        storage=FakeStorage(tmp_path),
-        ee_module=_fake_ee((1,)),
-    )
-    # The lock is transaction-scoped and still held (no commit yet): a concurrent
-    # session cannot take it...
-    engine = db_session.get_bind()
-    with Session(engine) as other:
-        assert (
-            other.execute(
-                sa_select(func.pg_try_advisory_xact_lock(AOI_RUN_LOCK_CLASS, aoi.id))
-            ).scalar_one()
-            is False
-        )
     db_session.commit()
-    # ...and can once the first run's transaction ends.
-    with Session(engine) as other:
-        assert (
-            other.execute(
-                sa_select(func.pg_try_advisory_xact_lock(AOI_RUN_LOCK_CLASS, aoi.id))
+    aoi_id, methodology_id = aoi.id, methodology.id
+    engine = db_session.get_bind()
+    assert isinstance(engine, Engine)
+
+    def other_can_lock() -> bool:
+        with Session(engine) as other:
+            taken = other.execute(
+                sa_select(func.pg_try_advisory_lock(AOI_RUN_LOCK_CLASS, aoi_id))
             ).scalar_one()
-            is True
+            if taken:
+                other.execute(sa_select(func.pg_advisory_unlock(AOI_RUN_LOCK_CLASS, aoi_id)))
+            return bool(taken)
+
+    # The run session is bound to one pinned connection, as the CLI binds it: the
+    # session-scoped lock lives on that connection across checkpoint commits.
+    with engine.connect() as pinned, Session(bind=pinned) as run_session:
+        run_aoi = run_session.get(Aoi, aoi_id)
+        run_methodology = run_session.get(MethodologyVersion, methodology_id)
+        assert run_aoi is not None and run_methodology is not None
+
+        # Held: a concurrent session cannot take it, and a checkpoint commit does
+        # not release it (the whole point of a session-scoped lock)...
+        _acquire_aoi_run_lock(run_session, aoi_id)
+        assert other_can_lock() is False
+        run_session.commit()
+        assert other_can_lock() is False
+        # ...until it is explicitly released.
+        _release_aoi_run_lock(run_session, aoi_id)
+        assert other_can_lock() is True
+
+        # A completed run leaves the lock free for the next scheduled run.
+        run_pipeline(
+            run_session,
+            aoi=run_aoi,
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            methodology=run_methodology,
+            storage=FakeStorage(tmp_path),
+            ee_module=_fake_ee((1,)),
         )
+        run_session.commit()
+    assert other_can_lock() is True
 
 
 def test_ee_failure_in_candidate_stage_is_isolated(db_session: Session, tmp_path: Path) -> None:
@@ -248,6 +271,154 @@ def test_ee_failure_in_candidate_stage_is_isolated(db_session: Session, tmp_path
     assert summary.index_rasters == 4
     assert summary.candidates == 0
     assert summary.events_created == 0
+
+
+def test_second_run_reuses_persisted_artifacts(db_session: Session, tmp_path: Path) -> None:
+    """A re-run over an already-processed window submits zero Earth Engine exports
+    (#77): every artifact is reused from the catalog + COG store."""
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = _fake_ee((1, 2, 3, 4, 5, 6))
+
+    def run(storage: FakeStorage) -> Any:
+        return run_pipeline(
+            db_session,
+            aoi=aoi,
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            methodology=methodology,
+            storage=storage,
+            baseline_window=5,
+            ee_module=fake_ee,
+        )
+
+    run(FakeStorage(tmp_path))
+    db_session.commit()
+
+    second_storage = FakeStorage(tmp_path)
+    second = run(second_storage)
+    db_session.commit()
+
+    assert second_storage.exports == []
+    assert second.index_rasters == 0
+    assert second.index_rasters_reused == 12
+    assert second.change_rasters_reused > 0
+    assert second.export_failures == 0
+
+
+def test_missing_cog_triggers_exactly_one_reexport(db_session: Session, tmp_path: Path) -> None:
+    """A pruned/lost COG self-heals (#77): only that artifact is re-exported."""
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = _fake_ee((1, 2, 3))
+
+    first_storage = FakeStorage(tmp_path)
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=first_storage,
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    row = (
+        db_session.execute(select(IndexRaster).where(IndexRaster.index_type == "NBR").limit(1))
+        .scalars()
+        .one()
+    )
+    Path(row.cog_path).unlink()
+
+    second_storage = FakeStorage(tmp_path)
+    second = run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=second_storage,
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    assert len(second_storage.exports) == 1
+    assert second.index_rasters == 1
+    assert second_storage.exports[0][1].product == "NBR"
+
+
+def test_interrupted_run_keeps_checkpointed_progress(db_session: Session, tmp_path: Path) -> None:
+    """Progress commits per chunk (#77): a run killed partway (systemd timeout,
+    SIGTERM) leaves the completed observations' artifacts in the catalog."""
+
+    class DyingStorage(FakeStorage):
+        def export_images(self, requests: Any) -> list[Path | StorageError]:
+            if any(request.key.date == "2026-01-03" for request in requests):
+                raise RuntimeError("simulated SIGTERM")  # not a per-item failure: the run dies
+            return super().export_images(requests)
+
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = _fake_ee((1, 2, 3))
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="simulated SIGTERM"):
+        run_pipeline(
+            db_session,
+            aoi=aoi,
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            methodology=methodology,
+            storage=DyingStorage(tmp_path),
+            ee_module=fake_ee,
+        )
+    # The process dies: whatever was not checkpointed is lost.
+    db_session.rollback()
+
+    persisted = db_session.execute(select(IndexRaster)).scalars().all()
+    assert len(persisted) == 4  # scenes 1 and 2 were committed before the kill
+
+    # The next scheduled run completes the window, re-exporting only the remainder.
+    second_storage = FakeStorage(tmp_path)
+    second = run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=second_storage,
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+    assert second.index_rasters == 2  # scene-3 only
+    assert second.index_rasters_reused == 4
+
+
+def test_exports_are_batched_up_to_the_concurrency_limit(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """With max_concurrent_exports=4, index exports are submitted four at a time
+    (two observations x NBR+NDVI per batch), not one by one (#79)."""
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    storage = FakeStorage(tmp_path)
+
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=storage,
+        max_concurrent_exports=4,
+        ee_module=_fake_ee((1, 2, 3, 4, 5, 6)),
+    )
+    db_session.commit()
+
+    # Index stage: 6 observations in chunks of 2 -> three batches of 4 exports.
+    assert storage.batch_sizes[:3] == [4, 4, 4]
 
 
 def test_pipeline_only_processes_observations_in_the_window(

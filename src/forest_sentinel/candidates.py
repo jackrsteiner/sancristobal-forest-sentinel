@@ -12,7 +12,7 @@ from typing import Any
 
 from geoalchemy2.shape import from_shape
 from shapely.geometry import shape
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, indices
@@ -112,6 +112,15 @@ def extract_candidates_for_change_raster(
 
     session.flush()
     return candidates
+
+
+def count_candidates_for_change_raster(session: Session, change_raster_id: int) -> int:
+    """How many candidates a change raster already has (frozen/reused rasters, #77)."""
+    return session.execute(
+        select(func.count())
+        .select_from(DisturbanceCandidate)
+        .where(DisturbanceCandidate.change_raster_id == change_raster_id)
+    ).scalar_one()
 
 
 def _existing_candidates(session: Session, change_raster_id: int) -> list[DisturbanceCandidate]:

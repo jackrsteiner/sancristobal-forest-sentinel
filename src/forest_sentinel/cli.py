@@ -8,6 +8,7 @@ disturbance events, all through Earth Engine, persisting results to PostGIS.
 """
 
 import argparse
+import os
 import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -40,6 +41,20 @@ from forest_sentinel.storage import StorageConfigurationError, StorageError
 
 # Pins what Google ran for this build, recorded in the methodology version for reproducibility.
 EE_SCRIPT_VERSION = "slice1-optical-change-v1"
+
+# How many Earth Engine batch exports the pipeline keeps in flight at once.
+MAX_CONCURRENT_EXPORTS_ENV_VAR = "FOREST_SENTINEL_MAX_CONCURRENT_EXPORTS"
+DEFAULT_MAX_CONCURRENT_EXPORTS = 4
+
+
+def _max_concurrent_exports() -> int:
+    """The configured export concurrency; malformed or non-positive values fall back."""
+    raw = os.environ.get(MAX_CONCURRENT_EXPORTS_ENV_VAR, "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_CONCURRENT_EXPORTS
+    return value if value > 0 else DEFAULT_MAX_CONCURRENT_EXPORTS
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -162,7 +177,10 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         try:
             earthengine.initialize(args.gee_project)
             cog_storage = storage.local_disk_storage_from_env()
-            with Session(engine) as session:
+            # The session is bound to one pinned connection: the pipeline holds a
+            # session-scoped per-AOI advisory lock across its checkpoint commits,
+            # and the lock lives on the connection (see pipeline._acquire_aoi_run_lock).
+            with engine.connect() as connection, Session(bind=connection) as session:
                 aoi = get_or_create_aoi(session, config)
                 methodology = get_or_create_methodology_version(
                     session,
@@ -185,6 +203,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                     baseline_window=args.baseline_window,
                     threshold=threshold,
                     min_area_m2=min_area,
+                    max_concurrent_exports=_max_concurrent_exports(),
                 )
                 session.commit()
         except StorageConfigurationError as exc:
@@ -214,8 +233,8 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         f"{summary.observations_recorded} recorded, "
         f"{summary.observations_skipped} skipped"
     )
-    print(f"Index rasters: {summary.index_rasters}")
-    print(f"Change rasters: {summary.change_rasters}")
+    print(f"Index rasters: {summary.index_rasters} ({summary.index_rasters_reused} reused)")
+    print(f"Change rasters: {summary.change_rasters} ({summary.change_rasters_reused} reused)")
     print(f"Disturbance candidates: {summary.candidates}")
     print(
         f"Disturbance events: {summary.events_created} created, "

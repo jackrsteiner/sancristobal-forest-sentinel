@@ -59,6 +59,8 @@ if [ -z "${PROJECT_ID:-}" ]; then
     PROJECT_ID="$(curl -sf -H 'Metadata-Flavor: Google' \
         http://metadata.google.internal/computeMetadata/v1/project/project-id 2>/dev/null || true)"
 fi
+DASHBOARD_PORT="${DASHBOARD_PORT:-8000}"
+PIPELINE_TIMEOUT="${PIPELINE_TIMEOUT:-20h}"
 
 echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/instance.env)"
 {
@@ -101,10 +103,10 @@ set -a; . "${APP_DIR}/.env"; set +a
 uv run alembic upgrade head
 
 echo "==> Installing systemd units"
-sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g" \
+sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g; s#@DASHBOARD_PORT@#${DASHBOARD_PORT}#g" \
     scripts/systemd/forest-sentinel-dashboard.service \
     | sudo tee /etc/systemd/system/forest-sentinel-dashboard.service >/dev/null
-sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g" \
+sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g; s#@PIPELINE_TIMEOUT@#${PIPELINE_TIMEOUT}#g" \
     scripts/systemd/forest-sentinel-pipeline.service \
     | sudo tee /etc/systemd/system/forest-sentinel-pipeline.service >/dev/null
 sudo cp scripts/systemd/forest-sentinel-pipeline.timer \

@@ -14,7 +14,7 @@ to GCS later is a backend swap behind the ``Storage`` protocol — pipeline code
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -77,6 +77,16 @@ class CogKey:
         return self.relative_path()[: -len(".tif")]
 
 
+@dataclass(frozen=True)
+class ExportRequest:
+    """One image to export as part of a batch."""
+
+    image: Any
+    key: CogKey
+    scale: int | None = None
+    region: Any = None
+
+
 class StagingBucket(Protocol):
     """A transient GCS staging area an EE export writes into."""
 
@@ -111,6 +121,8 @@ class Storage(Protocol):
         self, image: Any, key: CogKey, *, scale: int | None = None, region: Any = None
     ) -> Path: ...
 
+    def export_images(self, requests: Sequence[ExportRequest]) -> list[Path | StorageError]: ...
+
 
 class LocalDiskStorage:
     """Canonical store on the VM filesystem, fed by EE-exported COGs via GCS staging."""
@@ -140,17 +152,88 @@ class LocalDiskStorage:
     def export_image(
         self, image: Any, key: CogKey, *, scale: int | None = None, region: Any = None
     ) -> Path:
-        prefix = key.gcs_prefix()
-        task = self._ee.start_image_export_to_gcs(
-            image,
-            bucket=self._staging_bucket_name,
-            file_name_prefix=prefix,
-            scale=scale,
-            region=region,
-        )
-        self._await_completion(task, prefix)
+        result = self.export_images(
+            [ExportRequest(image=image, key=key, scale=scale, region=region)]
+        )[0]
+        if isinstance(result, StorageError):
+            raise result
+        return result
 
-        blob_name = f"{prefix}.tif"
+    def export_images(self, requests: Sequence[ExportRequest]) -> list[Path | StorageError]:
+        """Submit several exports at once and poll them as a group.
+
+        Earth Engine runs batch tasks concurrently (up to the account tier's
+        limit), so overlapping their queue waits — instead of waiting out each
+        task before submitting the next — is the main wall-clock lever
+        (``docs/scaling.md`` §3.3). Failures are per item: the returned list
+        holds, in request order, a local Path for each success and a
+        ``StorageError`` for each failure, so callers keep per-observation
+        isolation.
+        """
+        results: list[Path | StorageError] = [
+            StorageError("export was not submitted") for _ in requests
+        ]
+        pending: dict[int, Any] = {}
+        for i, request in enumerate(requests):
+            prefix = request.key.gcs_prefix()
+            try:
+                pending[i] = self._ee.start_image_export_to_gcs(
+                    request.image,
+                    bucket=self._staging_bucket_name,
+                    file_name_prefix=prefix,
+                    scale=request.scale,
+                    region=request.region,
+                )
+            except earthengine.EarthEngineError as exc:
+                results[i] = StorageError(f"failed to submit export {prefix!r}: {exc}")
+
+        # The timeout guards against a *stuck* batch: it resets whenever any task
+        # reaches a terminal state, so a slow-but-moving EE queue does not trip it.
+        waited_since_progress = 0.0
+        while pending:
+            progressed = False
+            for i in list(pending):
+                key = requests[i].key
+                prefix = key.gcs_prefix()
+                try:
+                    state = self._ee.export_task_state(pending[i])
+                except earthengine.EarthEngineError as exc:
+                    results[i] = StorageError(f"task state for export {prefix!r} failed: {exc}")
+                    del pending[i]
+                    progressed = True
+                    continue
+                if state == earthengine.TASK_STATE_COMPLETED:
+                    try:
+                        results[i] = self._download_and_clear(key)
+                    except StorageError as exc:
+                        results[i] = exc
+                    del pending[i]
+                    progressed = True
+                elif self._ee.is_terminal_failure(state):
+                    results[i] = StorageError(
+                        f"Earth Engine export {prefix!r} ended in state {state}"
+                    )
+                    del pending[i]
+                    progressed = True
+            if not pending:
+                break
+            if progressed:
+                waited_since_progress = 0.0
+            if self._timeout is not None and waited_since_progress >= self._timeout:
+                for i in list(pending):
+                    prefix = requests[i].key.gcs_prefix()
+                    results[i] = StorageError(
+                        f"Earth Engine export {prefix!r} timed out after {self._timeout:.0f}s "
+                        "without progress"
+                    )
+                    del pending[i]
+                break
+            self._sleep(self._poll_interval)
+            waited_since_progress += self._poll_interval
+        return results
+
+    def _download_and_clear(self, key: CogKey) -> Path:
+        blob_name = f"{key.gcs_prefix()}.tif"
         destination = self.path_for(key)
         destination.parent.mkdir(parents=True, exist_ok=True)
         # Staging errors (missing object, GCS hiccup) must surface as StorageError so
@@ -161,21 +244,6 @@ class LocalDiskStorage:
         except Exception as exc:
             raise StorageError(f"staging copy/clear failed for {blob_name!r}: {exc}") from exc
         return destination
-
-    def _await_completion(self, task: Any, prefix: str) -> None:
-        waited = 0.0
-        state = self._ee.export_task_state(task)
-        while state != earthengine.TASK_STATE_COMPLETED:
-            if self._ee.is_terminal_failure(state):
-                raise StorageError(f"Earth Engine export {prefix!r} ended in state {state}")
-            if self._timeout is not None and waited >= self._timeout:
-                raise StorageError(
-                    f"Earth Engine export {prefix!r} timed out after {self._timeout:.0f}s "
-                    f"in state {state}"
-                )
-            self._sleep(self._poll_interval)
-            waited += self._poll_interval
-            state = self._ee.export_task_state(task)
 
 
 def local_disk_storage_from_env(staging: StagingBucket | None = None) -> LocalDiskStorage:

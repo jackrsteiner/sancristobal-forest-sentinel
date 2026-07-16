@@ -295,7 +295,8 @@ cat <<EOF
    It grafts the template history, provisions GCP and the VM, and waits for the
    dashboard to come up (the first boot takes ~8 minutes).
 
-5. View the dashboard. From Cloud Shell:
+5. View the dashboard. From Cloud Shell (8080 is the Cloud Shell Web-Preview
+   port; the dashboard itself serves on ${TUNNEL_PORT}):
      gcloud compute ssh ${TUNNEL_INSTANCE} --zone ${TUNNEL_ZONE} -- -N -4 -L 8080:localhost:${TUNNEL_PORT}
    then click the "Web Preview" button (the small monitor-with-a-dot icon at
    the top right of the Cloud Shell toolbar) -> "Preview on port 8080".

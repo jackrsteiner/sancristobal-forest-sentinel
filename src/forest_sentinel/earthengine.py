@@ -8,8 +8,10 @@ up a live Earth Engine session.
 
 Authentication: a run needs a GCP service account with Earth Engine access and an
 EE-registered Cloud project. ``initialize`` reads the project from
-``FOREST_SENTINEL_GEE_PROJECT`` (overridable per call); credentials come from the
-ambient environment (``GOOGLE_APPLICATION_CREDENTIALS`` / ``earthengine authenticate``).
+``FOREST_SENTINEL_GEE_PROJECT`` (overridable per call); credentials are ambient
+Application Default Credentials — the attached service account's metadata server on
+the VM (the keyless default), or locally ``gcloud auth application-default login`` /
+an opt-in key file via ``GOOGLE_APPLICATION_CREDENTIALS``.
 """
 
 import os

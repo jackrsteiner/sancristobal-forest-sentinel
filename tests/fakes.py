@@ -7,6 +7,7 @@ the common row shapes (unit-square AOI, observation, change raster, and the
 Observation -> ChangeRaster -> DisturbanceCandidate chain).
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from forest_sentinel.models import (
     MethodologyVersion,
     Observation,
 )
-from forest_sentinel.storage import CogKey
+from forest_sentinel.storage import CogKey, ExportRequest, StorageError
 
 UNIT_SQUARE = Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
 
@@ -87,11 +88,19 @@ class FakeEarthEngine:
 
 
 class FakeStorage:
-    """Local-path storage double; records each export as ``(image, key, scale)``."""
+    """Local-path storage double; records each export as ``(image, key, scale)``.
+
+    ``export_images`` also records each batch's size in ``batch_sizes`` so tests can
+    assert exports were submitted together, and ``fail_products`` lets a test turn
+    specific products' exports into per-item ``StorageError`` results. Exported paths
+    are written as real (empty) files so the skip-unchanged existence check sees them.
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = root
         self.exports: list[tuple[Any, CogKey, int | None]] = []
+        self.batch_sizes: list[int] = []
+        self.fail_products: set[str] = set()
 
     def path_for(self, key: CogKey) -> Path:
         return self.root / key.relative_path()
@@ -99,8 +108,24 @@ class FakeStorage:
     def export_image(
         self, image: Any, key: CogKey, *, scale: int | None = None, region: Any = None
     ) -> Path:
-        self.exports.append((image, key, scale))
-        return self.path_for(key)
+        result = self.export_images([ExportRequest(image, key, scale=scale, region=region)])[0]
+        if isinstance(result, StorageError):
+            raise result
+        return result
+
+    def export_images(self, requests: Sequence[ExportRequest]) -> list[Path | StorageError]:
+        self.batch_sizes.append(len(requests))
+        results: list[Path | StorageError] = []
+        for request in requests:
+            if request.key.product in self.fail_products:
+                results.append(StorageError(f"forced failure for {request.key.product}"))
+                continue
+            self.exports.append((request.image, request.key, request.scale))
+            path = self.path_for(request.key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+            results.append(path)
+        return results
 
 
 def make_aoi(session: Session, *, name: str = "Test AOI") -> Aoi:
