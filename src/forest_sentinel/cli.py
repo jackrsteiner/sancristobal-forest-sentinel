@@ -170,6 +170,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                     version=args.methodology_version,
                     parameters=parameters,
                 )
+                # Commit the AOI/methodology rows before the (hours-long) pipeline
+                # body so the dashboard lists the AOI as soon as a run starts,
+                # rather than only after the first full run commits — and even if
+                # that run fails partway.
+                session.commit()
                 summary = pipeline.run_pipeline(
                     session,
                     aoi=aoi,

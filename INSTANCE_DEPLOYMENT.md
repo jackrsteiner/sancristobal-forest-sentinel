@@ -98,7 +98,10 @@ Edit and commit (both files live outside the base machinery and survive the
 history graft):
 
 - **`config/instance.env`** — set `PROJECT_ID` (required); optionally `ZONE`,
-  `INSTANCE_NAME`, `WINDOW_DAYS`, thresholds, etc.
+  `INSTANCE_NAME`, `WINDOW_DAYS`, thresholds, etc. When `setup_wif.sh` runs
+  inside your instance clone it sets and commits `PROJECT_ID` for you (and
+  pushes it if the shell has GitHub credentials), so usually only the AOI is
+  left to provide.
 - **`config/aoi.geojson`** — your Area of Interest. Build one at
   <https://jackrsteiner.github.io/aoi-maker/>, or with
   `uv run python scripts/make_aoi.py --bbox … --name … --out config/aoi.geojson`.
@@ -166,7 +169,7 @@ redeploy. `--nuke` deletes the entire project (recoverable for ~30 days).
 |---------|-------------|
 | Graft step fails with "refusing to allow …workflows" or 403 | `OFS_ADMIN_TOKEN` missing/expired or lacks **Workflows: read/write**. |
 | Graft push rejected | Branch protection on `main` — disable it for the first deploy. |
-| `auth@v2` step fails with `unauthorized_client` | `WIF_PROVIDER`/`PROVISIONER_SA` variables wrong, or `GITHUB_REPO` was passed to `setup_wif.sh` with different casing than the real repo name. |
+| `auth@v2` step fails with `unauthorized_client` | `WIF_PROVIDER`/`PROVISIONER_SA` variables wrong, or `GITHUB_REPO` was passed to `setup_wif.sh` with different casing than the real repo name. Re-run `setup_wif.sh` with the exact `owner/name` — it repoints the provider in place. |
 | Deploy re-run doesn't pick up VM changes | An existing VM's metadata/startup script is not refreshed — tear down and redeploy (or `gcloud compute instances add-metadata`). |
 | VM setup fails | The workflow prints the serial-console tail; on the VM see `/var/log/ofs-startup.log` and `journalctl`. |
 | Pipeline can't reach Earth Engine | Project not EE-registered (step 2.2), or `PROJECT_ID` not set in `config/instance.env`. |

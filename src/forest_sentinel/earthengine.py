@@ -55,12 +55,15 @@ def start_image_export_to_gcs(
 
     Earth Engine writes the COG to ``gs://{bucket}/{file_name_prefix}.tif``.
     """
+    # Export.image does not accept a raw GeoJSON dict for ``region`` (the AOI is
+    # always a MultiPolygon mapping) — it must be wrapped in ee.Geometry, as the
+    # other call sites in this module already do.
     task = ee.batch.Export.image.toCloudStorage(
         image=image,
         bucket=bucket,
         fileNamePrefix=file_name_prefix,
         scale=scale,
-        region=region,
+        region=ee.Geometry(region) if region is not None else None,
         fileFormat="GeoTIFF",
         formatOptions={"cloudOptimized": True},
     )
