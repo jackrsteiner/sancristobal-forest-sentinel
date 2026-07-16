@@ -126,7 +126,16 @@
         const runs = await (await fetch(`/api/aois/${aoiId}/runs`)).json();
         const container = document.getElementById("runs");
         container.innerHTML = "";
-        if (!runs.length) return;
+        if (!runs.length) {
+          // Runs are recorded from the first pipeline run after this feature
+          // landed; an explicit empty state beats a silently missing panel.
+          const empty = document.createElement("div");
+          empty.className = "run muted";
+          empty.textContent =
+            "No pipeline runs recorded yet — the next run (daily at 03:00 UTC, or started manually) will appear here live.";
+          container.appendChild(empty);
+          return;
+        }
 
         const latest = runs[0];
         const card = document.createElement("div");
