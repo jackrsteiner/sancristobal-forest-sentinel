@@ -23,10 +23,11 @@ from forest_sentinel.models import AOI_SRID, Aoi
 
 logger = logging.getLogger(__name__)
 
-# Directory of AOI GeoJSONs: committed seeds and dashboard uploads alike.
+# Directory of AOI GeoJSONs: committed seeds and dashboard uploads alike
+# (config/ is the committed, instance-owned, graft-surviving home).
 # run_pipeline.sh runs every *.geojson in it, in addition to the legacy AOI_PATH.
 AOIS_DIR_ENV_VAR = "FOREST_SENTINEL_AOIS_DIR"
-DEFAULT_AOIS_DIR = "aois"
+DEFAULT_AOIS_DIR = "config/aois"
 
 # GeoJSON is WGS 84 by definition; an explicit CRS member must agree.
 _ALLOWED_CRS_NAMES = {

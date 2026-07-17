@@ -166,8 +166,8 @@ the `e2-micro` VM has 1 GB RAM and a 30 GB disk shared with Postgres and the COG
 
 > Or skip the file transfer entirely: open the dashboard through the SSH tunnel
 > and use the sidebar's **Add AOI** control to upload the GeoJSON — it lands in
-> `aois/` on the VM and is monitored from the next run (alongside
-> `config/aoi.geojson`; every `aois/*.geojson` runs).
+> `config/aois/` on the VM and is monitored from the next run (alongside
+> `config/aoi.geojson`; every `config/aois/*.geojson` runs).
 
 ---
 

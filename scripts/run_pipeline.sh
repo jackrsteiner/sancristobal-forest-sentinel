@@ -5,9 +5,10 @@
 #
 # Configure via the env file (default: ./.env) or the environment:
 #   AOI_PATH      path to a single AOI GeoJSON           (default: examples/aoi-sample.geojson)
-#   FOREST_SENTINEL_AOIS_DIR  directory of AOI GeoJSONs  (default: aois). Every
-#                 *.geojson in it runs, sequentially, in addition to AOI_PATH —
-#                 committed files and dashboard uploads share this directory (#81).
+#   FOREST_SENTINEL_AOIS_DIR  directory of AOI GeoJSONs  (default: config/aois).
+#                 Every *.geojson in it runs, sequentially, in addition to
+#                 AOI_PATH — committed files and dashboard uploads share this
+#                 directory (#81).
 #   WINDOW_DAYS   size of the rolling window, in days    (default: 30)
 #   BASELINE_WINDOW  --baseline-window passthrough       (optional)
 #   THRESHOLD        --threshold passthrough             (optional)
@@ -32,7 +33,7 @@ if [ -f "${ENV_FILE}" ]; then
 fi
 
 AOI_PATH="${AOI_PATH:-examples/aoi-sample.geojson}"
-AOIS_DIR="${FOREST_SENTINEL_AOIS_DIR:-aois}"
+AOIS_DIR="${FOREST_SENTINEL_AOIS_DIR:-config/aois}"
 WINDOW_DAYS="${WINDOW_DAYS:-30}"
 
 UNTIL="$(date -u +%Y-%m-%d)"

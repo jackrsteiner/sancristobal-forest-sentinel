@@ -111,12 +111,12 @@ history graft):
   pushes it if the shell has GitHub credentials), so usually only the AOI is
   left to provide.
 - **Your Area of Interest — optional at this point.** Either commit it now
-  (`config/aoi.geojson`, or one file per AOI under `aois/*.geojson` — every
+  (`config/aoi.geojson`, or one file per AOI under `config/aois/*.geojson` — every
   file there is monitored), or skip it and **upload from the dashboard later**
   (§6): the sidebar's *Add AOI* control accepts a GeoJSON and the next
   scheduled run backfills it. Committed files are the durable form — an
-  uploaded AOI lives on the instance only (its file is written to `aois/` on
-  the VM; commit it to keep it across teardown/redeploy). Build a GeoJSON at
+  uploaded AOI is written to `config/aois/` on the VM and **committed back to
+  the instance repo by the next "Update instance" run** (sync_aois toggle). Build a GeoJSON at
   <https://jackrsteiner.github.io/aoi-maker/>, or with
   `uv run python scripts/make_aoi.py --bbox … --name … --out config/aoi.geojson`.
   Keep AOIs small: the e2-micro VM has 1 GB RAM and a 30 GB disk
@@ -149,7 +149,7 @@ gcloud compute ssh forest-sentinel-vm --project <your-project-id> \
 
 The pipeline also runs daily at 03:00 UTC via the VM's systemd timer — over
 **every configured AOI** (committed `config/aoi.geojson` plus each
-`aois/*.geojson`, sequentially). The sidebar's **Add AOI** control uploads a
+`config/aois/*.geojson`, sequentially). The sidebar's **Add AOI** control uploads a
 new AOI GeoJSON without touching the repo; it is monitored from the next run.
 Retire one with `forest-sentinel aoi delete <name> --yes` on the VM
 (`aoi list` shows what exists).
@@ -157,12 +157,16 @@ Retire one with `forest-sentinel aoi delete <name> --yes` on the VM
 ## Updating an instance later
 
 **Actions → Update instance → Run workflow.** One button does the whole
-rollout, with two toggles (both on by default):
+rollout, with three toggles (all on by default):
 
 - **sync_upstream** — merges the template's latest `main` into your repo and
   pushes (possible because the deploy graft gave your `main` the template's
   history). On a merge conflict the run fails without pushing anything and the
   run summary lists the conflicting files plus the local-resolution commands.
+- **sync_aois** — copies dashboard-uploaded AOI GeoJSONs (`config/aois/` on
+  the VM) back into this repo and commits them, making uploads durable — the
+  VM itself holds no GitHub credentials, so this workflow is what turns an
+  upload into a committed file.
 - **update_vm** — authenticates via Workload Identity Federation and SSHes to
   the VM (no keys, nothing to install locally) to `git pull` and re-run
   `vm_setup.sh`: migrations applied, `.env` regenerated, systemd units

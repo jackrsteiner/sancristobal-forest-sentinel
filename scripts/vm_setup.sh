@@ -42,7 +42,14 @@ fi
 cd "${APP_DIR}"
 git fetch origin "${REPO_REF}"
 git checkout "${REPO_REF}"
-git pull --ff-only origin "${REPO_REF}" || true
+# Mirror the remote exactly (the checkout is a deploy artifact, never a place
+# for local commits): a harvested AOI upload arrives as a tracked file even
+# though an identical untracked copy sits in config/aois/ — a plain pull
+# refuses that overwrite; reset adopts it, and untracked files absent from the
+# incoming tree (not-yet-harvested uploads) survive. Fall back to a pull when
+# REPO_REF is a tag/sha with no origin/ branch to reset to.
+git reset --hard "origin/${REPO_REF}" 2>/dev/null \
+    || git pull --ff-only origin "${REPO_REF}" || true
 
 echo "==> Installing the canonical COG store at /data/cogs"
 sudo mkdir -p /data/cogs
@@ -94,7 +101,7 @@ echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/i
 
 # Committed seeds and dashboard uploads both live here (run_pipeline.sh runs
 # every *.geojson in it, in addition to AOI_PATH).
-mkdir -p "${APP_DIR}/aois"
+mkdir -p "${APP_DIR}/config/aois"
 if [ -z "${PROJECT_ID:-}" ]; then
     echo "warning: PROJECT_ID is not set in config/instance.env and the metadata" >&2
     echo "         server is unavailable — edit ${APP_DIR}/.env before running the pipeline." >&2

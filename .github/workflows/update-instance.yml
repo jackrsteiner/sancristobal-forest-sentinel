@@ -1,12 +1,17 @@
 # Update a running Open Forest Sentinel instance from the Actions tab — no local
-# git commands, no SSHing into the VM. Two independent toggles (both on by default):
+# git commands, no SSHing into the VM. Three independent toggles (all on by default):
 #
 #   sync_upstream  merge the template's latest main into this repo's main and push
 #                  (the automated form of `git pull --no-rebase upstream main && git push`)
+#   sync_aois      copy dashboard-uploaded AOI GeoJSONs (config/aois/ on the VM) back
+#                  into this repo and commit them — the VM holds no GitHub credentials
+#                  (keyless posture), so this job is what makes uploads durable
 #   update_vm      SSH to the VM via Workload Identity Federation and re-run
 #                  scripts/vm_setup.sh (idempotent: pulls the repo, regenerates .env,
 #                  applies migrations, re-renders systemd units, restarts the dashboard)
 #
+# Ordering: sync_aois pushes before update_vm pulls, so the VM's untracked upload
+# becomes a tracked file (git allows the checkout because the content is identical).
 # Untick sync_upstream to only refresh the VM (e.g. after editing config/instance.env);
 # untick update_vm to only bring the repo up to date with the template.
 #
@@ -22,6 +27,10 @@ on:
     inputs:
       sync_upstream:
         description: "Merge template updates (upstream main) into this repo and push"
+        type: boolean
+        default: true
+      sync_aois:
+        description: "Commit dashboard-uploaded AOIs from the VM to this repo"
         type: boolean
         default: true
       update_vm:
@@ -95,12 +104,70 @@ jobs:
           git push origin main
           echo "Merged ${behind} new commit(s) from upstream and pushed to main." | tee -a "$GITHUB_STEP_SUMMARY"
 
+  sync-aois:
+    name: Commit uploaded AOIs from the VM
+    runs-on: ubuntu-latest
+    needs: sync
+    if: ${{ !cancelled() && !failure() && inputs.sync_aois }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # AOI GeoJSONs are not workflow files, so the default token can push
+          # them; the PAT fallback just keeps the checkout pattern uniform.
+          token: ${{ secrets.OFS_ADMIN_TOKEN || github.token }}
+
+      - name: Load instance config
+        run: |
+          grep -E '^[A-Za-z_][A-Za-z0-9_]*=' config/instance.env >> "$GITHUB_ENV"
+          # shellcheck disable=SC1091
+          . config/instance.env
+          if [ -z "${PROJECT_ID:-}" ]; then
+            echo "::error::Set PROJECT_ID in config/instance.env and commit it."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PROVISIONER_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Harvest, commit, and push uploaded AOIs
+        run: |
+          mkdir -p config/aois
+          # No uploads (or no directory yet) is a clean no-op — scp's failure is
+          # expected then, and `git diff --cached` decides whether to commit.
+          gcloud compute scp \
+            --zone "${ZONE:-us-west1-a}" \
+            "${INSTANCE_NAME:-forest-sentinel-vm}:/home/ofs/open-forest-sentinel/config/aois/*.geojson" \
+            config/aois/ 2>/dev/null || true
+          git add config/aois
+          if git diff --cached --quiet; then
+            echo "No uploaded AOIs to commit." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Commit dashboard-uploaded AOIs from the VM"
+          git push origin main
+          {
+            echo "## Uploaded AOIs committed"
+            echo ""
+            echo '```'
+            git show --stat --format= HEAD
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   update-vm:
     name: Update the VM
     runs-on: ubuntu-latest
-    needs: sync
-    # Run when sync succeeded OR was skipped (toggle off), but not when it failed —
-    # never roll a half-merged repo onto the VM.
+    needs: [sync, sync-aois]
+    # Run when the earlier jobs succeeded OR were skipped (toggle off), but not
+    # when one failed — never roll a half-merged repo onto the VM.
     if: ${{ !cancelled() && !failure() && inputs.update_vm }}
     steps:
       - uses: actions/checkout@v4
@@ -126,17 +193,22 @@ jobs:
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Pull and re-run vm_setup.sh on the VM
+      - name: Update the checkout and re-run vm_setup.sh on the VM
         run: |
-          # Pull FIRST, then invoke the fresh script: bash reads scripts
-          # incrementally, so re-running a vm_setup.sh that a pull rewrites
-          # mid-execution would be unsafe. The pull inside vm_setup.sh then no-ops.
+          # Update FIRST, then invoke the fresh script: bash reads scripts
+          # incrementally, so re-running a vm_setup.sh that an update rewrites
+          # mid-execution would be unsafe. `reset --hard` (not pull): after the
+          # sync-aois job commits an upload, the VM holds an identical UNTRACKED
+          # copy, which a plain pull refuses to overwrite even byte-for-byte;
+          # reset adopts it as tracked, while untracked files absent from the
+          # incoming tree (not-yet-harvested uploads) survive. The VM checkout
+          # is a deploy artifact — it never carries local commits worth keeping.
           # vm_setup.sh is idempotent and never touches a running pipeline —
           # it applies migrations (additive) and restarts only the dashboard.
           gcloud compute ssh "${INSTANCE_NAME:-forest-sentinel-vm}" \
             --project "${PROJECT_ID}" \
             --zone "${ZONE:-us-west1-a}" \
-            --command "sudo -u ofs -H bash -c 'set -euo pipefail; cd /home/ofs/open-forest-sentinel && git fetch origin main && git checkout main && git pull --ff-only origin main && bash scripts/vm_setup.sh'"
+            --command "sudo -u ofs -H bash -c 'set -euo pipefail; cd /home/ofs/open-forest-sentinel && git fetch origin main && git checkout main && git reset --hard origin/main && bash scripts/vm_setup.sh'"
 
       - name: Write summary
         run: |

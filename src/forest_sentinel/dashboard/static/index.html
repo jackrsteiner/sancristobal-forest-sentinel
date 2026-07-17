@@ -299,8 +299,9 @@
           return;
         }
         status.textContent =
-          `Added "${body.name}" — it will be processed on the next pipeline run. ` +
-          `Commit ${body.file} to the instance repo to make it permanent.`;
+          `Added "${body.name}" — it will be processed on the next pipeline run, ` +
+          `and committed to the instance repo (${body.file}) by the next ` +
+          `"Update instance" workflow run.`;
         input.value = "";
         await loadAois();
         const select = document.getElementById("aoi-select");
