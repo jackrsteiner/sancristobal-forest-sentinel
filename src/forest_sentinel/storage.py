@@ -43,7 +43,7 @@ class StorageConfigurationError(StorageError):
     """
 
 
-def _sanitize(component: str) -> str:
+def sanitize_path_component(component: str) -> str:
     """Reduce a free-form name to a safe, deterministic path component."""
     cleaned = _SAFE_COMPONENT.sub("-", component.strip().lower()).strip("-")
     if not cleaned:
@@ -68,8 +68,13 @@ class CogKey:
     def relative_path(self) -> str:
         if not self.filename.endswith(".tif"):
             raise StorageError(f"COG filename must end in .tif: {self.filename!r}")
-        stem = _sanitize(self.filename[: -len(".tif")])
-        parts = (_sanitize(self.aoi), _sanitize(self.product), _sanitize(self.date), f"{stem}.tif")
+        stem = sanitize_path_component(self.filename[: -len(".tif")])
+        parts = (
+            sanitize_path_component(self.aoi),
+            sanitize_path_component(self.product),
+            sanitize_path_component(self.date),
+            f"{stem}.tif",
+        )
         return "/".join(parts)
 
     def gcs_prefix(self) -> str:

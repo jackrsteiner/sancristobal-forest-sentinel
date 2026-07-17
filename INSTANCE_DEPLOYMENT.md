@@ -21,7 +21,7 @@ For general operations (tuning, systemd, backups, troubleshooting) see
 3. GCP console: create project, attach billing, register for Earth Engine → [§2](#2-manual-gcp-bootstrap-once-per-instance)
 4. Cloud Shell: `PROJECT_ID=… GITHUB_REPO=… ./scripts/setup_wif.sh` → [§2](#2-manual-gcp-bootstrap-once-per-instance)
 5. Repo settings: variables `WIF_PROVIDER` + `PROVISIONER_SA`; PAT → secret `OFS_ADMIN_TOKEN` → [§3](#3-wire-up-the-instance-repo)
-6. Edit + commit `config/instance.env` (`PROJECT_ID`) and `config/aoi.geojson` → [§4](#4-commit-your-configuration)
+6. Edit + commit `config/instance.env` (`PROJECT_ID`); AOI now or later via dashboard upload → [§4](#4-commit-your-configuration)
 7. Actions → run **Deploy instance** (graft → WIF auth → provision GCP + VM → wait) → [§5](#5-run-the-deploy-instance-workflow)
 8. SSH tunnel → dashboard at `http://localhost:8000` → [§6](#6-view-the-dashboard)
 9. Later: Actions → run **Update instance** (merges template updates + refreshes the VM) → [Updating an instance later](#updating-an-instance-later)
@@ -110,10 +110,17 @@ history graft):
   inside your instance clone it sets and commits `PROJECT_ID` for you (and
   pushes it if the shell has GitHub credentials), so usually only the AOI is
   left to provide.
-- **`config/aoi.geojson`** — your Area of Interest. Build one at
+- **Your Area of Interest — optional at this point.** Either commit it now
+  (`config/aoi.geojson`, or one file per AOI under `aois/*.geojson` — every
+  file there is monitored), or skip it and **upload from the dashboard later**
+  (§6): the sidebar's *Add AOI* control accepts a GeoJSON and the next
+  scheduled run backfills it. Committed files are the durable form — an
+  uploaded AOI lives on the instance only (its file is written to `aois/` on
+  the VM; commit it to keep it across teardown/redeploy). Build a GeoJSON at
   <https://jackrsteiner.github.io/aoi-maker/>, or with
   `uv run python scripts/make_aoi.py --bbox … --name … --out config/aoi.geojson`.
-  Keep it small: the e2-micro VM has 1 GB RAM and a 30 GB disk.
+  Keep AOIs small: the e2-micro VM has 1 GB RAM and a 30 GB disk
+  (`docs/scaling.md`).
 
 ## 5. Run the "Deploy instance" workflow
 
@@ -140,7 +147,12 @@ gcloud compute ssh forest-sentinel-vm --project <your-project-id> \
 # then open http://localhost:8000
 ```
 
-The pipeline also runs daily at 03:00 UTC via the VM's systemd timer.
+The pipeline also runs daily at 03:00 UTC via the VM's systemd timer — over
+**every configured AOI** (committed `config/aoi.geojson` plus each
+`aois/*.geojson`, sequentially). The sidebar's **Add AOI** control uploads a
+new AOI GeoJSON without touching the repo; it is monitored from the next run.
+Retire one with `forest-sentinel aoi delete <name> --yes` on the VM
+(`aoi list` shows what exists).
 
 ## Updating an instance later
 

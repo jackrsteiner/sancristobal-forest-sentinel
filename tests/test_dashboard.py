@@ -1,5 +1,7 @@
+import json
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -96,9 +98,11 @@ def _seed_run(
     started_at: datetime,
     status: str = "running",
     events: int = 0,
+    methodology_version_id: int | None = None,
 ) -> PipelineRun:
     run = PipelineRun(
         aoi_id=aoi.id,
+        methodology_version_id=methodology_version_id,
         started_at=started_at,
         status=status,
         since=date(2026, 6, 16),
@@ -125,10 +129,17 @@ def test_aoi_runs_lists_newest_first_with_last_event(
     client: TestClient, db_session: Session
 ) -> None:
     aoi = make_aoi(db_session, name="Seeded AOI")
+    methodology = make_methodology(db_session, parameters={"delta_nbr_threshold": -0.25})
     older = _seed_run(
         db_session, aoi, started_at=datetime(2026, 7, 15, 3, 0, tzinfo=UTC), status="succeeded"
     )
-    newer = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC), events=2)
+    newer = _seed_run(
+        db_session,
+        aoi,
+        started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC),
+        events=2,
+        methodology_version_id=methodology.id,
+    )
     db_session.flush()
 
     response = client.get(f"/api/aois/{aoi.id}/runs")
@@ -138,19 +149,35 @@ def test_aoi_runs_lists_newest_first_with_last_event(
     assert runs[0]["status"] == "running"
     assert runs[0]["since"] == "2026-06-16"
     assert runs[0]["last_event_at"] is not None
+    assert runs[0]["methodology"] == {
+        "id": methodology.id,
+        "name": "optical-change",
+        "version": "1.0.0",
+    }
     assert runs[1]["status"] == "succeeded"
     assert runs[1]["last_event_at"] is None  # no progress events seeded
+    assert runs[1]["methodology"] is None  # rows predating the provenance column
 
 
 def test_run_detail_returns_events_in_order(client: TestClient, db_session: Session) -> None:
     aoi = make_aoi(db_session, name="Seeded AOI")
-    run = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC), events=3)
+    methodology = make_methodology(db_session, parameters={"delta_nbr_threshold": -0.25})
+    run = _seed_run(
+        db_session,
+        aoi,
+        started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC),
+        events=3,
+        methodology_version_id=methodology.id,
+    )
 
     response = client.get(f"/api/runs/{run.id}")
     assert response.status_code == 200
     detail = response.json()
     assert detail["id"] == run.id
     assert detail["status"] == "running"
+    # The run's non-data inputs are inspectable from the dashboard.
+    assert detail["methodology"]["version"] == "1.0.0"
+    assert detail["methodology"]["parameters"] == {"delta_nbr_threshold": -0.25}
     events = detail["events"]
     assert [event["batch_index"] for event in events] == [1, 2, 3]
     assert all(event["stage"] == "index" for event in events)
@@ -183,3 +210,79 @@ def test_index_serves_the_map_page(client: TestClient) -> None:
     # The page wires up the API endpoints it consumes.
     assert "/api/aois" in response.text
     assert "leaflet" in response.text.lower()
+
+
+# --- POST /api/aois: the dashboard AOI upload ---
+
+_UPLOAD_SQUARE = {
+    "type": "Feature",
+    "properties": {"name": "Uploaded AOI"},
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]],
+    },
+}
+
+
+def test_upload_aoi_creates_row_and_file(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+
+    response = client.post("/api/aois", json=_UPLOAD_SQUARE)
+    assert response.status_code == 201
+    body = response.json()
+    assert body["name"] == "Uploaded AOI"
+
+    # The row is visible to the read API immediately...
+    names = {aoi["name"] for aoi in client.get("/api/aois").json()}
+    assert "Uploaded AOI" in names
+    # ...and the file joins the aois/ directory the scheduled run loops over.
+    written = tmp_path / "aois" / "uploaded-aoi.geojson"
+    assert str(written) == body["file"]
+    assert json.loads(written.read_text())["properties"]["name"] == "Uploaded AOI"
+
+
+def test_upload_aoi_duplicate_name_is_409(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+    make_aoi(db_session, name="Uploaded AOI")
+    db_session.commit()
+
+    response = client.post("/api/aois", json=_UPLOAD_SQUARE)
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+    # The rejected upload must not leave a file behind for the run loop.
+    assert not (tmp_path / "aois" / "uploaded-aoi.geojson").exists()
+
+
+def test_upload_aoi_duplicate_file_is_409(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    aois_dir = tmp_path / "aois"
+    aois_dir.mkdir()
+    (aois_dir / "uploaded-aoi.geojson").write_text("{}")
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(aois_dir))
+
+    response = client.post("/api/aois", json=_UPLOAD_SQUARE)
+    assert response.status_code == 409
+    assert "file" in response.json()["detail"]
+
+
+def test_upload_aoi_invalid_document_is_400(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+    invalid = {**_UPLOAD_SQUARE, "properties": {}}
+    response = client.post("/api/aois", json=invalid)
+    assert response.status_code == 400
+    assert "properties.name" in response.json()["detail"]
+    assert not (tmp_path / "aois").exists()  # nothing written for a rejected document
+
+
+def test_upload_aoi_can_be_disabled(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOI_UPLOADS", "0")
+    response = client.post("/api/aois", json=_UPLOAD_SQUARE)
+    assert response.status_code == 403
+    assert "disabled" in response.json()["detail"]

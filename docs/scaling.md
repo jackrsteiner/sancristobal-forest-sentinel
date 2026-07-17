@@ -113,10 +113,11 @@ process), and the per-AOI advisory lock backstops manual runs.
 5. **Tune retention.** The suggested COG prune (e.g.
    `find /data/cogs -mtime +90 -delete`, `DEPLOYMENT.md` §8) is the disk knob:
    90 → 30 days roughly triples supported area.
-6. **Multi-AOI scheduling.** The data model, pipeline locking, and dashboard
-   are already fully multi-AOI; only the wrapper is single-AOI
-   (`run_pipeline.sh` reads one `AOI_PATH`). Looping over `aois/*.geojson` is a
-   ~5-line change; all AOIs share the daily run budget.
+6. **Multi-AOI scheduling** *(✅ shipped — #81)*. `run_pipeline.sh` runs
+   `AOI_PATH` plus every `aois/*.geojson`, sequentially (one CLI invocation —
+   and one advisory lock — per AOI; a failure doesn't stop the others). AOIs
+   can also be uploaded from the dashboard. All AOIs share the daily run
+   budget (`PIPELINE_TIMEOUT`).
 7. **Leaving $0 deliberately.** Extra `pd-standard` disk is ~$0.04/GB-month
    (+100 GB ≈ $4/month ≈ 3× the envelope). The architecture's anticipated end
    state is GCS-as-canonical raster storage, which removes the disk ceiling
@@ -171,6 +172,7 @@ backfills it fresh. Consequences to plan around:
   baseline ramps toward its 5-observation median.
 - Event history does not carry over, even where footprints overlap.
 - The old AOI stops updating but remains in the database/dashboard, and its
-  COGs stay under `/data/cogs/<id>-<name>/` until pruned or removed by hand —
-  there is no per-AOI teardown tooling yet (a `forest-sentinel aoi delete`
-  command is a natural future bead).
+  COGs stay under `/data/cogs/<id>-<name>/` — retire it with
+  `forest-sentinel aoi delete <name> --yes` (#83), which removes its rows and
+  COG directory (remove its committed GeoJSON from the repo too, or the next
+  run re-creates it).

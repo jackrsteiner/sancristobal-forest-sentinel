@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, indices, pipeline, qa, storage
@@ -196,12 +196,12 @@ def test_pipeline_mode_reports_earth_engine_failure(
     assert "Earth Engine initialization failed" in capsys.readouterr().err
 
 
-def test_pipeline_mode_reports_methodology_mismatch(
+def test_pipeline_mode_reports_methodology_mismatch_for_explicit_version(
     migrated_database: Engine,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-running with different parameters but the same version is a user error and
+    """Pinning a version that exists with different parameters is a user error and
     must print the 'bump the version' guidance, not a traceback (audit BUG-13)."""
     with Session(migrated_database) as session:
         session.add(
@@ -212,10 +212,52 @@ def test_pipeline_mode_reports_methodology_mismatch(
     monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
     monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
     exit_code = main(
-        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+        [
+            "run",
+            "--aoi",
+            str(SAMPLE_AOI),
+            "--since",
+            "2026-01-01",
+            "--until",
+            "2026-02-01",
+            "--methodology-version",
+            "1.0.0",
+        ]
     )
     assert exit_code == 1
     assert "bump the version" in capsys.readouterr().err
+
+
+def test_pipeline_mode_auto_mints_methodology_when_parameters_change(
+    migrated_database: Engine,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an explicit --methodology-version, changed parameters mint a new
+    content-addressed version instead of erroring — the knobs in instance.env are
+    usable on a live instance."""
+    with Session(migrated_database) as session:
+        session.add(
+            MethodologyVersion(name="optical-change", version="1.0.0", parameters={"other": 1})
+        )
+        session.commit()
+
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    monkeypatch.setattr(
+        pipeline,
+        "run_pipeline",
+        lambda session, **kwargs: PipelineSummary(0, 0, 0, 0, 0, 0, 0, 0),
+    )
+    exit_code = main(
+        ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    )
+    assert exit_code == 0
+    assert "Methodology: optical-change @ auto-" in capsys.readouterr().out
+    with Session(migrated_database) as session:
+        versions = session.execute(select(MethodologyVersion.version)).scalars().all()
+    assert "1.0.0" in versions
+    assert any(version.startswith("auto-") for version in versions)
 
 
 def test_pipeline_mode_reports_concurrent_creation_race(
@@ -255,3 +297,94 @@ def test_pipeline_mode_reports_storage_misconfiguration(
     )
     assert exit_code == 1
     assert "storage is not configured" in capsys.readouterr().err
+
+
+# --- `forest-sentinel aoi list` / `aoi delete` (#83) ---
+
+
+def test_aoi_list_shows_aois_and_counts(
+    migrated_database: Engine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.fakes import make_aoi
+
+    with Session(migrated_database) as session:
+        make_aoi(session, name="Listed AOI")
+        session.commit()
+
+    assert main(["aoi", "list"]) == 0
+    out = capsys.readouterr().out
+    assert "Listed AOI" in out
+    assert "observations" in out
+
+
+def test_aoi_delete_requires_yes_and_then_removes_everything(
+    migrated_database: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Dry-run prints the inventory and deletes nothing; --yes removes every
+    dependent row (in FK order, proven against full pipeline-produced data),
+    the COG directory, and the aois/ seed file — other AOIs untouched."""
+    from datetime import date as date_type
+
+    from forest_sentinel.models import DisturbanceCandidate, Observation, PipelineRun
+    from forest_sentinel.pipeline import run_pipeline
+    from tests.fakes import FakeStorage, make_aoi, make_methodology
+    from tests.test_pipeline import _fake_ee
+
+    cog_root = tmp_path / "cogs"
+    aois_dir = tmp_path / "aois"
+    aois_dir.mkdir()
+    monkeypatch.setenv("FOREST_SENTINEL_COG_ROOT", str(cog_root))
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(aois_dir))
+
+    with migrated_database.connect() as connection, Session(bind=connection) as session:
+        make_aoi(session, name="Keeper")
+        target = make_aoi(session, name="Doomed AOI")
+        methodology = make_methodology(session)
+        session.commit()
+        # Full pipeline output: observations, rasters, candidates, events, runs.
+        run_pipeline(
+            session,
+            aoi=target,
+            since=date_type(2026, 1, 1),
+            until=date_type(2026, 2, 1),
+            methodology=methodology,
+            storage=FakeStorage(cog_root),
+            ee_module=_fake_ee((1, 2, 3, 4, 5, 6)),
+        )
+        session.commit()
+        target_id = target.id
+    seed = aois_dir / "doomed-aoi.geojson"
+    seed.write_text("{}")
+    cog_dir = cog_root / f"{target_id}-doomed-aoi"
+    assert cog_dir.is_dir()  # the fake wrote real COG files
+
+    # Dry run: inventory printed, exit 1, nothing removed.
+    assert main(["aoi", "delete", "Doomed AOI"]) == 1
+    captured = capsys.readouterr()
+    assert "deleting removes" in captured.out
+    assert "Re-run with --yes" in captured.err
+    with Session(migrated_database) as session:
+        assert session.execute(select(func.count()).select_from(Observation)).scalar_one() > 0
+    assert cog_dir.is_dir() and seed.is_file()
+
+    # Real delete.
+    assert main(["aoi", "delete", "Doomed AOI", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "Deleted AOI 'Doomed AOI'" in out
+    assert "re-create it" in out
+    with Session(migrated_database) as session:
+        assert session.execute(select(Aoi.name)).scalars().all() == ["Keeper"]
+        for model in (Observation, DisturbanceCandidate, PipelineRun):
+            assert session.execute(select(func.count()).select_from(model)).scalar_one() == 0
+    assert not cog_dir.exists()
+    assert not seed.exists()
+
+
+def test_aoi_delete_unknown_name_errors(
+    migrated_database: Engine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["aoi", "delete", "No Such AOI"]) == 1
+    assert "no AOI named" in capsys.readouterr().err

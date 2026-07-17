@@ -424,6 +424,10 @@ serving a read-only, unauthenticated view over PostGIS — the resolved Slice 2 
 
 - `GET /` — a static Leaflet map page (`static/index.html`) that consumes the API.
 - `GET /api/aois` — AOIs with event counts.
+- `POST /api/aois` — register a new AOI from an uploaded GeoJSON document (validated with
+  the same loader as files; written to `aois/` so the scheduled run picks it up; JSON-only
+  body so cross-origin CSRF requires a preflight that no CORS config permits; disabled via
+  `FOREST_SENTINEL_AOI_UPLOADS=0` when the dashboard is publicly exposed).
 - `GET /api/aois/{id}/events` — the AOI's events as a GeoJSON `FeatureCollection` (status, first/
   last detected, cumulative footprint area, latest detection area, observation count).
 - `GET /api/events/{id}` — event detail: footprint geometry and area, the measurement

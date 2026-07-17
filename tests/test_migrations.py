@@ -308,3 +308,25 @@ def test_downgrade_removes_pipeline_run_tables(
     tables = set(inspect(clean_database).get_table_names())
     assert "pipeline_run" not in tables
     assert "pipeline_run_event" not in tables
+
+
+def test_migrations_add_pipeline_run_methodology_column(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+
+    inspector = inspect(clean_database)
+    columns = {column["name"] for column in inspector.get_columns("pipeline_run")}
+    assert "methodology_version_id" in columns
+    fks = {fk["name"] for fk in inspector.get_foreign_keys("pipeline_run")}
+    assert "fk_pipeline_run_methodology" in fks
+
+
+def test_downgrade_removes_pipeline_run_methodology_column(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0009_pipeline_run")
+
+    columns = {column["name"] for column in inspect(clean_database).get_columns("pipeline_run")}
+    assert "methodology_version_id" not in columns

@@ -655,3 +655,59 @@ def test_dying_run_is_stamped_failed_and_superseded_as_interrupted(
     assert stale.status == "interrupted"
     statuses = db_session.execute(select(PipelineRun.status)).scalars().all()
     assert sorted(statuses) == ["failed", "interrupted", "succeeded"]
+
+
+def test_methodology_change_records_a_warning_event(db_session: Session, tmp_path: Path) -> None:
+    """A run under a different methodology than the AOI's previous run must record a
+    prominent warning: the new lineage reuses nothing and re-exports the window."""
+    from forest_sentinel.models import PipelineRun, PipelineRunEvent
+    from tests.fakes import make_methodology
+
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    first_methodology = make_methodology(db_session)
+    fake_ee = _fake_ee((1,))
+
+    def run(methodology: Any) -> Any:
+        return run_pipeline(
+            db_session,
+            aoi=aoi,
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            methodology=methodology,
+            storage=FakeStorage(tmp_path),
+            ee_module=fake_ee,
+        )
+
+    run(first_methodology)
+    db_session.commit()
+
+    second_methodology = make_methodology(
+        db_session, version="auto-abc123", parameters={"delta_nbr_threshold": -0.15}
+    )
+    run(second_methodology)
+    db_session.commit()
+
+    runs = db_session.execute(select(PipelineRun).order_by(PipelineRun.id)).scalars().all()
+    assert [r.methodology_version_id for r in runs] == [
+        first_methodology.id,
+        second_methodology.id,
+    ]
+    warnings = (
+        db_session.execute(select(PipelineRunEvent).where(PipelineRunEvent.outcome == "warning"))
+        .scalars()
+        .all()
+    )
+    assert len(warnings) == 1
+    assert warnings[0].run_id == runs[1].id
+    assert "methodology changed" in (warnings[0].message or "")
+    assert "delta_nbr_threshold" in (warnings[0].message or "")
+
+    # Same methodology again: no new warning.
+    run(second_methodology)
+    db_session.commit()
+    warning_count = len(
+        db_session.execute(select(PipelineRunEvent).where(PipelineRunEvent.outcome == "warning"))
+        .scalars()
+        .all()
+    )
+    assert warning_count == 1

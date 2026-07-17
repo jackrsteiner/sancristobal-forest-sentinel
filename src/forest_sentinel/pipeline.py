@@ -133,7 +133,9 @@ def run_pipeline(
     try:
         # The run row is created (and any stale "running" row for this AOI marked
         # interrupted) while holding the lock, so exactly one live run exists per AOI.
-        recorder = runlog.start_run(session, aoi=aoi, since=since, until=until)
+        recorder = runlog.start_run(
+            session, aoi=aoi, since=since, until=until, methodology=methodology
+        )
         try:
             summary = _run_pipeline_locked(
                 session,

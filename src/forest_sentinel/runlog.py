@@ -22,7 +22,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from forest_sentinel.models import Aoi, PipelineRun, PipelineRunEvent
+from forest_sentinel.models import Aoi, MethodologyVersion, PipelineRun, PipelineRunEvent
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +34,33 @@ STATUS_FAILED = "failed"
 STATUS_INTERRUPTED = "interrupted"  # killed without cleanup (SIGKILL, timeout)
 
 
-def start_run(session: Session, *, aoi: Aoi, since: date, until: date) -> "RunRecorder":
+def start_run(
+    session: Session,
+    *,
+    aoi: Aoi,
+    since: date,
+    until: date,
+    methodology: MethodologyVersion | None = None,
+) -> "RunRecorder":
     """Create the ``running`` row for a new run and return its recorder.
 
     Any earlier row for this AOI still marked ``running`` is flipped to
     ``interrupted`` first: the caller holds the per-AOI advisory lock, so a
     lingering ``running`` row can only belong to a run that died without
     cleanup (SIGKILL, systemd timeout past ``TimeoutStopSec``).
+
+    If the run's methodology differs from the AOI's previous run's (parameters
+    changed, or a template update bumped the EE script version — the methodology
+    is content-addressed), a warning event is recorded: the new lineage starts
+    cold, so nothing from the previous methodology is reusable and the run will
+    re-export the whole window.
     """
+    previous = session.execute(
+        select(PipelineRun)
+        .where(PipelineRun.aoi_id == aoi.id)
+        .order_by(PipelineRun.started_at.desc(), PipelineRun.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
     session.execute(
         update(PipelineRun)
         .where(PipelineRun.aoi_id == aoi.id)
@@ -50,6 +69,7 @@ def start_run(session: Session, *, aoi: Aoi, since: date, until: date) -> "RunRe
     )
     run = PipelineRun(
         aoi_id=aoi.id,
+        methodology_version_id=methodology.id if methodology is not None else None,
         started_at=datetime.now(UTC),
         status=STATUS_RUNNING,
         since=since,
@@ -57,7 +77,43 @@ def start_run(session: Session, *, aoi: Aoi, since: date, until: date) -> "RunRe
     )
     session.add(run)
     session.commit()
-    return RunRecorder(session=session, run=run)
+    recorder = RunRecorder(session=session, run=run)
+
+    if (
+        methodology is not None
+        and previous is not None
+        and previous.methodology_version_id is not None
+        and previous.methodology_version_id != methodology.id
+    ):
+        recorder.record(
+            "run",
+            "warning",
+            message=_methodology_change_message(session, previous, methodology),
+        )
+    return recorder
+
+
+def _methodology_change_message(
+    session: Session, previous: PipelineRun, methodology: MethodologyVersion
+) -> str:
+    """Human-readable diff of what changed between two methodology versions."""
+    old = session.get(MethodologyVersion, previous.methodology_version_id)
+    changes = "parameters unavailable"
+    label = "?"
+    if old is not None:
+        label = f"{old.name} @ {old.version}"
+        keys = sorted(set(old.parameters) | set(methodology.parameters))
+        diffs = [
+            f"{key}: {old.parameters.get(key)!r} → {methodology.parameters.get(key)!r}"
+            for key in keys
+            if old.parameters.get(key) != methodology.parameters.get(key)
+        ]
+        changes = "; ".join(diffs) or "no parameter diff"
+    return (
+        f"methodology changed since the previous run ({label} → "
+        f"{methodology.name} @ {methodology.version}: {changes}) — artifacts from the "
+        "previous methodology are not reusable; expect a full re-export of the window"
+    )
 
 
 @dataclass
@@ -103,7 +159,8 @@ class RunRecorder:
             what = f"submitted {exports} export{'s' if exports != 1 else ''} to Earth Engine"
         else:
             what = outcome if message is None else f"{outcome} — {message}"
-        logger.info("%s · %s: %s", self.label, where, what)
+        level = logging.WARNING if outcome in ("failed", "warning") else logging.INFO
+        logger.log(level, "%s · %s: %s", self.label, where, what)
 
     def finish(self, status: str, summary: dict[str, object] | None = None) -> None:
         """Stamp the run's terminal status (best-effort: never masks the run's error)."""

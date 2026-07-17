@@ -84,7 +84,16 @@ echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/i
     if [ -f "${APP_DIR}/config/aoi.geojson" ]; then
         echo "AOI_PATH=config/aoi.geojson"
     fi
+    # A world-open dashboard must stay read-only: disable the AOI-upload
+    # endpoint whenever the firewall exposes the port publicly.
+    if [ "${OPEN_DASHBOARD:-0}" = "1" ]; then
+        echo "FOREST_SENTINEL_AOI_UPLOADS=0"
+    fi
 } >"${APP_DIR}/.env"
+
+# Committed seeds and dashboard uploads both live here (run_pipeline.sh runs
+# every *.geojson in it, in addition to AOI_PATH).
+mkdir -p "${APP_DIR}/aois"
 if [ -z "${PROJECT_ID:-}" ]; then
     echo "warning: PROJECT_ID is not set in config/instance.env and the metadata" >&2
     echo "         server is unavailable — edit ${APP_DIR}/.env before running the pipeline." >&2

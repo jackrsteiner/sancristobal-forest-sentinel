@@ -301,6 +301,12 @@ class PipelineRun(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     aoi_id: Mapped[int] = mapped_column(ForeignKey("aoi.id"), nullable=False)
+    # Which parameter set produced this run's artifacts (nullable: rows predating
+    # the column, or recorders started without one).
+    methodology_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("methodology_version.id", name="fk_pipeline_run_methodology"),
+        nullable=True,
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # running | succeeded | partial | failed | interrupted ("partial" = finished
@@ -340,6 +346,6 @@ class PipelineRunEvent(Base):
     batch_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Earth Engine export tasks in the batch (None for stage-level events).
     exports: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # submitted | succeeded | failed | info
+    # submitted | succeeded | failed | warning | info
     outcome: Mapped[str] = mapped_column(String, nullable=False)
     message: Mapped[str | None] = mapped_column(String, nullable=True)
