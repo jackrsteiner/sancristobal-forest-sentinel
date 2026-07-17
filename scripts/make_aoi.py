@@ -9,7 +9,7 @@ Example:
     uv run python scripts/make_aoi.py \\
         --bbox 159.0 -9.6 159.3 -9.3 \\
         --name "Guadalcanal North Coast" \\
-        --out aois/guadalcanal.geojson
+        --out config/aois/guadalcanal.geojson
 """
 
 from __future__ import annotations

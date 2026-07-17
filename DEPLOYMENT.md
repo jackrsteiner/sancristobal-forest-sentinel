@@ -149,17 +149,17 @@ is guaranteed to be accepted by the pipeline):
 uv run python scripts/make_aoi.py \
     --bbox 159.0 -9.6 159.3 -9.3 \
     --name "Guadalcanal North Coast" \
-    --out aois/guadalcanal.geojson
+    --out config/aois/guadalcanal.geojson
 ```
 
 **Multiple AOIs**: the scheduled run processes the single `AOI_PATH`
 (conventionally the committed `config/aoi.geojson`) **plus every
-`*.geojson` in the `aois/` directory** (`FOREST_SENTINEL_AOIS_DIR`),
+`*.geojson` in the `config/aois/` directory** (`FOREST_SENTINEL_AOIS_DIR`),
 sequentially — one CLI invocation per AOI, so one AOI's failure doesn't stop
 the others (the run still exits nonzero to alert the scheduler). All AOIs
 share a single `PIPELINE_TIMEOUT` budget per firing; checkpoint/resume applies
 per AOI. AOIs can also be **uploaded from the dashboard** (sidebar → Add AOI):
-the upload is validated, written to `aois/`, and registered immediately —
+the upload is validated, written to `config/aois/`, and registered immediately —
 commit the file to the instance repo to make it permanent. Set
 `FOREST_SENTINEL_AOI_UPLOADS=0` to disable uploads (`vm_setup.sh` does this
 automatically when `OPEN_DASHBOARD=1` exposes the port publicly).
@@ -173,7 +173,7 @@ uv run forest-sentinel aoi delete "Name" --yes # deletes rows + COG directory
 ```
 
 `aoi delete` removes every dependent row in one transaction plus the AOI's COG
-tree and its `aois/` file; if the AOI's GeoJSON is still *committed* to the
+tree and its `config/aois/` file; if the AOI's GeoJSON is still *committed* to the
 repo, remove that too or the next run re-creates it.
 
 Keep AOIs small to stay inside the free tiers (the `e2-micro` VM has 1 GB RAM and a
@@ -183,7 +183,7 @@ Keep AOIs small to stay inside the free tiers (the `e2-micro` VM has 1 GB RAM an
 
 ```sh
 uv run forest-sentinel run \
-    --aoi aois/guadalcanal.geojson \
+    --aoi config/aois/guadalcanal.geojson \
     --since 2026-01-01 --until 2026-02-01
 ```
 
