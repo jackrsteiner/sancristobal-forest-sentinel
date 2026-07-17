@@ -114,7 +114,7 @@ process), and the per-AOI advisory lock backstops manual runs.
    `find /data/cogs -mtime +90 -delete`, `DEPLOYMENT.md` §8) is the disk knob:
    90 → 30 days roughly triples supported area.
 6. **Multi-AOI scheduling** *(✅ shipped — #81)*. `run_pipeline.sh` runs
-   `AOI_PATH` plus every `aois/*.geojson`, sequentially (one CLI invocation —
+   `AOI_PATH` plus every `config/aois/*.geojson`, sequentially (one CLI invocation —
    and one advisory lock — per AOI; a failure doesn't stop the others). AOIs
    can also be uploaded from the dashboard. All AOIs share the daily run
    budget (`PIPELINE_TIMEOUT`).
