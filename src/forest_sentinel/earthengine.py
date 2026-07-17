@@ -179,6 +179,29 @@ def image_by_id(image_id: str) -> Any:
     return ee.Image(image_id)
 
 
+def hansen_forest_mask(asset_id: str, *, canopy_threshold_pct: float) -> Any:
+    """A 1=forest mask from a Hansen Global Forest Change composite (#82).
+
+    Forest is ``treecover2000 >= canopy_threshold_pct`` minus every pixel with a
+    recorded loss year — already-cleared pixels must not count as forest, or the
+    mask would keep flagging their regrowth/harvest cycles.
+    """
+    gfc = ee.Image(asset_id)
+    forest = gfc.select("treecover2000").gte(canopy_threshold_pct)
+    unlost = gfc.select("lossyear").unmask(0).eq(0)
+    return forest.And(unlost)
+
+
+def worldcover_forest_mask(asset_id: str, *, tree_class: int) -> Any:
+    """A 1=forest mask from an ESA WorldCover land-cover map (#82)."""
+    return ee.ImageCollection(asset_id).first().select("Map").eq(tree_class)
+
+
+def update_mask(image: Any, mask: Any) -> Any:
+    """``image`` with ``mask``'s zero pixels masked out (``updateMask``)."""
+    return image.updateMask(mask)
+
+
 def normalized_difference(image: Any, bands: list[str]) -> Any:
     """``(bands[0] - bands[1]) / (bands[0] + bands[1])`` as an EE image."""
     return image.normalizedDifference(bands)

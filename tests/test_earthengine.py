@@ -220,3 +220,38 @@ def test_scene_footprint_wraps_ee_failures(fake_ee: MagicMock) -> None:
     image.geometry.return_value.getInfo.side_effect = FakeEEException("quota")
     with pytest.raises(earthengine.EarthEngineError, match="scene footprint"):
         earthengine.scene_footprint(image)
+
+
+def test_hansen_forest_mask_thresholds_canopy_and_excludes_loss(fake_ee: MagicMock) -> None:
+    """Forest = treecover2000 >= threshold AND no recorded loss year (#82)."""
+    treecover, lossyear = MagicMock(name="treecover2000"), MagicMock(name="lossyear")
+    gfc = fake_ee.Image.return_value
+    gfc.select.side_effect = lambda band: {"treecover2000": treecover, "lossyear": lossyear}[band]
+
+    mask = earthengine.hansen_forest_mask("UMD/hansen/gfc", canopy_threshold_pct=30.0)
+
+    fake_ee.Image.assert_called_once_with("UMD/hansen/gfc")
+    treecover.gte.assert_called_once_with(30.0)
+    # Already-lost pixels (lossyear != 0) are excluded; masked lossyear reads as 0.
+    lossyear.unmask.assert_called_once_with(0)
+    lossyear.unmask.return_value.eq.assert_called_once_with(0)
+    treecover.gte.return_value.And.assert_called_once_with(
+        lossyear.unmask.return_value.eq.return_value
+    )
+    assert mask is treecover.gte.return_value.And.return_value
+
+
+def test_worldcover_forest_mask_selects_the_tree_class(fake_ee: MagicMock) -> None:
+    first = fake_ee.ImageCollection.return_value.first.return_value
+    mask = earthengine.worldcover_forest_mask("ESA/WorldCover/v200", tree_class=10)
+
+    fake_ee.ImageCollection.assert_called_once_with("ESA/WorldCover/v200")
+    first.select.assert_called_once_with("Map")
+    first.select.return_value.eq.assert_called_once_with(10)
+    assert mask is first.select.return_value.eq.return_value
+
+
+def test_update_mask_applies_the_mask() -> None:
+    image, mask = MagicMock(), MagicMock()
+    assert earthengine.update_mask(image, mask) is image.updateMask.return_value
+    image.updateMask.assert_called_once_with(mask)

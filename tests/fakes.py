@@ -61,6 +61,9 @@ class FakeEarthEngine:
         self.calls: list[dict[str, Any]] = []
         self.footprint_calls: int = 0
         self.fraction_regions: list[Any] = []
+        # Forest masking (#82): the mask configs built and each update_mask call.
+        self.forest_mask_calls: list[dict[str, Any]] = []
+        self.update_mask_calls: list[tuple[Any, Any]] = []
 
     def list_image_properties(
         self, collection_id: str, region: Any, since: str, until: str
@@ -95,11 +98,35 @@ class FakeEarthEngine:
     def subtract(self, image: Any, other: Any) -> dict[str, Any]:
         return {"delta": (image, other)}
 
+    def hansen_forest_mask(self, asset_id: str, *, canopy_threshold_pct: float) -> dict[str, Any]:
+        call = {
+            "source": "hansen",
+            "asset": asset_id,
+            "canopy_threshold_pct": canopy_threshold_pct,
+        }
+        self.forest_mask_calls.append(call)
+        return {"forest_mask": call}
+
+    def worldcover_forest_mask(self, asset_id: str, *, tree_class: int) -> dict[str, Any]:
+        call = {"source": "worldcover", "asset": asset_id, "tree_class": tree_class}
+        self.forest_mask_calls.append(call)
+        return {"forest_mask": call}
+
+    def update_mask(self, image: Any, mask: Any) -> dict[str, Any]:
+        self.update_mask_calls.append((image, mask))
+        return {"masked": image, "mask": mask}
+
     def threshold_and_vectorize(
         self, delta_image: Any, *, threshold: float, scale: int, region: Any, min_area_m2: float
     ) -> list[dict[str, Any]]:
         self.calls.append(
-            {"threshold": threshold, "scale": scale, "min_area_m2": min_area_m2, "region": region}
+            {
+                "threshold": threshold,
+                "scale": scale,
+                "min_area_m2": min_area_m2,
+                "region": region,
+                "delta_image": delta_image,
+            }
         )
         return self._features
 

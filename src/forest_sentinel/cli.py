@@ -20,7 +20,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from forest_sentinel import earthengine, indices, pipeline, qa, storage
+from forest_sentinel import earthengine, forestmask, indices, pipeline, qa, retention, storage
 from forest_sentinel.aoi import (
     AOIS_DIR_ENV_VAR,
     DEFAULT_AOIS_DIR,
@@ -69,6 +69,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == "cogs":
+        return _run_cogs_command(args)
     if args.command == "aoi":
         return _run_aoi_command(args)
     if (args.since is None) != (args.until is None):
@@ -132,7 +134,73 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Actually delete. Without it, print what would be deleted and exit 1.",
     )
+
+    cogs_parser = subparsers.add_parser("cogs", help="Manage the local COG store.")
+    cogs_subparsers = cogs_parser.add_subparsers(dest="cogs_command", required=True)
+    prune_parser = cogs_subparsers.add_parser(
+        "prune",
+        help=(
+            "Delete COGs older than the retention policy (COG_RETENTION_DAYS; "
+            "blank/0 keeps everything). Database rows are never touched."
+        ),
+    )
+    prune_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be pruned without deleting anything.",
+    )
     return parser
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """A positive integer from the environment; blank/malformed/<=0 -> ``default``."""
+    try:
+        value = int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _run_cogs_command(args: argparse.Namespace) -> int:
+    """Dispatch `forest-sentinel cogs prune` (#80). No database access needed."""
+    retention_days = _positive_int_env(retention.RETENTION_DAYS_ENV_VAR, 0)
+    if retention_days <= 0:
+        print(
+            f"COG retention is disabled ({retention.RETENTION_DAYS_ENV_VAR} is unset, "
+            "blank, or 0); nothing to prune."
+        )
+        return 0
+    window_days = _positive_int_env(retention.WINDOW_DAYS_ENV_VAR, retention.DEFAULT_WINDOW_DAYS)
+    root = Path(os.environ.get(storage.COG_ROOT_ENV_VAR, storage.DEFAULT_COG_ROOT))
+
+    report = retention.prune_cogs(
+        root,
+        retention_days=retention_days,
+        window_days=window_days,
+        today=date.today(),
+        dry_run=args.dry_run,
+    )
+    if report.floor_applied:
+        print(
+            f"warning: {retention.RETENTION_DAYS_ENV_VAR}={retention_days} is below the "
+            f"safe floor (WINDOW_DAYS={window_days} + {retention.FLOOR_MARGIN_DAYS}-day "
+            f"margin); using {report.effective_retention_days} days — pruning inside the "
+            "active window would re-spend Earth Engine quota and rewrite change-raster "
+            "provenance (docs/architecture.md §7)",
+            file=sys.stderr,
+        )
+    verb = "Would prune" if args.dry_run else "Pruned"
+    unrecognized = (
+        f"; left {report.unrecognized} unrecognized file(s) alone" if report.unrecognized else ""
+    )
+    print(
+        f"{verb} {len(report.pruned)} COG(s) ({report.pruned_bytes / 1_000_000:.1f} MB) "
+        f"acquired before {report.cutoff.isoformat()} from {root} "
+        f"(retention: {report.effective_retention_days} days; kept {report.kept}{unrecognized})"
+    )
+    for path in report.pruned:
+        print(f"  {path}")
+    return 0
 
 
 def _run_aoi_command(args: argparse.Namespace) -> int:
@@ -275,6 +343,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     # even when the CLI flags are omitted.
     threshold = args.threshold if args.threshold is not None else DEFAULT_DELTA_NBR_THRESHOLD
     min_area = args.min_area if args.min_area is not None else DEFAULT_MIN_AREA_M2
+    try:
+        forest_mask_config = forestmask.config_from_env()
+    except forestmask.ForestMaskConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     parameters = {
         "ee_script_version": EE_SCRIPT_VERSION,
         "collections": sorted(HLS_COLLECTIONS),
@@ -282,9 +355,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         "delta_nbr_threshold": threshold,
         "min_area_m2": min_area,
         # Everything that shapes the output belongs in the provenance record: the
-        # export / reduceToVectors scale and the Fmask categories masked out.
+        # export / reduceToVectors scale, the Fmask categories masked out, and the
+        # forest mask candidates were restricted to (#82).
         "scale_m": indices.DEFAULT_SCALE_METERS,
         "masked_categories": list(qa.MASK_CATEGORIES),
+        **forestmask.parameters_entry(forest_mask_config),
     }
 
     with _disposing_engine() as engine:

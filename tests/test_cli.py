@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
-from forest_sentinel import earthengine, indices, pipeline, qa, storage
+from forest_sentinel import earthengine, forestmask, indices, pipeline, qa, storage
 from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.cli import main
 from forest_sentinel.models import Aoi, MethodologyVersion
@@ -145,6 +145,12 @@ def test_pipeline_mode_defaults_are_resolved_and_recorded(
     monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
     monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
     monkeypatch.setattr(pipeline, "run_pipeline", fake_run_pipeline)
+    for name in (
+        forestmask.SOURCE_ENV_VAR,
+        forestmask.ASSET_ENV_VAR,
+        forestmask.CANOPY_PCT_ENV_VAR,
+    ):
+        monkeypatch.delenv(name, raising=False)
 
     args = ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
     assert main(args) == 0
@@ -160,6 +166,42 @@ def test_pipeline_mode_defaults_are_resolved_and_recorded(
     assert methodology.parameters["min_area_m2"] == DEFAULT_MIN_AREA_M2
     assert methodology.parameters["scale_m"] == indices.DEFAULT_SCALE_METERS
     assert methodology.parameters["masked_categories"] == list(qa.MASK_CATEGORIES)
+    # The forest mask (#82) is a methodology input too; the default is recorded.
+    assert methodology.parameters[forestmask.PARAMETER_KEY] == {
+        "source": "hansen",
+        "asset": forestmask.DEFAULT_HANSEN_ASSET,
+        "canopy_threshold_pct": forestmask.DEFAULT_CANOPY_THRESHOLD_PCT,
+    }
+
+
+def test_pipeline_mode_mask_off_records_no_forest_mask_key(
+    migrated_database: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FOREST_SENTINEL_FOREST_MASK=none must produce the same parameter set as a
+    pre-#82 run (no forest_mask key), so existing methodology lineages — and their
+    already-exported artifacts — keep matching."""
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    monkeypatch.setattr(
+        pipeline, "run_pipeline", lambda session, **kwargs: PipelineSummary(0, 0, 0, 0, 0, 0, 0, 0)
+    )
+    monkeypatch.setenv(forestmask.SOURCE_ENV_VAR, "none")
+
+    args = ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    assert main(args) == 0
+
+    with Session(migrated_database) as session:
+        methodology = session.execute(select(MethodologyVersion)).scalar_one()
+    assert forestmask.PARAMETER_KEY not in methodology.parameters
+
+
+def test_pipeline_mode_rejects_bad_forest_mask_config(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(forestmask.SOURCE_ENV_VAR, "not-a-source")
+    args = ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
+    assert main(args) == 1
+    assert "not-a-source" in capsys.readouterr().err
 
 
 def test_pipeline_mode_reuses_existing_aoi(

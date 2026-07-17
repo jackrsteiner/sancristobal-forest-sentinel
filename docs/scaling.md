@@ -112,9 +112,13 @@ process), and the per-AOI advisory lock backstops manual runs.
 4. **Tune the run budget** *(✅ shipped as configuration)* —
    `PIPELINE_TIMEOUT` in `config/instance.env` (default `20h`); timeouts are
    safe because runs resume.
-5. **Tune retention.** The suggested COG prune (e.g.
-   `find /data/cogs -mtime +90 -delete`, `DEPLOYMENT.md` §8) is the disk knob:
-   90 → 30 days roughly triples supported area.
+5. **Tune retention** *(✅ shipped — #80)*. `COG_RETENTION_DAYS` in
+   `config/instance.env` (default 90; blank/0 = keep forever) is the disk
+   knob: 90 → 44 days (the floor: `WINDOW_DAYS` + a 14-day margin) roughly
+   halves stored volume. The `forest-sentinel-prune` timer applies it daily,
+   pruning by catalog acquisition date, never inside the active window, and
+   never touching database rows (`DEPLOYMENT.md` §8, `docs/architecture.md`
+   §7).
 6. **Multi-AOI scheduling** *(✅ shipped — #81)*. `run_pipeline.sh` runs
    `AOI_PATH` plus every `config/aois/*.geojson`, sequentially (one CLI invocation —
    and one advisory lock — per AOI; a failure doesn't stop the others). AOIs
@@ -148,11 +152,12 @@ administrative boundaries**, for three reasons:
 
 - **Cost scales with polygon area, not forest area** — non-forest pixels pay
   full price in EE compute, exports, and disk.
-- **There is no forest mask yet** (context layers are Slice 6), so ΔNBR flags
-  *any* vegetation loss: crop harvests, grassland senescence, wetland
-  drawdown. A polygon with a large agricultural share fills the events table
-  and dashboard with non-forest noise, and the manual-review workflow
-  (Slice 3) isn't built yet.
+- **Candidates are forest-masked (#82), but exports are not.** Detection
+  thresholds only fire on pixels the configured forest layer (Hansen tree
+  cover by default; `FOREST_SENTINEL_FOREST_MASK*` in `config/instance.env`)
+  marks as forest, so a loose polygon with a large agricultural share no
+  longer floods the events table and dashboard with harvest-cycle noise —
+  but its non-forest pixels still pay full price in exports and disk.
 - **Vertex count matters in EE.** Full-resolution coastlines/admin boundaries
   ship thousands of vertices into every `filterBounds`, export region, and
   `reduceToVectors` call. If you start from admin shapes, simplify

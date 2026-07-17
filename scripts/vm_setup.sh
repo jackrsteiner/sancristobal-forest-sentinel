@@ -128,9 +128,15 @@ sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g; s#@PIPELINE_TIMEOUT@#${PIPELI
     | sudo tee /etc/systemd/system/forest-sentinel-pipeline.service >/dev/null
 sudo cp scripts/systemd/forest-sentinel-pipeline.timer \
     /etc/systemd/system/forest-sentinel-pipeline.timer
+sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g" \
+    scripts/systemd/forest-sentinel-prune.service \
+    | sudo tee /etc/systemd/system/forest-sentinel-prune.service >/dev/null
+sudo cp scripts/systemd/forest-sentinel-prune.timer \
+    /etc/systemd/system/forest-sentinel-prune.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now forest-sentinel-dashboard.service
 sudo systemctl enable --now forest-sentinel-pipeline.timer
+sudo systemctl enable --now forest-sentinel-prune.timer
 # Pick up the regenerated .env on re-runs (enable --now is a no-op when running).
 sudo systemctl restart forest-sentinel-dashboard.service
 
