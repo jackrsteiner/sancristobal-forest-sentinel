@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from geoalchemy2.shape import to_shape
-from shapely.geometry import mapping
+from shapely.errors import ShapelyError
+from shapely.geometry import mapping, shape
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -74,6 +75,24 @@ def build_masked_image(observation: Observation, *, ee_module: Any = earthengine
     collection_id = SENSOR_COLLECTIONS[observation.sensor]
     image = ee_module.image_by_id(f"{collection_id}/{observation.source_scene_id}")
     return qa.mask_image(image, ee_module=ee_module)
+
+
+def clipped_region(image: Any, aoi_region: dict[str, Any], *, ee_module: Any = earthengine) -> Any:
+    """Scene footprint ∩ AOI as GeoJSON, falling back to the whole AOI region (#78).
+
+    The fallback covers a missing/unreadable footprint or a degenerate
+    intersection — behavior is then identical to the pre-clipping pipeline.
+    Discovery filters by bounds, so a genuinely empty intersection should not
+    occur; treating it as "unclipped" is the defensive choice.
+    """
+    try:
+        footprint = shape(ee_module.scene_footprint(image))
+        clipped = shape(aoi_region).intersection(footprint)
+        if clipped.is_empty:
+            return aoi_region
+        return mapping(clipped)
+    except (EarthEngineError, ShapelyError, KeyError, TypeError, ValueError):
+        return aoi_region
 
 
 def build_index_image(
@@ -180,8 +199,14 @@ def compute_indices_for_observations(
                 continue
 
             masked = build_masked_image(observation, ee_module=ee_module)
+            # Clip everything for this observation to scene ∩ AOI (#78): a granule
+            # covers one ~110×110 km tile, so exporting/reducing over the whole
+            # AOI pays O(AOI area) per scene. The recorded valid fraction is
+            # therefore "valid within the scene's AOI coverage", not diluted by
+            # AOI area the scene never observed.
+            observation_region = clipped_region(masked, region, ee_module=ee_module)
             fraction = qa.measure_valid_fraction(
-                masked, bands.red, region, scale, ee_module=ee_module
+                masked, bands.red, observation_region, scale, ee_module=ee_module
             )
             qa.record_quality_mask(
                 session, observation_id=observation.id, valid_pixel_fraction=fraction
@@ -198,7 +223,9 @@ def compute_indices_for_observations(
                     date=date,
                     filename=f"{index_type.lower()}-{observation.source_scene_id}.tif",
                 )
-                requests.append(ExportRequest(index_image, key, scale=scale, region=region))
+                requests.append(
+                    ExportRequest(index_image, key, scale=scale, region=observation_region)
+                )
                 slots.append((observation, index_type, fraction))
         except (StorageError, EarthEngineError) as exc:
             outcome.failures[observation.id] = exc

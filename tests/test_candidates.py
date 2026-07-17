@@ -108,12 +108,13 @@ def test_extracts_candidates_with_provenance(db_session: Session) -> None:
         geometry = to_shape(row.geometry)
         assert geometry.geom_type == "Polygon"
         assert geometry.is_valid
-    # The EE call used the documented defaults.
+    # The EE call used the documented defaults, over the caller's region.
     assert fake.calls == [
         {
             "threshold": DEFAULT_DELTA_NBR_THRESHOLD,
             "scale": 30,
             "min_area_m2": DEFAULT_MIN_AREA_M2,
+            "region": _REGION,
         }
     ]
 

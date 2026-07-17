@@ -298,7 +298,9 @@ def _run_pipeline_locked(
                         session,
                         change_raster=product.change_raster,
                         delta_image=product.delta_image,
-                        region=region,
+                        # Vectorize over the same scene ∩ AOI region the delta was
+                        # exported with (#78); whole-AOI is the defensive fallback.
+                        region=product.region if product.region is not None else region,
                         scale=scale,
                         threshold=threshold,
                         min_area_m2=min_area_m2,

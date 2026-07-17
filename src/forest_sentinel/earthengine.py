@@ -68,12 +68,29 @@ def start_image_export_to_gcs(
         region=ee.Geometry(region) if region is not None else None,
         fileFormat="GeoTIFF",
         formatOptions={"cloudOptimized": True},
+        # Regions are clipped to scene footprint ∩ AOI (#78), so a single export
+        # is bounded by one HLS granule (~1.3e7 px at 30 m). The explicit limit
+        # is headroom over EE's 1e8 default, not license for whole-AOI exports.
+        maxPixels=1_000_000_000,
     )
     try:
         task.start()
     except ee.EEException as exc:
         raise EarthEngineError(f"failed to submit export {file_name_prefix!r}: {exc}") from exc
     return task
+
+
+def scene_footprint(image: Any, *, max_error_m: float = 30.0) -> Any:
+    """The image's footprint as client-side GeoJSON (one small ``getInfo`` call).
+
+    Used to clip export/reduce regions to scene ∩ AOI (#78) so per-task cost is
+    bounded by one granule rather than the whole AOI extent. Failures surface as
+    ``EarthEngineError``; callers fall back to the unclipped AOI region.
+    """
+    try:
+        return image.geometry(max_error_m).getInfo()
+    except ee.EEException as exc:
+        raise EarthEngineError(f"failed to read the scene footprint: {exc}") from exc
 
 
 def export_task_state(task: Any) -> str:

@@ -48,12 +48,17 @@ class ChangeProduct:
     ``delta_image`` is ``None``: nothing was recomputed, and candidate extraction
     is skipped — a reused raster's candidates were committed in the same
     checkpoint as the raster itself.
+
+    ``region`` is the scene ∩ AOI GeoJSON the delta was exported over (#78);
+    candidate extraction vectorizes over the same region. ``None`` for
+    frozen/reused products — nothing downstream reduces over them.
     """
 
     change_type: str
     change_raster: ChangeRaster
     delta_image: Any
     reused: bool = False
+    region: Any = None
 
 
 def compute_change_products_for_observation(
@@ -179,11 +184,17 @@ def compute_change_products_for_observation(
     # observation as failed, matching the pre-batch behavior.
     export_error: StorageError | None = None
     if pending:
+        # Both deltas derive from the current observation, so one scene ∩ AOI
+        # clip (#78) covers the batch; the same region feeds candidate
+        # extraction via ChangeProduct.region.
+        observation_region = indices.clipped_region(
+            masked_image(observation), region, ee_module=ee_module
+        )
         if on_export_submit is not None:
             on_export_submit(len(pending))
         export_results = storage.export_images(
             [
-                ExportRequest(delta, key, scale=scale, region=region)
+                ExportRequest(delta, key, scale=scale, region=observation_region)
                 for (_, _, delta, key, _) in pending
             ]
         )
@@ -222,7 +233,12 @@ def compute_change_products_for_observation(
             session.flush()
             _replace_sources(session, change.id, [row.id for row in index_rows])
             results.append(
-                ChangeProduct(change_type=change_type, change_raster=change, delta_image=delta)
+                ChangeProduct(
+                    change_type=change_type,
+                    change_raster=change,
+                    delta_image=delta,
+                    region=observation_region,
+                )
             )
 
     session.flush()
