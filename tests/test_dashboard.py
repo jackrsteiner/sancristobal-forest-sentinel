@@ -1,4 +1,5 @@
 import json
+import sys
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -286,3 +287,67 @@ def test_upload_aoi_can_be_disabled(client: TestClient, monkeypatch: pytest.Monk
     response = client.post("/api/aois", json=_UPLOAD_SQUARE)
     assert response.status_code == 403
     assert "disabled" in response.json()["detail"]
+
+
+# --- POST /api/pipeline/run: the dashboard run-now trigger ---
+
+
+def test_trigger_pipeline_run_starts_the_service(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The dashboard package re-exports `app` (the FastAPI instance), shadowing
+    # the submodule on attribute access — go through sys.modules instead.
+    app_module = sys.modules["forest_sentinel.dashboard.app"]
+
+    recorded: list[tuple[str, ...]] = []
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> _Result:
+        recorded.append(tuple(command))
+        return _Result()
+
+    monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+    response = client.post("/api/pipeline/run", json={})
+    assert response.status_code == 202
+    assert "runs panel" in response.json()["detail"]
+    assert recorded == [app_module.PIPELINE_START_COMMAND]
+
+
+def test_trigger_pipeline_run_reports_a_failing_start(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The dashboard package re-exports `app` (the FastAPI instance), shadowing
+    # the submodule on attribute access — go through sys.modules instead.
+    app_module = sys.modules["forest_sentinel.dashboard.app"]
+
+    class _Result:
+        returncode = 1
+        stderr = "Failed to connect to bus"
+
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *a, **k: _Result())
+    response = client.post("/api/pipeline/run", json={})
+    assert response.status_code == 502
+    assert "Failed to connect to bus" in response.json()["detail"]
+
+
+def test_trigger_pipeline_run_can_be_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_PIPELINE_TRIGGER", "0")
+    response = client.post("/api/pipeline/run", json={})
+    assert response.status_code == 403
+    assert "disabled" in response.json()["detail"]
+
+
+def test_trigger_pipeline_run_requires_a_json_body(client: TestClient) -> None:
+    # A cross-origin "simple request" (form/text body, no preflight) must not
+    # reach the handler: FastAPI rejects a non-JSON body before it runs.
+    response = client.post(
+        "/api/pipeline/run",
+        content="x=1",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 422

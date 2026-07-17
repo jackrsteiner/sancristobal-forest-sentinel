@@ -273,6 +273,11 @@ sudo systemctl start   forest-sentinel-pipeline    # trigger one run now
 journalctl -u forest-sentinel-pipeline -f          # watch it
 ```
 
+The dashboard's **Run pipeline now** button does the same thing without a
+shell (`POST /api/pipeline/run` → the same systemd unit; disabled via
+`FOREST_SENTINEL_PIPELINE_TRIGGER=0`, automatic when `OPEN_DASHBOARD=1`).
+Progress streams into the runs panel as the run commits its events.
+
 Reach the dashboard via an SSH tunnel (no public exposure):
 
 ```sh

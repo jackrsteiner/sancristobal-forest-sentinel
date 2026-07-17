@@ -84,10 +84,11 @@ echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/i
     if [ -f "${APP_DIR}/config/aoi.geojson" ]; then
         echo "AOI_PATH=config/aoi.geojson"
     fi
-    # A world-open dashboard must stay read-only: disable the AOI-upload
-    # endpoint whenever the firewall exposes the port publicly.
+    # A world-open dashboard must stay read-only: disable the AOI-upload and
+    # run-now endpoints whenever the firewall exposes the port publicly.
     if [ "${OPEN_DASHBOARD:-0}" = "1" ]; then
         echo "FOREST_SENTINEL_AOI_UPLOADS=0"
+        echo "FOREST_SENTINEL_PIPELINE_TRIGGER=0"
     fi
 } >"${APP_DIR}/.env"
 
