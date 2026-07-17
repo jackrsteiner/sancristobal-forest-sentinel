@@ -52,6 +52,8 @@ def test_start_image_export_submits_cog_task(fake_ee: MagicMock) -> None:
     assert kwargs["fileNamePrefix"] == "a/b/c"
     assert kwargs["fileFormat"] == "GeoTIFF"
     assert kwargs["formatOptions"] == {"cloudOptimized": True}
+    # Bounded headroom over EE's 1e8 default; regions are scene-clipped (#78).
+    assert kwargs["maxPixels"] == 1_000_000_000
     # Export.image rejects a raw GeoJSON dict — the region must be an ee.Geometry.
     fake_ee.Geometry.assert_called_once_with(region)
     assert kwargs["region"] is fake_ee.Geometry.return_value
@@ -199,3 +201,22 @@ def test_threshold_and_vectorize_handles_empty(fake_ee: MagicMock) -> None:
         delta, threshold=-0.25, scale=30, region={}, min_area_m2=4500
     )
     assert result == []
+
+
+def test_scene_footprint_returns_geometry_geojson(fake_ee: MagicMock) -> None:
+    image = MagicMock()
+    image.geometry.return_value.getInfo.return_value = {"type": "Polygon", "coordinates": []}
+    footprint = earthengine.scene_footprint(image)
+    image.geometry.assert_called_once_with(30.0)
+    assert footprint == {"type": "Polygon", "coordinates": []}
+
+
+def test_scene_footprint_wraps_ee_failures(fake_ee: MagicMock) -> None:
+    class FakeEEException(Exception):
+        pass
+
+    fake_ee.EEException = FakeEEException
+    image = MagicMock()
+    image.geometry.return_value.getInfo.side_effect = FakeEEException("quota")
+    with pytest.raises(earthengine.EarthEngineError, match="scene footprint"):
+        earthengine.scene_footprint(image)

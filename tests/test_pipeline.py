@@ -711,3 +711,65 @@ def test_methodology_change_records_a_warning_event(db_session: Session, tmp_pat
         .all()
     )
     assert warning_count == 1
+
+
+def test_candidate_extraction_vectorizes_over_the_clipped_region(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """End to end (#78): with a scene footprint available, reduceToVectors runs
+    over scene ∩ AOI rather than the whole AOI."""
+    from geoalchemy2.shape import to_shape
+    from shapely.geometry import shape
+
+    footprint = {
+        "type": "Polygon",
+        "coordinates": [[[0.5, 0.5], [2.0, 0.5], [2.0, 2.0], [0.5, 2.0], [0.5, 0.5]]],
+    }
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = FakeEarthEngine(
+        scenes={"NASA/HLS/HLSL30/v002": [_scene(day) for day in (1, 2)]},
+        features=[_CANDIDATE_FEATURE],
+        valid_fraction=0.95,
+        footprint=footprint,
+    )
+
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=FakeStorage(tmp_path),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    expected = to_shape(aoi.geometry).intersection(shape(footprint))
+    assert len(fake_ee.calls) == 1  # scene-1 has no baseline; scene-2 vectorizes
+    assert shape(fake_ee.calls[0]["region"]).equals(expected)
+
+
+def test_candidate_extraction_falls_back_to_the_aoi_region(
+    db_session: Session, tmp_path: Path
+) -> None:
+    from geoalchemy2.shape import to_shape
+    from shapely.geometry import shape
+
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = _fake_ee((1, 2))  # no footprint -> whole-AOI fallback everywhere
+
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=FakeStorage(tmp_path),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    assert len(fake_ee.calls) == 1
+    assert shape(fake_ee.calls[0]["region"]).equals(to_shape(aoi.geometry))

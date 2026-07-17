@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -279,3 +280,64 @@ def test_persisted_change_rasters_are_reused_without_export(
     assert rerun_storage.exports == []
     assert all(product.reused for product in rerun)
     assert all(product.delta_image is None for product in rerun)
+
+
+def test_delta_exports_and_products_carry_the_clipped_region(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Change exports use scene ∩ AOI, and ChangeProduct.region carries it forward
+    for candidate extraction (#78)."""
+    from geoalchemy2.shape import to_shape
+    from shapely.geometry import shape
+
+    footprint = {
+        "type": "Polygon",
+        "coordinates": [[[0.5, 0.5], [2.0, 0.5], [2.0, 2.0], [0.5, 2.0], [0.5, 0.5]]],
+    }
+    fake_ee = FakeEarthEngine(footprint=footprint)
+    aoi, observations, methodology = _build_history(
+        db_session, [1, 2, 3, 4, 5, 6], fake_ee, tmp_path
+    )
+    storage = FakeStorage(tmp_path / "change")
+
+    results = compute_change_products_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=observations[-1],
+        methodology=methodology,
+        storage=storage,
+        ee_module=fake_ee,
+    )
+
+    expected = to_shape(aoi.geometry).intersection(shape(footprint))
+    assert len(storage.export_regions) == 2
+    for region in storage.export_regions:
+        assert shape(region).equals(expected)
+    for product in results:
+        assert product.region is not None
+        assert shape(product.region).equals(expected)
+
+
+def test_reused_products_have_no_region(db_session: Session, tmp_path: Path) -> None:
+    """A reused delta is never re-exported or re-vectorized, so it carries no region."""
+    fake_ee = FakeEarthEngine()
+    aoi, observations, methodology = _build_history(
+        db_session, [1, 2, 3, 4, 5, 6], fake_ee, tmp_path
+    )
+    storage = FakeStorage(tmp_path / "change")
+
+    def run() -> list[Any]:
+        return compute_change_products_for_observation(
+            db_session,
+            aoi=aoi,
+            observation=observations[-1],
+            methodology=methodology,
+            storage=storage,
+            ee_module=fake_ee,
+        )
+
+    run()
+    db_session.commit()
+    second = run()
+    assert all(product.reused for product in second)
+    assert all(product.region is None for product in second)

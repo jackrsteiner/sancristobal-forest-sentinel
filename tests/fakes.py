@@ -16,6 +16,7 @@ from geoalchemy2.shape import from_shape
 from shapely.geometry import MultiPolygon, Polygon
 from sqlalchemy.orm import Session
 
+from forest_sentinel.earthengine import EarthEngineError
 from forest_sentinel.methodology import get_or_create_methodology_version
 from forest_sentinel.models import (
     Aoi,
@@ -45,14 +46,21 @@ class FakeEarthEngine:
         scenes: dict[str, list[dict[str, Any]]] | None = None,
         features: list[dict[str, Any]] | None = None,
         valid_fraction: float = 0.9,
+        footprint: dict[str, Any] | None = None,
     ) -> None:
         self._scenes = scenes or {}
         self._features = features or []
         self._valid_fraction = valid_fraction
+        # Scene footprint returned by scene_footprint(); None (the default)
+        # makes it raise, so region clipping (#78) falls back to the whole AOI —
+        # existing tests keep their pre-clipping behavior untouched.
+        self._footprint = footprint
         self.image_ids: list[str] = []
         self.nd_bands: list[list[str]] = []
         self.median_sizes: list[int] = []
         self.calls: list[dict[str, Any]] = []
+        self.footprint_calls: int = 0
+        self.fraction_regions: list[Any] = []
 
     def list_image_properties(
         self, collection_id: str, region: Any, since: str, until: str
@@ -67,7 +75,14 @@ class FakeEarthEngine:
         return {"masked": image}
 
     def valid_pixel_fraction(self, image: Any, band: str, region: Any, scale: int) -> float:
+        self.fraction_regions.append(region)
         return self._valid_fraction
+
+    def scene_footprint(self, image: Any, *, max_error_m: float = 30.0) -> dict[str, Any]:
+        self.footprint_calls += 1
+        if self._footprint is None:
+            raise EarthEngineError("footprint unavailable")
+        return self._footprint
 
     def normalized_difference(self, image: Any, bands: list[str]) -> dict[str, Any]:
         self.nd_bands.append(list(bands))
@@ -83,7 +98,9 @@ class FakeEarthEngine:
     def threshold_and_vectorize(
         self, delta_image: Any, *, threshold: float, scale: int, region: Any, min_area_m2: float
     ) -> list[dict[str, Any]]:
-        self.calls.append({"threshold": threshold, "scale": scale, "min_area_m2": min_area_m2})
+        self.calls.append(
+            {"threshold": threshold, "scale": scale, "min_area_m2": min_area_m2, "region": region}
+        )
         return self._features
 
 
@@ -99,6 +116,8 @@ class FakeStorage:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.exports: list[tuple[Any, CogKey, int | None]] = []
+        # Parallel to `exports`: the region each export was submitted with (#78).
+        self.export_regions: list[Any] = []
         self.batch_sizes: list[int] = []
         self.fail_products: set[str] = set()
 
@@ -121,6 +140,7 @@ class FakeStorage:
                 results.append(StorageError(f"forced failure for {request.key.product}"))
                 continue
             self.exports.append((request.image, request.key, request.scale))
+            self.export_regions.append(request.region)
             path = self.path_for(request.key)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()

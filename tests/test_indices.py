@@ -209,3 +209,86 @@ def test_unknown_sensor_is_rejected(db_session: Session, tmp_path: Path) -> None
             storage=FakeStorage(tmp_path),
             ee_module=FakeEarthEngine(),
         )
+
+
+# --- Region clipping (#78): exports and QA reduce over scene footprint ∩ AOI ---
+
+# Overlaps the unit-square AOI in its upper-right quarter.
+_FOOTPRINT = {
+    "type": "Polygon",
+    "coordinates": [[[0.5, 0.5], [2.0, 0.5], [2.0, 2.0], [0.5, 2.0], [0.5, 0.5]]],
+}
+
+
+def test_exports_and_qa_are_clipped_to_scene_footprint(db_session: Session, tmp_path: Path) -> None:
+    from geoalchemy2.shape import to_shape
+    from shapely.geometry import shape
+
+    aoi, obs, methodology = _setup(db_session, "HLSL30")
+    fake_ee = FakeEarthEngine(footprint=_FOOTPRINT)
+    storage = FakeStorage(tmp_path)
+
+    compute_indices_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=obs,
+        methodology=methodology,
+        storage=storage,
+        ee_module=fake_ee,
+    )
+
+    expected = to_shape(aoi.geometry).intersection(shape(_FOOTPRINT))
+    assert fake_ee.footprint_calls == 1  # one clip per observation, shared by both exports
+    assert len(storage.export_regions) == 2
+    for region in storage.export_regions:
+        assert shape(region).equals(expected)
+    # The valid fraction reduces over the same clipped region — it now means
+    # "valid within the scene's AOI coverage".
+    assert shape(fake_ee.fraction_regions[0]).equals(expected)
+
+
+def test_missing_footprint_falls_back_to_the_whole_aoi(db_session: Session, tmp_path: Path) -> None:
+    from geoalchemy2.shape import to_shape
+    from shapely.geometry import shape
+
+    aoi, obs, methodology = _setup(db_session, "HLSL30")
+    fake_ee = FakeEarthEngine()  # no footprint -> scene_footprint raises
+    storage = FakeStorage(tmp_path)
+
+    compute_indices_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=obs,
+        methodology=methodology,
+        storage=storage,
+        ee_module=fake_ee,
+    )
+
+    for region in storage.export_regions:
+        assert shape(region).equals(to_shape(aoi.geometry))
+    assert shape(fake_ee.fraction_regions[0]).equals(to_shape(aoi.geometry))
+
+
+def test_single_tile_aoi_clips_to_itself(db_session: Session, tmp_path: Path) -> None:
+    """An AOI inside one scene footprint behaves identically to today (#78)."""
+    from geoalchemy2.shape import to_shape
+    from shapely.geometry import shape
+
+    covering = {
+        "type": "Polygon",
+        "coordinates": [[[-1.0, -1.0], [2.0, -1.0], [2.0, 2.0], [-1.0, 2.0], [-1.0, -1.0]]],
+    }
+    aoi, obs, methodology = _setup(db_session, "HLSL30")
+    storage = FakeStorage(tmp_path)
+
+    compute_indices_for_observation(
+        db_session,
+        aoi=aoi,
+        observation=obs,
+        methodology=methodology,
+        storage=storage,
+        ee_module=FakeEarthEngine(footprint=covering),
+    )
+
+    for region in storage.export_regions:
+        assert shape(region).equals(to_shape(aoi.geometry))

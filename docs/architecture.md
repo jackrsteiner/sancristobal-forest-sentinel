@@ -104,7 +104,7 @@ Schema changes are versioned with **Alembic**; each migration is reviewed and sh
 
 **Rationale.**
 
-- **Server-side compute keeps the VM tiny.** NBR / NDVI, the trailing-median baseline, ΔNBR / ΔNDVI, and threshold-plus-polygonize all map to EE primitives (`normalizedDifference`, `ImageCollection.median()`, `gt()` + `reduceToVectors`). EE does the heavy raster work (free under the noncommercial tier), so the VM only orchestrates and hosts a small Postgres — which fits the **always-free `e2-micro`** instance.
+- **Server-side compute keeps the VM tiny.** NBR / NDVI, the trailing-median baseline, ΔNBR / ΔNDVI, and threshold-plus-polygonize all map to EE primitives (`normalizedDifference`, `ImageCollection.median()`, `gt()` + `reduceToVectors`, plus `image.geometry()` for the per-scene footprint that clips every export/reduce region to scene ∩ AOI, #78). EE does the heavy raster work (free under the noncommercial tier), so the VM only orchestrates and hosts a small Postgres — which fits the **always-free `e2-micro`** instance.
 - **No raw-scene egress.** Inputs stay inside Google's network; only the finished COGs leave EE, into a transient GCS staging area.
 - **EE produces the COGs.** The VM does not write rasters itself; it copies the finished COGs to its free local disk (the canonical store), keeping bulk storage at $0.
 - **Cloud / shadow / haze masking is built in.** The `Fmask` QA band ships with both HLS collections, so QA masking (E14) is satisfied inside Slice 1.
@@ -344,7 +344,9 @@ never recomputed, even if a late-arriving observation would change the baseline.
 geometry — the visible output of Slice 1. In Earth Engine it thresholds the delta (disturbance =
 an NBR drop beyond a threshold, `delta < threshold`), polygonizes the mask with
 `reduceToVectors`, tags each polygon with its area (`Feature.area`), and filters to a minimum
-area. The features come back as WGS 84 GeoJSON and are persisted as `disturbance_candidate` rows.
+area. Vectorization runs over the same scene ∩ AOI region the delta was exported with (#78),
+not the whole AOI. The features come back as WGS 84 GeoJSON and are persisted as
+`disturbance_candidate` rows.
 
 **Defaults** (overridable via methodology `parameters` or explicit kwargs, and captured in the
 `methodology_version`): `delta_nbr_threshold = -0.25`, `min_area_m2 = 4500` (≈ 0.45 ha). The

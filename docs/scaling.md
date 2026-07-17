@@ -30,11 +30,12 @@ Four facts drive everything:
    run killed by the systemd timeout resumes where it left off at the next
    timer firing. Daily steady-state cost is therefore the ~0.65 new
    scenes/tile/day, not the window size.
-4. **Exports use the whole AOI as their region.** `indices.py` / `change.py`
-   pass the full AOI geometry to every per-scene export, so per-task cost
-   creeps up with total AOI extent even though only one tile has data.
-   Candidate extraction (`reduceToVectors` + `getInfo`) likewise runs over the
-   whole AOI per change raster.
+4. **Per-task cost is bounded by one granule** (#78): every export, the QA
+   valid-fraction reduce, and candidate extraction run over **scene footprint
+   ∩ AOI**, not the whole AOI geometry — per-scene cost no longer grows with
+   total AOI extent (a whole-country AOI previously exceeded Earth Engine's
+   per-export pixel limit outright). The recorded `valid_pixel_fraction`
+   accordingly means "valid within the scene's AOI coverage".
 
 The VM itself is nearly idle throughout — all compute happens inside Earth
 Engine; the VM submits, polls every 5 s, and downloads. The e2-micro's 1 GB RAM
@@ -100,9 +101,10 @@ process), and the per-AOI advisory lock backstops manual runs.
    checkpointed/resumable runs — #77)*. An exists-check (row + file present
    under the same methodology) collapses the daily cost to *new scenes only*
    (~0.65/tile/day), and per-chunk commits let a killed run resume.
-2. **Clip export/vectorize regions to scene footprint ∩ AOI** instead of the
-   whole AOI geometry. Removes the O(scenes × AOI area) term in both exports
-   and candidate extraction; required for multi-tile AOIs to scale (#78).
+2. **Clip export/vectorize regions to scene footprint ∩ AOI** *(✅ shipped —
+   #78)*. Removes the O(scenes × AOI area) term in exports, QA reduction, and
+   candidate extraction; the enabler for multi-tile AOIs (each falls back to
+   the whole-AOI region only if a scene footprint is unavailable).
 3. **Submit EE exports concurrently** *(✅ shipped — #79)*. Exports are
    submitted in batches and polled as a group, bounded by
    `FOREST_SENTINEL_MAX_CONCURRENT_EXPORTS` (default 4) — a multi-×
@@ -123,13 +125,14 @@ process), and the per-AOI advisory lock backstops manual runs.
    state is GCS-as-canonical raster storage, which removes the disk ceiling
    entirely.
 
-### Envelope after items 1–3
+### Envelope after items 1–4
 
 - **Compute path:** throughput = concurrency × the tier's per-task queue rate,
   so it scales with the EE tier (§2) and
   `FOREST_SENTINEL_MAX_CONCURRENT_EXPORTS` rather than with wall-clock alone;
   steady-state daily load (~0.65 scenes/tile/day) is small even at Community
-  pace. Runtime stops being the binder once the first backfill lands.
+  pace, and per-task cost is granule-bounded (#78) rather than AOI-bounded.
+  Runtime stops being the binder once the first backfill lands.
 - **Disk becomes the limit:** with retention tuning, realistically **~5–15
   tiles / several tens of thousands of km² of monitored area** on strictly
   free infrastructure.
