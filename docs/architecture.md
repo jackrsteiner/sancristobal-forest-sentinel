@@ -428,6 +428,9 @@ serving a read-only, unauthenticated view over PostGIS — the resolved Slice 2 
   the same loader as files; written to `aois/` so the scheduled run picks it up; JSON-only
   body so cross-origin CSRF requires a preflight that no CORS config permits; disabled via
   `FOREST_SENTINEL_AOI_UPLOADS=0` when the dashboard is publicly exposed).
+- `POST /api/pipeline/run` — start a pipeline run now (the same systemd unit the daily
+  timer fires; `--no-block`, so progress streams into the runs panel). Same JSON-only
+  CSRF posture; disabled via `FOREST_SENTINEL_PIPELINE_TRIGGER=0` when publicly exposed.
 - `GET /api/aois/{id}/events` — the AOI's events as a GeoJSON `FeatureCollection` (status, first/
   last detected, cumulative footprint area, latest detection area, observation count).
 - `GET /api/events/{id}` — event detail: footprint geometry and area, the measurement

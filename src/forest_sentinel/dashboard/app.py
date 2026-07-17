@@ -13,6 +13,7 @@ with a transactional test session; no Earth Engine or storage access happens her
 
 import json
 import os
+import subprocess
 from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
@@ -55,6 +56,21 @@ RUN_EVENTS_LIMIT = 50
 # Set to "0" to disable uploads (vm_setup.sh does this when the dashboard port
 # is opened to the world: a public dashboard must stay read-only).
 AOI_UPLOADS_ENV_VAR = "FOREST_SENTINEL_AOI_UPLOADS"
+
+# Set to "0" to disable the run-now trigger (vm_setup.sh does this when the
+# dashboard port is opened to the world, same as uploads).
+PIPELINE_TRIGGER_ENV_VAR = "FOREST_SENTINEL_PIPELINE_TRIGGER"
+# The same systemd unit the daily timer fires; --no-block returns immediately
+# and systemd merges a start into an already-running job, so repeated clicks
+# are harmless (the per-AOI advisory lock backstops everything else). The `ofs`
+# service user has passwordless sudo on the VM (vm_startup.sh).
+PIPELINE_START_COMMAND = (
+    "sudo",
+    "systemctl",
+    "start",
+    "forest-sentinel-pipeline.service",
+    "--no-block",
+)
 
 
 @lru_cache(maxsize=1)
@@ -144,6 +160,39 @@ def create_app() -> FastAPI:
                 ),
             ) from None
         return {"id": aoi.id, "name": aoi.name, "file": str(target)}
+
+    @app.post("/api/pipeline/run", status_code=202)
+    def trigger_pipeline_run(_payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        """Start a pipeline run now — the same systemd unit the daily timer fires.
+
+        Requires a JSON body (send ``{}``): like the AOI upload, the mandatory
+        ``Content-Type: application/json`` makes a cross-origin browser POST
+        need a CORS preflight that no configured middleware permits. The start
+        is asynchronous; progress appears in the runs panel as the run commits
+        its events. Repeated triggers are safe — systemd merges a start into a
+        running job and the per-AOI advisory lock serializes runs.
+        """
+        if os.environ.get(PIPELINE_TRIGGER_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="pipeline triggering is disabled on this dashboard"
+            )
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed command, no user input
+                PIPELINE_START_COMMAND, capture_output=True, text=True, check=False, timeout=30
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(
+                status_code=502, detail=f"could not start the pipeline service: {exc}"
+            ) from exc
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "could not start the pipeline service: "
+                    f"{result.stderr.strip() or f'exit code {result.returncode}'}"
+                ),
+            )
+        return {"detail": "pipeline run requested; progress appears in the runs panel"}
 
     @app.get("/api/aois/{aoi_id}/events")
     def aoi_events(aoi_id: int, session: SessionDep) -> dict[str, Any]:

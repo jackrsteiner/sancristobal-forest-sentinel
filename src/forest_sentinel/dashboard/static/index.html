@@ -19,6 +19,8 @@
       h2 { font-size: 14px; margin: 16px 0 6px; }
       #add-aoi input[type="file"] { max-width: 100%; font-size: 12px; }
       .upload-error { color: #c0392b; }
+      #pipeline-controls { margin: 12px 0 4px; }
+      #run-now-status { font-size: 12px; margin-left: 6px; }
       select, button { font: inherit; padding: 6px; }
       .event { border: 1px solid #ddd; border-radius: 6px; padding: 8px; margin: 8px 0; cursor: pointer; }
       .event.selected { border-color: #c0392b; }
@@ -41,6 +43,10 @@
       <h1>Open Forest Sentinel</h1>
       <label>AOI: <select id="aoi-select"></select></label>
       <div id="summary" class="muted"></div>
+      <div id="pipeline-controls">
+        <button id="run-now">Run pipeline now</button>
+        <span id="run-now-status" class="muted"></span>
+      </div>
       <div id="runs"></div>
       <div id="events"></div>
       <div id="add-aoi">
@@ -302,6 +308,33 @@
         loadEvents(body.id);
       }
 
+      async function runPipelineNow() {
+        const button = document.getElementById("run-now");
+        const status = document.getElementById("run-now-status");
+        status.className = "muted";
+        status.textContent = "Requesting…";
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/pipeline/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const body = await response.json();
+          if (!response.ok) {
+            status.className = "muted upload-error";
+            status.textContent = body.detail || `Failed (${response.status}).`;
+            return;
+          }
+          status.textContent = "Run requested — it will appear below shortly.";
+          // The runs panel polls every 15 s anyway; refresh sooner for feedback.
+          setTimeout(() => currentAoiId != null && loadRuns(currentAoiId), 3000);
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      document.getElementById("run-now").addEventListener("click", runPipelineNow);
       document.getElementById("aoi-upload").addEventListener("click", uploadAoi);
       document.getElementById("aoi-select").addEventListener("change", (e) =>
         loadEvents(e.target.value),
