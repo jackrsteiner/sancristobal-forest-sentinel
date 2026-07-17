@@ -164,6 +164,11 @@ the `e2-micro` VM has 1 GB RAM and a 30 GB disk shared with Postgres and the COG
 > `curl -LsSf https://astral.sh/uv/install.sh | sh`), run the same `make_aoi.py`
 > command, then `gcloud compute scp config/aoi.geojson forest-sentinel-vm:~/open-forest-sentinel/config/ --zone "$ZONE"`.
 
+> Or skip the file transfer entirely: open the dashboard through the SSH tunnel
+> and use the sidebar's **Add AOI** control to upload the GeoJSON — it lands in
+> `aois/` on the VM and is monitored from the next run (alongside
+> `config/aoi.geojson`; every `aois/*.geojson` runs).
+
 ---
 
 ## 7. Adjust settings and run the pipeline once

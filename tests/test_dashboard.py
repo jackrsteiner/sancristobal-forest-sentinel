@@ -1,5 +1,7 @@
+import json
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -208,3 +210,79 @@ def test_index_serves_the_map_page(client: TestClient) -> None:
     # The page wires up the API endpoints it consumes.
     assert "/api/aois" in response.text
     assert "leaflet" in response.text.lower()
+
+
+# --- POST /api/aois: the dashboard AOI upload ---
+
+_UPLOAD_SQUARE = {
+    "type": "Feature",
+    "properties": {"name": "Uploaded AOI"},
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]],
+    },
+}
+
+
+def test_upload_aoi_creates_row_and_file(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+
+    response = client.post("/api/aois", json=_UPLOAD_SQUARE)
+    assert response.status_code == 201
+    body = response.json()
+    assert body["name"] == "Uploaded AOI"
+
+    # The row is visible to the read API immediately...
+    names = {aoi["name"] for aoi in client.get("/api/aois").json()}
+    assert "Uploaded AOI" in names
+    # ...and the file joins the aois/ directory the scheduled run loops over.
+    written = tmp_path / "aois" / "uploaded-aoi.geojson"
+    assert str(written) == body["file"]
+    assert json.loads(written.read_text())["properties"]["name"] == "Uploaded AOI"
+
+
+def test_upload_aoi_duplicate_name_is_409(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+    make_aoi(db_session, name="Uploaded AOI")
+    db_session.commit()
+
+    response = client.post("/api/aois", json=_UPLOAD_SQUARE)
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+    # The rejected upload must not leave a file behind for the run loop.
+    assert not (tmp_path / "aois" / "uploaded-aoi.geojson").exists()
+
+
+def test_upload_aoi_duplicate_file_is_409(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    aois_dir = tmp_path / "aois"
+    aois_dir.mkdir()
+    (aois_dir / "uploaded-aoi.geojson").write_text("{}")
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(aois_dir))
+
+    response = client.post("/api/aois", json=_UPLOAD_SQUARE)
+    assert response.status_code == 409
+    assert "file" in response.json()["detail"]
+
+
+def test_upload_aoi_invalid_document_is_400(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+    invalid = {**_UPLOAD_SQUARE, "properties": {}}
+    response = client.post("/api/aois", json=invalid)
+    assert response.status_code == 400
+    assert "properties.name" in response.json()["detail"]
+    assert not (tmp_path / "aois").exists()  # nothing written for a rejected document
+
+
+def test_upload_aoi_can_be_disabled(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOI_UPLOADS", "0")
+    response = client.post("/api/aois", json=_UPLOAD_SQUARE)
+    assert response.status_code == 403
+    assert "disabled" in response.json()["detail"]

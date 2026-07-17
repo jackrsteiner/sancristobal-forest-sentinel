@@ -137,3 +137,46 @@ def test_persist_aoi_writes_a_row(db_session: Session) -> None:
     assert len(rows) == 1
     assert rows[0].id == persisted.id
     assert rows[0].name == "Example AOI"
+
+
+# --- load_aoi_config_document: the dict entry point used by dashboard uploads ---
+
+
+def test_document_entry_point_accepts_a_valid_feature() -> None:
+    from forest_sentinel.aoi import load_aoi_config_document
+
+    config = load_aoi_config_document(_feature({"type": "Polygon", "coordinates": _SQUARE}))
+    assert config.name == "Test AOI"
+    assert isinstance(config.geometry, MultiPolygon)
+
+
+def test_document_entry_point_rejects_non_dict_and_labels_the_source() -> None:
+    from forest_sentinel.aoi import load_aoi_config_document
+
+    with pytest.raises(AoiConfigError, match="<upload>"):
+        load_aoi_config_document(["not", "geojson"])
+
+
+def test_document_entry_point_rejects_missing_name() -> None:
+    from forest_sentinel.aoi import load_aoi_config_document
+
+    document = _feature({"type": "Polygon", "coordinates": _SQUARE}, properties={})
+    with pytest.raises(AoiConfigError, match="properties.name"):
+        load_aoi_config_document(document)
+
+
+def test_document_entry_point_rejects_invalid_geometry() -> None:
+    from forest_sentinel.aoi import load_aoi_config_document
+
+    bowtie = [[[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]]]
+    with pytest.raises(AoiConfigError, match="not valid"):
+        load_aoi_config_document(_feature({"type": "Polygon", "coordinates": bowtie}))
+
+
+def test_document_entry_point_rejects_non_wgs84_crs() -> None:
+    from forest_sentinel.aoi import load_aoi_config_document
+
+    document = _feature({"type": "Polygon", "coordinates": _SQUARE})
+    document["crs"] = {"type": "name", "properties": {"name": "EPSG:3857"}}
+    with pytest.raises(AoiConfigError, match="WGS 84"):
+        load_aoi_config_document(document)

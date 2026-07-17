@@ -16,6 +16,9 @@
       #sidebar { width: 360px; padding: 16px; overflow-y: auto; border-right: 1px solid #ddd; }
       #map { flex: 1; }
       h1 { font-size: 18px; margin: 0 0 12px; }
+      h2 { font-size: 14px; margin: 16px 0 6px; }
+      #add-aoi input[type="file"] { max-width: 100%; font-size: 12px; }
+      .upload-error { color: #c0392b; }
       select, button { font: inherit; padding: 6px; }
       .event { border: 1px solid #ddd; border-radius: 6px; padding: 8px; margin: 8px 0; cursor: pointer; }
       .event.selected { border-color: #c0392b; }
@@ -40,6 +43,12 @@
       <div id="summary" class="muted"></div>
       <div id="runs"></div>
       <div id="events"></div>
+      <div id="add-aoi">
+        <h2>Add AOI</h2>
+        <input type="file" id="aoi-file" accept=".geojson,.json" />
+        <button id="aoi-upload">Upload</button>
+        <div id="aoi-upload-status" class="muted"></div>
+      </div>
     </div>
     <div id="map"></div>
     <script
@@ -254,6 +263,46 @@
         return m2 == null ? "—" : `${(m2 / 10000).toFixed(2)} ha`;
       }
 
+      async function uploadAoi() {
+        const status = document.getElementById("aoi-upload-status");
+        const input = document.getElementById("aoi-file");
+        status.className = "muted";
+        const file = input.files[0];
+        if (!file) {
+          status.textContent = "Choose a .geojson file first.";
+          return;
+        }
+        let document_;
+        try {
+          document_ = JSON.parse(await file.text());
+        } catch (e) {
+          status.className = "muted upload-error";
+          status.textContent = "Not valid JSON.";
+          return;
+        }
+        status.textContent = "Uploading…";
+        const response = await fetch("/api/aois", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(document_),
+        });
+        const body = await response.json();
+        if (!response.ok) {
+          status.className = "muted upload-error";
+          status.textContent = body.detail || `Upload failed (${response.status}).`;
+          return;
+        }
+        status.textContent =
+          `Added "${body.name}" — it will be processed on the next pipeline run. ` +
+          `Commit ${body.file} to the instance repo to make it permanent.`;
+        input.value = "";
+        await loadAois();
+        const select = document.getElementById("aoi-select");
+        select.value = body.id;
+        loadEvents(body.id);
+      }
+
+      document.getElementById("aoi-upload").addEventListener("click", uploadAoi);
       document.getElementById("aoi-select").addEventListener("change", (e) =>
         loadEvents(e.target.value),
       );

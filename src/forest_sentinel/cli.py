@@ -22,12 +22,15 @@ from sqlalchemy.orm import Session
 
 from forest_sentinel import earthengine, indices, pipeline, qa, storage
 from forest_sentinel.aoi import (
+    AOIS_DIR_ENV_VAR,
+    DEFAULT_AOIS_DIR,
     AoiConfig,
     AoiConfigError,
     get_or_create_aoi,
     load_aoi_config,
     persist_aoi,
 )
+from forest_sentinel.aoi_admin import delete_aoi, inventory_aoi, remove_cog_directory
 from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.change import DEFAULT_BASELINE_WINDOW
 from forest_sentinel.db import get_engine
@@ -37,7 +40,7 @@ from forest_sentinel.methodology import (
     MethodologyVersionMismatch,
     resolve_methodology_version,
 )
-from forest_sentinel.models import Aoi
+from forest_sentinel.models import Aoi, DisturbanceEvent, Observation, PipelineRun
 from forest_sentinel.storage import StorageConfigurationError, StorageError
 
 # Pins what Google ran for this build, recorded in the methodology version for reproducibility.
@@ -66,6 +69,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == "aoi":
+        return _run_aoi_command(args)
     if (args.since is None) != (args.until is None):
         # A lone window flag used to fall through to the Slice 0 load silently.
         parser.error("--since and --until must be provided together")
@@ -114,7 +119,103 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--threshold", type=float, default=None)
     run_parser.add_argument("--min-area", type=float, default=None, metavar="M2")
     run_parser.add_argument("--gee-project", default=None)
+
+    aoi_parser = subparsers.add_parser("aoi", help="Inspect or remove configured AOIs.")
+    aoi_subparsers = aoi_parser.add_subparsers(dest="aoi_command", required=True)
+    aoi_subparsers.add_parser("list", help="List AOIs with row counts and last run.")
+    delete_parser = aoi_subparsers.add_parser(
+        "delete", help="Delete an AOI and all of its derived data."
+    )
+    delete_parser.add_argument("name", help="AOI name (see `forest-sentinel aoi list`).")
+    delete_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Actually delete. Without it, print what would be deleted and exit 1.",
+    )
     return parser
+
+
+def _run_aoi_command(args: argparse.Namespace) -> int:
+    """Dispatch `forest-sentinel aoi list|delete` (#83)."""
+    with _disposing_engine() as engine:
+        try:
+            with Session(engine) as session:
+                if args.aoi_command == "list":
+                    return _aoi_list(session)
+                return _aoi_delete(session, name=args.name, confirmed=args.yes)
+        except OperationalError as exc:
+            print(f"error: could not connect to the database ({exc})", file=sys.stderr)
+            return 1
+
+
+def _aoi_list(session: Session) -> int:
+    rows = session.execute(
+        select(
+            Aoi.id,
+            Aoi.name,
+            select(func.count())
+            .where(Observation.aoi_id == Aoi.id)
+            .correlate(Aoi)
+            .scalar_subquery(),
+            select(func.count())
+            .where(DisturbanceEvent.aoi_id == Aoi.id)
+            .correlate(Aoi)
+            .scalar_subquery(),
+        ).order_by(Aoi.id)
+    ).all()
+    if not rows:
+        print("No AOIs configured.")
+        return 0
+    print(f"{'id':>4}  {'name':<32} {'observations':>12} {'events':>7}  last run")
+    for aoi_id, name, observations, events in rows:
+        last_run = session.execute(
+            select(PipelineRun.status, PipelineRun.started_at)
+            .where(PipelineRun.aoi_id == aoi_id)
+            .order_by(PipelineRun.started_at.desc())
+            .limit(1)
+        ).first()
+        run_label = f"{last_run.status} @ {last_run.started_at:%Y-%m-%d %H:%M}" if last_run else "—"
+        print(f"{aoi_id:>4}  {name:<32} {observations:>12} {events:>7}  {run_label}")
+    return 0
+
+
+def _aoi_delete(session: Session, *, name: str, confirmed: bool) -> int:
+    aoi = session.execute(select(Aoi).where(Aoi.name == name)).scalar_one_or_none()
+    if aoi is None:
+        print(f"error: no AOI named {name!r} (see `forest-sentinel aoi list`)", file=sys.stderr)
+        return 1
+
+    inventory = inventory_aoi(session, aoi)
+    print(f"AOI {aoi.id} {aoi.name!r} — deleting removes:")
+    print(
+        f"  observations:      {inventory.observations} (+{inventory.quality_masks} quality masks)"
+    )
+    print(f"  index rasters:     {inventory.index_rasters}")
+    print(f"  change rasters:    {inventory.change_rasters} (+{inventory.candidates} candidates)")
+    print(f"  events:            {inventory.events} (+{inventory.event_observations} measurements)")
+    print(f"  pipeline runs:     {inventory.runs} (+{inventory.run_events} progress events)")
+    print(f"  COG directory:     {inventory.cog_directory}")
+    if not confirmed:
+        print("\nNothing deleted. Re-run with --yes to delete.", file=sys.stderr)
+        return 1
+
+    delete_aoi(session, aoi)
+    session.commit()
+    if remove_cog_directory(inventory.cog_directory):
+        print(f"Removed {inventory.cog_directory}")
+    seed = Path(os.environ.get(AOIS_DIR_ENV_VAR, DEFAULT_AOIS_DIR)) / (
+        f"{storage.sanitize_path_component(name)}.geojson"
+    )
+    if seed.is_file():
+        seed.unlink()
+        print(f"Removed {seed}")
+    print(f"Deleted AOI {name!r}.")
+    print(
+        "note: if a GeoJSON for this AOI is still committed to the repo "
+        "(aois/*.geojson or config/aoi.geojson), the next pipeline run will "
+        "re-create it — remove the file from the repo too."
+    )
+    return 0
 
 
 def _load_aoi_or_report(aoi_path: Path) -> AoiConfig | None:

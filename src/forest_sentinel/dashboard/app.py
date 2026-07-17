@@ -11,19 +11,29 @@ The database session is provided by the ``get_session`` dependency so tests can 
 with a transactional test session; no Earth Engine or storage access happens here.
 """
 
+import json
+import os
 from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Body, Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from geoalchemy2 import Geography
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
 from sqlalchemy import Engine, cast, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from forest_sentinel.aoi import (
+    AOIS_DIR_ENV_VAR,
+    DEFAULT_AOIS_DIR,
+    AoiConfigError,
+    load_aoi_config_document,
+    persist_aoi,
+)
 from forest_sentinel.db import get_engine
 from forest_sentinel.events import footprint_area_m2
 from forest_sentinel.models import (
@@ -36,10 +46,15 @@ from forest_sentinel.models import (
     PipelineRun,
     PipelineRunEvent,
 )
+from forest_sentinel.storage import StorageError, sanitize_path_component
 
 # How many runs / progress events the runs endpoints return.
 RUNS_LIMIT = 20
 RUN_EVENTS_LIMIT = 50
+
+# Set to "0" to disable uploads (vm_setup.sh does this when the dashboard port
+# is opened to the world: a public dashboard must stay read-only).
+AOI_UPLOADS_ENV_VAR = "FOREST_SENTINEL_AOI_UPLOADS"
 
 
 @lru_cache(maxsize=1)
@@ -79,6 +94,56 @@ def create_app() -> FastAPI:
             {"id": aoi_id, "name": name, "event_count": event_count}
             for aoi_id, name, event_count in rows
         ]
+
+    @app.post("/api/aois", status_code=201)
+    def upload_aoi(session: SessionDep, document: Annotated[Any, Body()]) -> dict[str, Any]:
+        """Register a new AOI from an uploaded GeoJSON document.
+
+        The document is the same single-feature GeoJSON accepted as a file; it is
+        validated, written into the AOIs directory (so the scheduled run picks it
+        up exactly like a committed file), and persisted as an ``aoi`` row (visible
+        in the dropdown immediately; processed on the next pipeline run). Uploads
+        are instance-local — commit the written file to the instance repo to
+        survive a teardown/redeploy. A name that already exists is rejected (409):
+        stored geometry is pinned to the name, so a new footprint needs a new name.
+
+        The body must be JSON (not multipart): a cross-origin browser POST with
+        ``Content-Type: application/json`` requires a CORS preflight, and no CORS
+        middleware is configured — which structurally blocks CSRF while the
+        dashboard is reachable through the SSH tunnel.
+        """
+        if os.environ.get(AOI_UPLOADS_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="AOI uploads are disabled on this dashboard"
+            )
+        try:
+            config = load_aoi_config_document(document)
+            filename = f"{sanitize_path_component(config.name)}.geojson"
+        except (AoiConfigError, StorageError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        aois_dir = Path(os.environ.get(AOIS_DIR_ENV_VAR, DEFAULT_AOIS_DIR))
+        target = aois_dir / filename
+        if target.exists():
+            raise HTTPException(
+                status_code=409, detail=f"an AOI file named {filename!r} already exists"
+            )
+        aois_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(document, indent=2) + "\n")
+        try:
+            aoi = persist_aoi(session, config)
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            target.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"an AOI named {config.name!r} already exists; stored geometry is "
+                    "pinned to the name — upload under a new name to monitor a new footprint"
+                ),
+            ) from None
+        return {"id": aoi.id, "name": aoi.name, "file": str(target)}
 
     @app.get("/api/aois/{aoi_id}/events")
     def aoi_events(aoi_id: int, session: SessionDep) -> dict[str, Any]:

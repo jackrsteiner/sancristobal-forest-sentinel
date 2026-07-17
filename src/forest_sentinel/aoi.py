@@ -23,6 +23,11 @@ from forest_sentinel.models import AOI_SRID, Aoi
 
 logger = logging.getLogger(__name__)
 
+# Directory of AOI GeoJSONs: committed seeds and dashboard uploads alike.
+# run_pipeline.sh runs every *.geojson in it, in addition to the legacy AOI_PATH.
+AOIS_DIR_ENV_VAR = "FOREST_SENTINEL_AOIS_DIR"
+DEFAULT_AOIS_DIR = "aois"
+
 # GeoJSON is WGS 84 by definition; an explicit CRS member must agree.
 _ALLOWED_CRS_NAMES = {
     "urn:ogc:def:crs:ogc:1.3:crs84",
@@ -57,13 +62,22 @@ def load_aoi_config(path: Path) -> AoiConfig:
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise AoiConfigError(f"AOI config is not valid JSON: {path} ({exc})") from exc
 
-    if not isinstance(document, dict):
-        raise AoiConfigError(f"AOI config must be a GeoJSON object: {path}")
+    return load_aoi_config_document(document, source=path)
 
-    _reject_non_wgs84_crs(document, path)
-    feature = _single_feature(document, path)
-    name = _validated_name(feature, path)
-    geometry = _validated_geometry(feature, path)
+
+def load_aoi_config_document(document: Any, *, source: object = "<upload>") -> AoiConfig:
+    """Validate an already-parsed AOI GeoJSON document (e.g. a dashboard upload).
+
+    Same validation contract as :func:`load_aoi_config`; ``source`` only labels
+    error messages.
+    """
+    if not isinstance(document, dict):
+        raise AoiConfigError(f"AOI config must be a GeoJSON object: {source}")
+
+    _reject_non_wgs84_crs(document, source)
+    feature = _single_feature(document, source)
+    name = _validated_name(feature, source)
+    geometry = _validated_geometry(feature, source)
     return AoiConfig(name=name, geometry=geometry)
 
 
@@ -99,7 +113,7 @@ def get_or_create_aoi(session: Session, config: AoiConfig) -> Aoi:
     return persist_aoi(session, config)
 
 
-def _reject_non_wgs84_crs(document: dict[str, Any], path: Path) -> None:
+def _reject_non_wgs84_crs(document: dict[str, Any], path: object) -> None:
     crs = document.get("crs")
     if crs is None:
         return
@@ -114,7 +128,7 @@ def _reject_non_wgs84_crs(document: dict[str, Any], path: Path) -> None:
         )
 
 
-def _single_feature(document: dict[str, Any], path: Path) -> dict[str, Any]:
+def _single_feature(document: dict[str, Any], path: object) -> dict[str, Any]:
     document_type = document.get("type")
     if document_type == "FeatureCollection":
         features = document.get("features")
@@ -131,7 +145,7 @@ def _single_feature(document: dict[str, Any], path: Path) -> dict[str, Any]:
     return feature
 
 
-def _validated_name(feature: dict[str, Any], path: Path) -> str:
+def _validated_name(feature: dict[str, Any], path: object) -> str:
     properties = feature.get("properties")
     name = properties.get("name") if isinstance(properties, dict) else None
     if not isinstance(name, str) or not name.strip():
@@ -139,7 +153,7 @@ def _validated_name(feature: dict[str, Any], path: Path) -> str:
     return name.strip()
 
 
-def _validated_geometry(feature: dict[str, Any], path: Path) -> MultiPolygon:
+def _validated_geometry(feature: dict[str, Any], path: object) -> MultiPolygon:
     raw_geometry = feature.get("geometry")
     if not isinstance(raw_geometry, dict):
         raise AoiConfigError(f"AOI feature is missing a geometry: {path}")
