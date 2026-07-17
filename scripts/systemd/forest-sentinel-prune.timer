@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply the Open Forest Sentinel COG retention policy on a schedule
+
+[Timer]
+# Daily at 02:30 UTC, before the 03:00 pipeline run, so the day's disk headroom
+# is reclaimed first. Pruning is safe alongside a running pipeline: only files
+# older than the active window (plus margin) are ever deleted.
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

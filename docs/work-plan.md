@@ -159,6 +159,10 @@ Assign and explain a confidence level for each detection (README §"Evidence Fus
 - Combine change magnitude, persistence across observations, optical / radar agreement, quality conditions, currency, and contextual proximity into a transparent score.
 - Persist a `confidence_assessment` explaining why an event received its level.
 - Detection thresholds and the scoring rule: **TBD** in beads.
+- **Retention constraint:** raster-derived inputs (change magnitude, persistence) must be
+  computed in Earth Engine at candidate-extraction time and persisted per candidate (e.g.
+  mean/max ΔNBR) — not read from historical COGs, which the retention policy (#80) treats as
+  droppable. See `docs/architecture.md` §7.
 
 **Acceptance:** every `disturbance_event` carries a `confidence_assessment` that records the inputs and reasoning behind its level.
 
@@ -169,6 +173,9 @@ Add Sentinel-1 SAR as the cloud-resilient complementary source (README §"Cloud-
 - Compute GRD backscatter / intensity change as `radar_change_raster`s.
 - Feed radar-confirmed and radar-only `disturbance_candidate`s into the existing event model without changing it.
 - SLC-based coherence methods are explicitly out of scope for now.
+- **Retention constraint:** as with E15, any radar statistics needed downstream must be
+  persisted per candidate at extraction time; `radar_change_raster` COGs stay droppable under
+  the retention policy (#80). See `docs/architecture.md` §7.
 
 **Acceptance:** for a configured AOI, the pipeline produces radar change products and radar-derived candidates that flow into the same `disturbance_event` tracking as optical candidates.
 
@@ -300,7 +307,11 @@ These are points the README does not resolve. They should be answered inside the
 
 - Concrete table schema for `manual_review` (Slice 3).
 - Authentication / access model for the review workflows (Slice 3; the Slice 2 dashboard shipped read-only and unauthenticated).
-- Retention policy for COGs and observations.
+- Retention policy for COGs and observations — partially resolved: tracked as the
+  automated-retention bead (#80, epic E19); the design constraints (COGs are outputs never
+  inputs; never prune inside `WINDOW_DAYS` + a baseline margin; keep the database rows as the
+  reproduction recipe; raster-derived statistics must be persisted at extraction time) are
+  recorded in `docs/architecture.md` §7.
 
 **Resolved:**
 

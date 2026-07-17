@@ -353,6 +353,22 @@ not the whole AOI. The features come back as WGS 84 GeoJSON and are persisted as
 minimum area is enforced both server-side (the EE `Filter`) and client-side as a guard. The
 `reduceToVectors` scale is a documented cost lever.
 
+**Forest masking** (#82, `forest_sentinel.forestmask`): the configured forest mask is applied to
+the delta **at candidate thresholding only** — non-forest pixels cannot cross the threshold, so
+crop harvests, grassland senescence, and wetland drawdown never reach the candidate table, and
+`reduceToVectors` runs over a much sparser mask. The exported index/change rasters deliberately
+stay **unmasked**: they remain full-context evidence for review, and masking is a candidate-
+extraction decision that can be revisited without re-exporting imagery. The default source is the
+**Hansen Global Forest Change** composite (`UMD/hansen/global_forest_change_2023_v1_11`, pinned;
+30 m — native HLS scale): forest = `treecover2000 >= 30%` minus every pixel with a recorded
+`lossyear` (already-cleared pixels must not count as forest). ESA WorldCover's tree-cover class
+(`ESA/WorldCover/v200`, class 10) is the class-based alternative, and `none` disables masking for
+non-forest use cases. Source, asset, and canopy threshold are configured per instance
+(`FOREST_SENTINEL_FOREST_MASK*`, `config/instance.env`) and recorded in
+`methodology_version.parameters` under `forest_mask` — they are methodology inputs, so changing
+them mints a new methodology version. Mask-off records *no* `forest_mask` key, matching pre-#82
+methodology rows so existing lineages (and their artifacts) keep content-addressing identically.
+
 **`disturbance_candidate`** (migration `0007`): `id`, `change_raster_id` (FK, ON DELETE CASCADE),
 `methodology_version_id` (FK), `geometry` (PostGIS `POLYGON` SRID 4326), `detected_at` (the source
 observation's `acquired_at`), `area_m2`, `created_at`; indexed on `change_raster_id`. Re-runs
@@ -460,7 +476,31 @@ Earlier revisions listed detection thresholds, the tracking algorithm, the dashb
 and the concrete schemas as TBD; those are now resolved and recorded in §5.1–§5.10. The points
 that remain genuinely open, to be settled in implementation beads under the relevant epics:
 
-- Retention policy for COGs and observations (the VM disk is finite; see §4b).
+- Retention policy for COGs and observations (the VM disk is finite; see §4b). **COG
+  retention shipped** (#80, epic E19 #76): `COG_RETENTION_DAYS` in `config/instance.env`,
+  applied daily by the `forest-sentinel-prune` timer (`DEPLOYMENT.md` §8); retention for
+  database rows (observations and downstream) remains open. Constraints the implementation
+  respects — settled by how the pipeline already works, recorded here so the code and the
+  methodology writeup stay consistent:
+  - **Exported COGs are outputs, never inputs.** Baselines, deltas, and candidates are always
+    (re)computed in Earth Engine from the source HLS scenes via the recorded
+    `observation.source_scene_id`; no pipeline stage reads a local COG back. Conclusions
+    (observations, quality masks, candidates, events, and their provenance rows) are
+    **database-resident**, and the source imagery is re-derivable from the collection ids and
+    EE script version pinned in `methodology_version.parameters` — so pruning COGs does not
+    endanger the reproducibility of conclusions.
+  - **Never prune inside the scheduler's active window** (`WINDOW_DAYS`, plus a margin covering
+    the trailing baseline). The reuse check (#77) treats a missing COG as "re-export": an early
+    prune silently re-spends Earth Engine quota, and for a **non-frozen** change raster the
+    re-export recomputes the baseline against the priors indexed *now* and rewrites its
+    `change_raster_source` provenance. Beyond the window, prune files freely — but keep the
+    database rows: they are the reproduction recipe (frozen rasters are never recomputed, so a
+    pruned frozen COG is only a dangling `cog_path`, which nothing serves today).
+  - **Features that need raster values must persist them at extraction time.** The E15
+    confidence model's change-magnitude / persistence inputs (and their E16 radar equivalents)
+    must be computed in EE when candidates are extracted and stored per candidate (e.g. mean/max
+    ΔNBR) — not read later from historical COGs, which would silently make COG retention
+    load-bearing.
 - The confidence scoring rule and `confidence_assessment` schema (E15, Slice 4).
 - The manual-review workflow, its schema, and the authentication / access model for review
   (and any future non-read-only dashboard surface) (E8, Slice 3).

@@ -36,6 +36,25 @@
       .run-status-succeeded { color: #27ae60; }
       .run-status-partial { color: #e67e22; }
       .run-status-failed, .run-status-interrupted { color: #c0392b; }
+      .methodology {
+        margin: 8px 0; padding: 4px 8px; font-size: 12px; color: #555;
+        border-left: 3px solid #ccc; background: #f6f6f6; border-radius: 0 4px 4px 0;
+      }
+      .methodology summary { cursor: pointer; }
+      .methodology .param { margin: 2px 0 2px 14px; overflow-wrap: anywhere; }
+      .run-progress { margin: 10px 0 6px; font-variant-numeric: tabular-nums; }
+      .run-progress-label { margin-bottom: 4px; }
+      .progress-track { height: 6px; background: #e4e4e4; border-radius: 3px; overflow: hidden; }
+      .progress-fill { height: 100%; background: #2980b9; transition: width 0.5s; }
+      .run-progress-counters { font-size: 12px; margin-top: 4px; }
+      .run-events { margin-top: 8px; border-top: 1px solid #eee; padding-top: 4px; }
+      /* Hanging indent: a wrapped event reads as one entry, not garbled lines. */
+      .run-event {
+        font-size: 12px; color: #555; margin: 4px 0; padding-left: 14px; text-indent: -14px;
+        font-variant-numeric: tabular-nums;
+      }
+      .run-event-failed { color: #c0392b; }
+      .run-event-warning { color: #e67e22; }
     </style>
   </head>
   <body>
@@ -71,16 +90,22 @@
 
       let eventsLayer = null;
       const layersById = {};
+      const aoiBboxById = {};
       let currentAoiId = null;
       // A "running" run whose last progress event is older than this is likely dead
       // (SIGKILL / systemd timeout before the next run flips it to "interrupted").
       const STALE_RUN_MS = 2 * 60 * 60 * 1000;
+      // Runs-panel render state: skip identical re-renders across polls, and
+      // remember the methodology toggle (per run id) across the ones that happen.
+      let runsRenderKey = null;
+      const methodologyOpen = {};
 
       async function loadAois() {
         const aois = await (await fetch("/api/aois")).json();
         const select = document.getElementById("aoi-select");
         select.innerHTML = "";
         aois.forEach((aoi) => {
+          aoiBboxById[aoi.id] = aoi.bbox;
           const option = document.createElement("option");
           option.value = aoi.id;
           option.textContent = `${aoi.name} (${aoi.event_count} events)`;
@@ -89,8 +114,23 @@
         if (aois.length) loadEvents(aois[0].id);
       }
 
+      // Zoom to the selected AOI: [min_lon, min_lat, max_lon, max_lat] → Leaflet's
+      // [[south, west], [north, east]].
+      function zoomToAoi(aoiId) {
+        const bbox = aoiBboxById[aoiId];
+        if (!bbox) return;
+        map.fitBounds(
+          [
+            [bbox[1], bbox[0]],
+            [bbox[3], bbox[2]],
+          ],
+          { maxZoom: 12 },
+        );
+      }
+
       async function loadEvents(aoiId) {
         currentAoiId = aoiId;
+        zoomToAoi(aoiId);
         loadRuns(aoiId);
         const collection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
         if (eventsLayer) map.removeLayer(eventsLayer);
@@ -111,7 +151,8 @@
         const features = collection.features;
         document.getElementById("summary").textContent = `${features.length} disturbance events`;
         renderEventList(features);
-        if (features.length) map.fitBounds(eventsLayer.getBounds(), { maxZoom: 12 });
+        // The map frames the whole AOI (zoomToAoi above); clicking an event in
+        // the list or on the map still zooms to that event.
       }
 
       function runStatusLabel(run) {
@@ -127,28 +168,127 @@
 
       function describeEvent(ev) {
         const where =
-          ev.batch_index != null ? `${ev.stage} batch ${ev.batch_index}/${ev.batch_total}` : ev.stage;
+          ev.batch_index != null ? `${ev.stage} ${ev.batch_index}/${ev.batch_total}` : ev.stage;
         let what = ev.outcome === "info" ? ev.message : ev.outcome;
         if (ev.outcome === "submitted") {
           what = `${ev.exports} export${ev.exports === 1 ? "" : "s"} submitted, waiting on Earth Engine`;
+        } else if (ev.outcome === "succeeded" && ev.message) {
+          // "N exported, M reused, K candidates" is self-describing.
+          what = ev.message;
         } else if (ev.outcome !== "info" && ev.message) {
           what = `${ev.outcome} — ${ev.message}`;
         }
-        return `${fmtDateTime(ev.occurred_at)} · ${where}: ${what}`;
+        return `${where} · ${what}`;
+      }
+
+      // One entry per batch: a batch's terminal event (succeeded/failed) replaces
+      // its "submitted" line in place, so the tail reads one line per batch
+      // instead of a submitted/succeeded pair. Non-batch events keep their own line.
+      function collapseEvents(events) {
+        const entries = [];
+        const slotByBatch = {};
+        events.forEach((ev) => {
+          const key = ev.batch_index != null ? `${ev.stage}:${ev.batch_index}` : null;
+          if (key != null && key in slotByBatch) {
+            entries[slotByBatch[key]] = ev;
+            return;
+          }
+          if (key != null) slotByBatch[key] = entries.length;
+          entries.push(ev);
+        });
+        return entries;
+      }
+
+      function eventLine(ev) {
+        const line = document.createElement("div");
+        line.className = "run-event";
+        if (ev.outcome === "failed") line.classList.add("run-event-failed");
+        if (ev.outcome === "warning") line.classList.add("run-event-warning");
+        const when = document.createElement("span");
+        when.className = "muted";
+        // Time only: the card header already carries the date, and the tail
+        // spans minutes, not days.
+        when.textContent = `${fmtTime(ev.occurred_at)} `;
+        line.appendChild(when);
+        line.appendChild(document.createTextNode(describeEvent(ev)));
+        return line;
+      }
+
+      // The run's non-data inputs: methodology identity, expandable to the full
+      // parameter set (threshold, min area, baseline window, EE script version…).
+      function methodologySection(runId, m) {
+        const meth = document.createElement("details");
+        meth.className = "methodology";
+        meth.open = methodologyOpen[runId] === true;
+        meth.addEventListener("toggle", () => {
+          methodologyOpen[runId] = meth.open;
+        });
+        const summary = document.createElement("summary");
+        summary.textContent = `methodology ${m.name} @ ${m.version}`;
+        meth.appendChild(summary);
+        Object.entries(m.parameters || {}).forEach(([key, value]) => {
+          const line = document.createElement("div");
+          line.className = "param";
+          line.textContent = `${key}: ${JSON.stringify(value)}`;
+          meth.appendChild(line);
+        });
+        return meth;
+      }
+
+      function progressSection(progress) {
+        const wrap = document.createElement("div");
+        wrap.className = "run-progress";
+        const pct = progress.batch_total
+          ? Math.round((100 * progress.batch_index) / progress.batch_total)
+          : 0;
+        const label = document.createElement("div");
+        label.className = "run-progress-label";
+        const stage = document.createElement("strong");
+        stage.textContent = `${progress.stage} exports`;
+        label.appendChild(stage);
+        label.appendChild(
+          document.createTextNode(
+            ` — batch ${progress.batch_index} of ${progress.batch_total} (${pct}%)`,
+          ),
+        );
+        const track = document.createElement("div");
+        track.className = "progress-track";
+        const fill = document.createElement("div");
+        fill.className = "progress-fill";
+        fill.style.width = `${pct}%`;
+        track.appendChild(fill);
+        const counters = document.createElement("div");
+        counters.className = "run-progress-counters muted";
+        counters.textContent =
+          `${progress.exports_completed} raster export${progress.exports_completed === 1 ? "" : "s"} completed` +
+          (progress.batches_failed
+            ? ` · ${progress.batches_failed} batch${progress.batches_failed === 1 ? "" : "es"} failed`
+            : "");
+        wrap.append(label, track, counters);
+        return wrap;
       }
 
       async function loadRuns(aoiId) {
         const runs = await (await fetch(`/api/aois/${aoiId}/runs`)).json();
+        if (aoiId !== currentAoiId) return; // a newer AOI selection won the race
+        // Nothing changed since the last poll → leave the DOM alone. This keeps
+        // the methodology toggle open, kills the 15 s rebuild flicker, and skips
+        // the detail fetch. The stale flag is part of the key so a run crossing
+        // the staleness threshold still re-renders.
+        const renderKey =
+          `${aoiId}:${runs.length ? runStatusLabel(runs[0]) : ""}:${JSON.stringify(runs)}`;
+        if (renderKey === runsRenderKey) return;
         const container = document.getElementById("runs");
-        container.innerHTML = "";
         if (!runs.length) {
           // Runs are recorded from the first pipeline run after this feature
           // landed; an explicit empty state beats a silently missing panel.
+          container.innerHTML = "";
           const empty = document.createElement("div");
           empty.className = "run muted";
           empty.textContent =
             "No pipeline runs recorded yet — the next run (daily at 03:00 UTC, or started manually) will appear here live.";
           container.appendChild(empty);
+          runsRenderKey = renderKey;
           return;
         }
 
@@ -160,33 +300,21 @@
           `<span class="run-status-${latest.status}">${runStatusLabel(latest)}</span>` +
           `<div class="muted">started ${fmtDateTime(latest.started_at)} · ` +
           `window ${fmtDate(latest.since)} → ${fmtDate(latest.until)}</div>`;
-        // The run's non-data inputs: methodology identity, expandable to the full
-        // parameter set (threshold, min area, baseline window, EE script version…).
         const detail = await (await fetch(`/api/runs/${latest.id}`)).json();
-        if (detail.methodology) {
-          const m = detail.methodology;
-          const meth = document.createElement("details");
-          meth.className = "run-line";
-          const summary = document.createElement("summary");
-          summary.textContent = `methodology ${m.name} @ ${m.version}`;
-          meth.appendChild(summary);
-          Object.entries(m.parameters || {}).forEach(([key, value]) => {
-            const line = document.createElement("div");
-            line.className = "run-line muted";
-            line.textContent = `${key}: ${JSON.stringify(value)}`;
-            meth.appendChild(line);
-          });
-          card.appendChild(meth);
-        }
-        // The live tail: for a running run show its recent batch events so the
-        // long Earth Engine queue waits are visible from the browser.
+        if (aoiId !== currentAoiId) return;
+        if (detail.methodology) card.appendChild(methodologySection(latest.id, detail.methodology));
+        // The live view of a running run: overall position from the whole-run
+        // progress aggregate, then the recent activity tail — the long Earth
+        // Engine queue waits stay visible from the browser.
         if (latest.status === "running") {
-          detail.events.slice(-5).forEach((ev) => {
-            const line = document.createElement("div");
-            line.className = "run-line";
-            line.textContent = describeEvent(ev);
-            card.appendChild(line);
-          });
+          if (detail.progress) card.appendChild(progressSection(detail.progress));
+          const tail = collapseEvents(detail.events).slice(-4);
+          if (tail.length) {
+            const eventsBox = document.createElement("div");
+            eventsBox.className = "run-events";
+            tail.forEach((ev) => eventsBox.appendChild(eventLine(ev)));
+            card.appendChild(eventsBox);
+          }
         } else if (latest.summary) {
           const s = latest.summary;
           const line = document.createElement("div");
@@ -197,6 +325,9 @@
             `${s.export_failures} export failures`;
           card.appendChild(line);
         }
+        // Clear only now that the card is fully built: no blank flash while the
+        // detail fetch is in flight.
+        container.innerHTML = "";
         container.appendChild(card);
 
         runs.slice(1, 5).forEach((run) => {
@@ -207,6 +338,7 @@
             `<span class="run-status-${run.status}">${runStatusLabel(run)}</span>`;
           container.appendChild(line);
         });
+        runsRenderKey = renderKey;
       }
 
       function renderEventList(features) {
@@ -264,6 +396,9 @@
       }
       function fmtDateTime(iso) {
         return iso ? iso.slice(0, 16).replace("T", " ") : "—";
+      }
+      function fmtTime(iso) {
+        return iso ? iso.slice(11, 16) : "—";
       }
       function fmtArea(m2) {
         return m2 == null ? "—" : `${(m2 / 10000).toFixed(2)} ha`;

@@ -101,14 +101,21 @@ def create_app() -> FastAPI:
     def list_aois(session: SessionDep) -> list[dict[str, Any]]:
         """AOIs with summary metrics (event counts)."""
         rows = session.execute(
-            select(Aoi.id, Aoi.name, func.count(DisturbanceEvent.id))
+            select(Aoi.id, Aoi.name, Aoi.geometry, func.count(DisturbanceEvent.id))
             .outerjoin(DisturbanceEvent, DisturbanceEvent.aoi_id == Aoi.id)
-            .group_by(Aoi.id, Aoi.name)
+            .group_by(Aoi.id)
             .order_by(Aoi.name)
         ).all()
         return [
-            {"id": aoi_id, "name": name, "event_count": event_count}
-            for aoi_id, name, event_count in rows
+            {
+                "id": aoi_id,
+                "name": name,
+                "event_count": event_count,
+                # [min_lon, min_lat, max_lon, max_lat] — enough for the map to
+                # zoom to the AOI without shipping its full boundary.
+                "bbox": list(to_shape(geometry).bounds),
+            }
+            for aoi_id, name, geometry, event_count in rows
         ]
 
     @app.post("/api/aois", status_code=201)
@@ -290,6 +297,7 @@ def create_app() -> FastAPI:
         detail = {**_run_summary(run, last_event_at, methodology)}
         if methodology is not None:
             detail["methodology"]["parameters"] = methodology.parameters
+        detail["progress"] = _run_progress(session, run_id)
         detail["events"] = _run_events(session, run_id)
         return detail
 
@@ -376,6 +384,41 @@ def _run_summary(
             if methodology is not None
             else None
         ),
+    }
+
+
+def _run_progress(session: Session, run_id: int) -> dict[str, Any] | None:
+    """The run's current batch position plus whole-run counters.
+
+    The events tail is capped at ``RUN_EVENTS_LIMIT``, so for a long run the
+    client cannot reconstruct totals by summing what it sees; these counters
+    aggregate over *all* of the run's events. ``None`` until the run records
+    its first batch event (discovery / stage-preamble events carry no batch).
+    """
+    latest_batch = session.execute(
+        select(PipelineRunEvent)
+        .where(PipelineRunEvent.run_id == run_id)
+        .where(PipelineRunEvent.batch_index.is_not(None))
+        .order_by(PipelineRunEvent.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest_batch is None:
+        return None
+    exports_completed, batches_failed = session.execute(
+        select(
+            func.coalesce(
+                func.sum(PipelineRunEvent.exports).filter(PipelineRunEvent.outcome == "succeeded"),
+                0,
+            ),
+            func.count().filter(PipelineRunEvent.outcome == "failed"),
+        ).where(PipelineRunEvent.run_id == run_id)
+    ).one()
+    return {
+        "stage": latest_batch.stage,
+        "batch_index": latest_batch.batch_index,
+        "batch_total": latest_batch.batch_total,
+        "exports_completed": exports_completed,
+        "batches_failed": batches_failed,
     }
 
 

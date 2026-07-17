@@ -15,7 +15,7 @@ from shapely.geometry import shape
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from forest_sentinel import earthengine, indices
+from forest_sentinel import earthengine, forestmask, indices
 from forest_sentinel.models import (
     AOI_SRID,
     ChangeRaster,
@@ -59,15 +59,19 @@ def extract_candidates_for_change_raster(
     scale: int = indices.DEFAULT_SCALE_METERS,
     threshold: float | None = None,
     min_area_m2: float | None = None,
+    forest_mask: dict[str, Any] | None = None,
     ee_module: Any = earthengine,
 ) -> list[DisturbanceCandidate]:
     """Extract and persist candidate polygons from one change raster's ΔNBR image.
 
-    Re-runs replace the candidate set for this change raster so the rows reflect the
-    latest parameters — but only while none of it has been tracked into events. Once a
-    candidate is referenced by an ``event_observation`` it is part of event history:
-    the set is frozen and returned as-is (deleting it would violate the
-    ``event_observation`` FK and silently invalidate event footprints).
+    The methodology's forest mask (#82) is applied to the delta before
+    thresholding, so only forested pixels can produce candidates; the exported
+    rasters themselves stay unmasked. Re-runs replace the candidate set for this
+    change raster so the rows reflect the latest parameters — but only while none
+    of it has been tracked into events. Once a candidate is referenced by an
+    ``event_observation`` it is part of event history: the set is frozen and
+    returned as-is (deleting it would violate the ``event_observation`` FK and
+    silently invalidate event footprints).
     """
     # Frozen: this raster's candidates are already event history; skip re-extraction.
     if change_raster_is_frozen(session, change_raster.id):
@@ -83,6 +87,14 @@ def extract_candidates_for_change_raster(
     if observation is None:
         raise ValueError(f"change_raster {change_raster.id} has no source observation")
     detected_at = observation.acquired_at
+
+    # Detection-time forest masking (#82): non-forest pixels cannot cross the
+    # threshold, so crop/grassland change never reaches the candidate table.
+    mask = forestmask.build_mask(
+        forestmask.resolve_config(methodology, forest_mask), ee_module=ee_module
+    )
+    if mask is not None:
+        delta_image = ee_module.update_mask(delta_image, mask)
 
     features = ee_module.threshold_and_vectorize(
         delta_image,
