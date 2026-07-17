@@ -152,11 +152,12 @@ administrative boundaries**, for three reasons:
 
 - **Cost scales with polygon area, not forest area** — non-forest pixels pay
   full price in EE compute, exports, and disk.
-- **There is no forest mask yet** (context layers are Slice 6), so ΔNBR flags
-  *any* vegetation loss: crop harvests, grassland senescence, wetland
-  drawdown. A polygon with a large agricultural share fills the events table
-  and dashboard with non-forest noise, and the manual-review workflow
-  (Slice 3) isn't built yet.
+- **Candidates are forest-masked (#82), but exports are not.** Detection
+  thresholds only fire on pixels the configured forest layer (Hansen tree
+  cover by default; `FOREST_SENTINEL_FOREST_MASK*` in `config/instance.env`)
+  marks as forest, so a loose polygon with a large agricultural share no
+  longer floods the events table and dashboard with harvest-cycle noise —
+  but its non-forest pixels still pay full price in exports and disk.
 - **Vertex count matters in EE.** Full-resolution coastlines/admin boundaries
   ship thousands of vertices into every `filterBounds`, export region, and
   `reduceToVectors` call. If you start from admin shapes, simplify

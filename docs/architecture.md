@@ -353,6 +353,22 @@ not the whole AOI. The features come back as WGS 84 GeoJSON and are persisted as
 minimum area is enforced both server-side (the EE `Filter`) and client-side as a guard. The
 `reduceToVectors` scale is a documented cost lever.
 
+**Forest masking** (#82, `forest_sentinel.forestmask`): the configured forest mask is applied to
+the delta **at candidate thresholding only** — non-forest pixels cannot cross the threshold, so
+crop harvests, grassland senescence, and wetland drawdown never reach the candidate table, and
+`reduceToVectors` runs over a much sparser mask. The exported index/change rasters deliberately
+stay **unmasked**: they remain full-context evidence for review, and masking is a candidate-
+extraction decision that can be revisited without re-exporting imagery. The default source is the
+**Hansen Global Forest Change** composite (`UMD/hansen/global_forest_change_2023_v1_11`, pinned;
+30 m — native HLS scale): forest = `treecover2000 >= 30%` minus every pixel with a recorded
+`lossyear` (already-cleared pixels must not count as forest). ESA WorldCover's tree-cover class
+(`ESA/WorldCover/v200`, class 10) is the class-based alternative, and `none` disables masking for
+non-forest use cases. Source, asset, and canopy threshold are configured per instance
+(`FOREST_SENTINEL_FOREST_MASK*`, `config/instance.env`) and recorded in
+`methodology_version.parameters` under `forest_mask` — they are methodology inputs, so changing
+them mints a new methodology version. Mask-off records *no* `forest_mask` key, matching pre-#82
+methodology rows so existing lineages (and their artifacts) keep content-addressing identically.
+
 **`disturbance_candidate`** (migration `0007`): `id`, `change_raster_id` (FK, ON DELETE CASCADE),
 `methodology_version_id` (FK), `geometry` (PostGIS `POLYGON` SRID 4326), `detected_at` (the source
 observation's `acquired_at`), `area_m2`, `created_at`; indexed on `change_raster_id`. Re-runs

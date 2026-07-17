@@ -20,7 +20,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from forest_sentinel import earthengine, indices, pipeline, qa, retention, storage
+from forest_sentinel import earthengine, forestmask, indices, pipeline, qa, retention, storage
 from forest_sentinel.aoi import (
     AOIS_DIR_ENV_VAR,
     DEFAULT_AOIS_DIR,
@@ -343,6 +343,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     # even when the CLI flags are omitted.
     threshold = args.threshold if args.threshold is not None else DEFAULT_DELTA_NBR_THRESHOLD
     min_area = args.min_area if args.min_area is not None else DEFAULT_MIN_AREA_M2
+    try:
+        forest_mask_config = forestmask.config_from_env()
+    except forestmask.ForestMaskConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     parameters = {
         "ee_script_version": EE_SCRIPT_VERSION,
         "collections": sorted(HLS_COLLECTIONS),
@@ -350,9 +355,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         "delta_nbr_threshold": threshold,
         "min_area_m2": min_area,
         # Everything that shapes the output belongs in the provenance record: the
-        # export / reduceToVectors scale and the Fmask categories masked out.
+        # export / reduceToVectors scale, the Fmask categories masked out, and the
+        # forest mask candidates were restricted to (#82).
         "scale_m": indices.DEFAULT_SCALE_METERS,
         "masked_categories": list(qa.MASK_CATEGORIES),
+        **forestmask.parameters_entry(forest_mask_config),
     }
 
     with _disposing_engine() as engine:

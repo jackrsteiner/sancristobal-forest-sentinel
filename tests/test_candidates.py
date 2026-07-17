@@ -108,13 +108,15 @@ def test_extracts_candidates_with_provenance(db_session: Session) -> None:
         geometry = to_shape(row.geometry)
         assert geometry.geom_type == "Polygon"
         assert geometry.is_valid
-    # The EE call used the documented defaults, over the caller's region.
+    # The EE call used the documented defaults, over the caller's region, on the
+    # unmasked delta (no forest mask in this methodology).
     assert fake.calls == [
         {
             "threshold": DEFAULT_DELTA_NBR_THRESHOLD,
             "scale": 30,
             "min_area_m2": DEFAULT_MIN_AREA_M2,
             "region": _REGION,
+            "delta_image": "delta-ee-image",
         }
     ]
 
@@ -219,3 +221,82 @@ def test_tracked_candidates_are_frozen_on_rerun(db_session: Session) -> None:
     assert fake.calls == []  # frozen set: extraction short-circuits before EE
     assert [c.id for c in rerun] == [first[0].id]
     assert len(db_session.execute(select(DisturbanceCandidate)).scalars().all()) == 1
+
+
+def test_methodology_forest_mask_is_applied_to_the_delta(db_session: Session) -> None:
+    """A methodology with a forest mask (#82) thresholds the MASKED delta: only
+    forested pixels can produce candidates."""
+    mask_config = {
+        "source": "hansen",
+        "asset": "UMD/hansen/global_forest_change_2023_v1_11",
+        "canopy_threshold_pct": 30.0,
+    }
+    change, _, _ = _setup(db_session, parameters={"forest_mask": mask_config})
+    fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
+
+    candidates = extract_candidates_for_change_raster(
+        db_session,
+        change_raster=change,
+        delta_image="delta-ee-image",
+        region=_REGION,
+        ee_module=fake,
+    )
+
+    assert len(candidates) == 1
+    # The mask was built from the recorded methodology parameters...
+    assert fake.forest_mask_calls == [mask_config]
+    # ...applied to the delta...
+    assert fake.update_mask_calls == [("delta-ee-image", {"forest_mask": mask_config})]
+    # ...and the masked image is what was thresholded/vectorized.
+    assert fake.calls[0]["delta_image"] == {
+        "masked": "delta-ee-image",
+        "mask": {"forest_mask": mask_config},
+    }
+
+
+def test_worldcover_forest_mask_is_applied(db_session: Session) -> None:
+    mask_config = {"source": "worldcover", "asset": "ESA/WorldCover/v200", "tree_class": 10}
+    change, _, _ = _setup(db_session, parameters={"forest_mask": mask_config})
+    fake = FakeEarthEngine(features=[])
+
+    extract_candidates_for_change_raster(
+        db_session, change_raster=change, delta_image="img", region=_REGION, ee_module=fake
+    )
+
+    assert fake.forest_mask_calls == [mask_config]
+    assert len(fake.update_mask_calls) == 1
+
+
+def test_no_forest_mask_key_means_unmasked_extraction(db_session: Session) -> None:
+    """Methodologies minted before #82 (no forest_mask key) must extract exactly as
+    before: no mask built, the raw delta thresholded."""
+    change, _, _ = _setup(db_session)  # default parameters: no forest_mask key
+    fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
+
+    extract_candidates_for_change_raster(
+        db_session, change_raster=change, delta_image="raw-delta", region=_REGION, ee_module=fake
+    )
+
+    assert fake.forest_mask_calls == []
+    assert fake.update_mask_calls == []
+    assert fake.calls[0]["delta_image"] == "raw-delta"
+
+
+def test_explicit_forest_mask_override_wins(db_session: Session) -> None:
+    """An explicit override replaces the methodology's mask, mirroring the
+    threshold/min-area override semantics."""
+    stored = {"source": "worldcover", "asset": "ESA/WorldCover/v200", "tree_class": 10}
+    override = {"source": "hansen", "asset": "custom/asset", "canopy_threshold_pct": 50.0}
+    change, _, _ = _setup(db_session, parameters={"forest_mask": stored})
+    fake = FakeEarthEngine(features=[])
+
+    extract_candidates_for_change_raster(
+        db_session,
+        change_raster=change,
+        delta_image="img",
+        region=_REGION,
+        forest_mask=override,
+        ee_module=fake,
+    )
+
+    assert fake.forest_mask_calls == [override]
