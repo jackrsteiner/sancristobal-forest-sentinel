@@ -187,6 +187,67 @@ def test_run_detail_returns_events_in_order(client: TestClient, db_session: Sess
     assert all(event["batch_total"] == 3 for event in events)
 
 
+def test_run_detail_reports_whole_run_progress(client: TestClient, db_session: Session) -> None:
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    run = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
+    # A long run: far more events than the tail returns, so the counters must be
+    # aggregated server-side rather than summed from the visible tail.
+    for index in range(1, 61):
+        for outcome, message in (
+            ("submitted", None),
+            ("succeeded", "2 exported, 0 reused, 0 candidates"),
+        ):
+            db_session.add(
+                PipelineRunEvent(
+                    run_id=run.id,
+                    stage="change",
+                    batch_index=index,
+                    batch_total=301,
+                    exports=2,
+                    outcome=outcome,
+                    message=message,
+                )
+            )
+    db_session.add(
+        PipelineRunEvent(
+            run_id=run.id,
+            stage="change",
+            batch_index=61,
+            batch_total=301,
+            outcome="failed",
+            message="boom",
+        )
+    )
+    db_session.flush()
+
+    response = client.get(f"/api/runs/{run.id}")
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail["progress"] == {
+        "stage": "change",
+        "batch_index": 61,
+        "batch_total": 301,
+        "exports_completed": 120,
+        "batches_failed": 1,
+    }
+    assert len(detail["events"]) == 50  # the tail stays capped
+
+
+def test_run_detail_progress_is_null_before_first_batch(
+    client: TestClient, db_session: Session
+) -> None:
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    run = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
+    # Discovery / stage-preamble events carry no batch position.
+    db_session.add(
+        PipelineRunEvent(run_id=run.id, stage="discovery", outcome="info", message="3 discovered")
+    )
+    db_session.flush()
+
+    detail = client.get(f"/api/runs/{run.id}").json()
+    assert detail["progress"] is None
+
+
 def test_unknown_aoi_runs_is_404(client: TestClient) -> None:
     assert client.get("/api/aois/999999/runs").status_code == 404
 
