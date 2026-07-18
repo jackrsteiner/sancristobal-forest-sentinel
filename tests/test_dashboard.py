@@ -3,6 +3,7 @@ import sys
 from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -610,6 +611,7 @@ def test_record_review_requires_a_json_body(client: TestClient, db_session: Sess
 def test_vm_setup_disables_reviews_on_a_world_open_dashboard() -> None:
     setup = (Path(__file__).resolve().parents[1] / "scripts" / "vm_setup.sh").read_text()
     assert 'echo "FOREST_SENTINEL_REVIEWS=0"' in setup
+    assert 'echo "FOREST_SENTINEL_CONTEXT_UPLOADS=0"' in setup
 
 
 def test_capabilities_reflect_env_guards(
@@ -619,13 +621,16 @@ def test_capabilities_reflect_env_guards(
         "aoi_uploads": True,
         "pipeline_trigger": True,
         "reviews": True,
+        "context_uploads": True,
     }
     monkeypatch.setenv("FOREST_SENTINEL_REVIEWS", "0")
     monkeypatch.setenv("FOREST_SENTINEL_AOI_UPLOADS", "0")
+    monkeypatch.setenv("FOREST_SENTINEL_CONTEXT_UPLOADS", "0")
     assert client.get("/api/capabilities").json() == {
         "aoi_uploads": False,
         "pipeline_trigger": True,
         "reviews": False,
+        "context_uploads": False,
     }
 
 
@@ -753,3 +758,147 @@ def test_unassessed_events_read_null_confidence(client: TestClient, db_session: 
     detail = client.get(f"/api/events/{props['id']}").json()
     assert detail["confidence"] == []
     assert detail["basis"] is None
+
+
+_CONTEXT_POLY = {
+    "type": "Polygon",
+    "coordinates": [[[0.0, 0.0], [0.3, 0.0], [0.3, 0.3], [0.0, 0.3], [0.0, 0.0]]],
+}
+
+
+def _context_document(*geometries: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "geometry": g, "properties": {"name": f"feature-{i}"}}
+            for i, g in enumerate(geometries)
+        ],
+    }
+
+
+def test_context_layer_upload_list_and_features_round_trip(
+    client: TestClient,
+    db_session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#127: upload writes the harvest-convention file and replaces the DB layer."""
+    monkeypatch.setenv("FOREST_SENTINEL_CONTEXT_DIR", str(tmp_path / "context"))
+
+    response = client.post(
+        "/api/context/layers",
+        json={
+            "name": "Acme Palm",
+            "kind": "concession",
+            "document": _context_document(_CONTEXT_POLY),
+        },
+    )
+    assert response.status_code == 201
+    body = response.json()
+    # The sanitized name is both the stored name and the harvest filename, so
+    # the next pipeline harvest replaces this same layer.
+    assert body["name"] == "acme-palm"
+    assert body["feature_count"] == 1
+    assert body["file"].endswith("concession--acme-palm.geojson")
+    assert Path(body["file"]).is_file()
+
+    layers = client.get("/api/context/layers").json()
+    assert layers == [
+        {"id": body["id"], "name": "acme-palm", "kind": "concession", "feature_count": 1}
+    ]
+    collection = client.get(f"/api/context/layers/{body['id']}/features").json()
+    assert collection["type"] == "FeatureCollection"
+    (feature,) = collection["features"]
+    assert feature["geometry"]["type"] == "Polygon"
+    assert feature["properties"]["kind"] == "concession"
+    assert feature["properties"]["name"] == "feature-0"
+
+    # Re-uploading the same name replaces the features (no 409: layers are
+    # reference data, not provenance).
+    line = {"type": "LineString", "coordinates": [[0.0, 0.0], [0.1, 0.1]]}
+    again = client.post(
+        "/api/context/layers",
+        json={
+            "name": "Acme Palm",
+            "kind": "concession",
+            "document": _context_document(_CONTEXT_POLY, line),
+        },
+    )
+    assert again.status_code == 201
+    assert again.json()["id"] == body["id"]
+    assert client.get("/api/context/layers").json()[0]["feature_count"] == 2
+
+
+def test_context_layer_upload_rejects_bad_payloads(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_CONTEXT_DIR", str(tmp_path / "context"))
+    document = _context_document(_CONTEXT_POLY)
+    assert (
+        client.post(
+            "/api/context/layers", json={"name": "x", "kind": "volcano", "document": document}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            "/api/context/layers", json={"name": "  ", "kind": "road", "document": document}
+        ).status_code
+        == 422
+    )
+    bad = client.post(
+        "/api/context/layers", json={"name": "x", "kind": "road", "document": {"type": "nope"}}
+    )
+    assert bad.status_code == 400
+    assert not (tmp_path / "context").exists() or not list((tmp_path / "context").iterdir())
+
+
+def test_context_layer_upload_disabled_by_env_guard(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_CONTEXT_UPLOADS", "0")
+    response = client.post(
+        "/api/context/layers",
+        json={"name": "x", "kind": "road", "document": _context_document(_CONTEXT_POLY)},
+    )
+    assert response.status_code == 403
+
+
+def test_unknown_context_layer_features_return_404(client: TestClient, db_session: Session) -> None:
+    assert client.get("/api/context/layers/999/features").status_code == 404
+
+
+def test_event_detail_lists_context_relations(client: TestClient, db_session: Session) -> None:
+    """The Slice 6 hallway test's API half: relations readable per event."""
+    from forest_sentinel.context import (
+        compute_event_context,
+        load_context_document,
+        replace_layer,
+    )
+
+    aoi = _seed_event(db_session)
+    replace_layer(
+        db_session,
+        name="acme",
+        kind="concession",
+        document=load_context_document(_context_document(_CONTEXT_POLY)),
+    )
+    river = {"type": "LineString", "coordinates": [[0.32, 0.0], [0.32, 0.3]]}
+    replace_layer(
+        db_session,
+        name="big-river",
+        kind="river",
+        document=load_context_document(_context_document(river)),
+    )
+    compute_event_context(db_session, aoi=aoi)
+    db_session.flush()
+
+    event_id = client.get(f"/api/aois/{aoi.id}/events").json()["features"][0]["properties"]["id"]
+    detail = client.get(f"/api/events/{event_id}").json()
+    relations = {(rel["relation"], rel["kind"]) for rel in detail["context"]}
+    assert relations == {("contains", "concession"), ("nearby", "river")}
+    by_relation = {rel["relation"]: rel for rel in detail["context"]}
+    assert by_relation["contains"]["layer"] == "acme"
+    assert by_relation["contains"]["name"] == "feature-0"
+    assert by_relation["contains"]["distance_m"] is None
+    assert by_relation["nearby"]["distance_m"] > 0

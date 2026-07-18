@@ -35,15 +35,26 @@ from forest_sentinel.aoi import (
     load_aoi_config_document,
     persist_aoi,
 )
+from forest_sentinel.context import (
+    CONTEXT_DIR_ENV_VAR,
+    DEFAULT_CONTEXT_DIR,
+    ContextConfigError,
+    load_context_document,
+    replace_layer,
+)
 from forest_sentinel.db import get_engine
 from forest_sentinel.events import footprint_area_m2
 from forest_sentinel.models import (
+    CONTEXT_KINDS,
     REVIEW_OPINIONS,
     Aoi,
     ChangeRaster,
     ConfidenceAssessment,
+    ContextFeature,
+    ContextLayer,
     DisturbanceCandidate,
     DisturbanceEvent,
+    EventContext,
     EventObservation,
     ManualReview,
     MethodologyVersion,
@@ -69,6 +80,10 @@ PIPELINE_TRIGGER_ENV_VAR = "FOREST_SENTINEL_PIPELINE_TRIGGER"
 # the dashboard port is opened to the world — tunnel-as-auth means whoever can
 # reach the dashboard can review, which must not include the open internet).
 REVIEWS_ENV_VAR = "FOREST_SENTINEL_REVIEWS"
+
+# Set to "0" to disable context-layer uploads (vm_setup.sh does this when the
+# dashboard port is opened to the world, same as AOI uploads).
+CONTEXT_UPLOADS_ENV_VAR = "FOREST_SENTINEL_CONTEXT_UPLOADS"
 # The same systemd unit the daily timer fires; --no-block returns immediately
 # and systemd merges a start into an already-running job, so repeated clicks
 # are harmless (the per-AOI advisory lock backstops everything else). The `ofs`
@@ -124,6 +139,7 @@ def create_app() -> FastAPI:
             "aoi_uploads": os.environ.get(AOI_UPLOADS_ENV_VAR, "1") != "0",
             "pipeline_trigger": os.environ.get(PIPELINE_TRIGGER_ENV_VAR, "1") != "0",
             "reviews": os.environ.get(REVIEWS_ENV_VAR, "1") != "0",
+            "context_uploads": os.environ.get(CONTEXT_UPLOADS_ENV_VAR, "1") != "0",
         }
 
     @app.get("/api/aois")
@@ -417,6 +433,104 @@ def create_app() -> FastAPI:
             for methodology, run_count, last_run_at in rows
         ]
 
+    @app.get("/api/context/layers")
+    def list_context_layers(session: SessionDep) -> list[dict[str, Any]]:
+        """The context-layer registry with feature counts (E17)."""
+        rows = session.execute(
+            select(
+                ContextLayer.id,
+                ContextLayer.name,
+                ContextLayer.kind,
+                func.count(ContextFeature.id),
+            )
+            .outerjoin(ContextFeature, ContextFeature.context_layer_id == ContextLayer.id)
+            .group_by(ContextLayer.id)
+            .order_by(ContextLayer.kind, ContextLayer.name)
+        ).all()
+        return [
+            {"id": layer_id, "name": name, "kind": kind, "feature_count": feature_count}
+            for layer_id, name, kind, feature_count in rows
+        ]
+
+    @app.get("/api/context/layers/{layer_id}/features")
+    def context_layer_features(layer_id: int, session: SessionDep) -> dict[str, Any]:
+        """One layer's features as a GeoJSON FeatureCollection (map overlay)."""
+        layer = session.get(ContextLayer, layer_id)
+        if layer is None:
+            raise HTTPException(status_code=404, detail=f"context layer {layer_id} not found")
+        features = (
+            session.execute(
+                select(ContextFeature)
+                .where(ContextFeature.context_layer_id == layer_id)
+                .order_by(ContextFeature.id)
+            )
+            .scalars()
+            .all()
+        )
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": mapping(to_shape(feature.geometry)),
+                    "properties": {**feature.properties, "id": feature.id, "kind": layer.kind},
+                }
+                for feature in features
+            ],
+        }
+
+    @app.post("/api/context/layers", status_code=201)
+    def upload_context_layer(
+        session: SessionDep, payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Load (or replace) a context layer from an uploaded GeoJSON document.
+
+        Body: ``{"name": ..., "kind": ..., "document": <GeoJSON>}``. The file is
+        written to the context directory under the harvest convention
+        (``<kind>--<name>.geojson``) so pipeline runs keep it loaded, and the
+        layer is replaced in the database immediately (re-uploading a name
+        replaces its features — layers are reference data, not provenance, so
+        unlike AOIs there is no name conflict). JSON-only body: same structural
+        CSRF defense as the other POSTs; disabled on a world-open dashboard.
+        """
+        if os.environ.get(CONTEXT_UPLOADS_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="context uploads are disabled on this dashboard"
+            )
+        kind = payload.get("kind")
+        if kind not in CONTEXT_KINDS:
+            raise HTTPException(
+                status_code=422, detail=f"kind must be one of {', '.join(CONTEXT_KINDS)}"
+            )
+        raw_name = _optional_str(payload.get("name"))
+        if raw_name is None:
+            raise HTTPException(status_code=422, detail="a non-empty layer name is required")
+        try:
+            document = load_context_document(payload.get("document"))
+            # The sanitized form is BOTH the filename and the stored layer name,
+            # so the next harvest of the written file replaces this same layer
+            # instead of minting a near-duplicate under the raw spelling.
+            name = sanitize_path_component(raw_name)
+            filename = f"{kind}--{name}.geojson"
+        except (ContextConfigError, StorageError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        context_dir = Path(os.environ.get(CONTEXT_DIR_ENV_VAR, DEFAULT_CONTEXT_DIR))
+        context_dir.mkdir(parents=True, exist_ok=True)
+        target = context_dir / filename
+        target.write_text(json.dumps(payload.get("document"), indent=2) + "\n")
+        layer = replace_layer(
+            session, name=name, kind=kind, document=document, source_file=str(target)
+        )
+        session.commit()
+        return {
+            "id": layer.id,
+            "name": layer.name,
+            "kind": layer.kind,
+            "feature_count": len(document.geometries),
+            "file": str(target),
+        }
+
     @app.get("/api/events/{event_id}")
     def event_detail(event_id: int, session: SessionDep) -> dict[str, Any]:
         """One event with its measurement timeline, supporting evidence, and reviews."""
@@ -456,6 +570,9 @@ def create_app() -> FastAPI:
             # (fused-v2, #118): "optical-only" / "radar-only" / "both". Null
             # before the first fused-rule assessment.
             "basis": _assessment_basis(assessments),
+            # How this event relates to the loaded context layers (E17):
+            # recomputed per pipeline run, so this reads the current view.
+            "context": _event_context(session, event_id),
         }
 
     @app.post("/api/events/{event_id}/reviews", status_code=201)
@@ -608,6 +725,29 @@ def _assessments(session: Session, event_id: int) -> list[dict[str, Any]]:
             "created_at": assessment.created_at,
         }
         for assessment in rows
+    ]
+
+
+def _event_context(session: Session, event_id: int) -> list[dict[str, Any]]:
+    """The event's context relations: touching features first, then nearby."""
+    rows = session.execute(
+        select(EventContext, ContextFeature, ContextLayer)
+        .join(ContextFeature, ContextFeature.id == EventContext.context_feature_id)
+        .join(ContextLayer, ContextLayer.id == ContextFeature.context_layer_id)
+        .where(EventContext.event_id == event_id)
+        .order_by(EventContext.distance_m.asc().nulls_first(), EventContext.id)
+    ).all()
+    return [
+        {
+            "relation": relation.relation,
+            "distance_m": relation.distance_m,
+            "kind": layer.kind,
+            "layer": layer.name,
+            "feature_id": feature.id,
+            # The feature's own display name when its properties carry one.
+            "name": _optional_str(feature.properties.get("name")),
+        }
+        for relation, feature, layer in rows
     ]
 
 
