@@ -387,7 +387,11 @@ def test_migrations_backfill_methodology_display_versions(
             text("SELECT version, display_version FROM methodology_version ORDER BY id")
         ).all()
     # Same script -> patch bump; changed script -> minor bump.
-    assert rows == [("1.0.0", "1.0.0"), ("auto-aaa", "1.0.1"), ("auto-bbb", "1.1.0")]
+    assert [tuple(row) for row in rows] == [
+        ("1.0.0", "1.0.0"),
+        ("auto-aaa", "1.0.1"),
+        ("auto-bbb", "1.1.0"),
+    ]
 
 
 def test_downgrade_removes_methodology_display_version(

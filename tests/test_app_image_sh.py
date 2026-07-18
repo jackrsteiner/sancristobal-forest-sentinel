@@ -43,7 +43,10 @@ def _run_wrapper(
         text=True,
         check=False,
     )
-    read = lambda log: log.read_text().splitlines() if log.exists() else []  # noqa: E731
+
+    def read(log: Path) -> list[str]:
+        return log.read_text().splitlines() if log.exists() else []
+
     return result.returncode, read(uv_calls), read(docker_calls)
 
 

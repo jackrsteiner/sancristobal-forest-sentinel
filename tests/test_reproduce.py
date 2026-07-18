@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 from sqlalchemy.orm import Session
 
-from forest_sentinel.models import ChangeRasterSource, IndexRaster, MethodologyVersion
+from forest_sentinel.models import (
+    Aoi,
+    ChangeRasterSource,
+    IndexRaster,
+    MethodologyVersion,
+    Observation,
+)
 from forest_sentinel.reproduce import (
     ReproduceError,
     reproduce_change_raster,
@@ -31,7 +37,13 @@ def _methodology(session: Session) -> MethodologyVersion:
 
 
 def _index_row(
-    session: Session, storage: FakeStorage, aoi, obs, methodology, *, index_type: str = "NBR"
+    session: Session,
+    storage: FakeStorage,
+    aoi: Aoi,
+    obs: Observation,
+    methodology: MethodologyVersion,
+    *,
+    index_type: str = "NBR",
 ) -> IndexRaster:
     key = CogKey(
         aoi=f"{aoi.id}-{aoi.name}",

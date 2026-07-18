@@ -488,8 +488,9 @@ def test_stop_pipeline_run_stops_the_service_and_stamps_interrupted(
     # The runs panel tells the truth immediately: running -> interrupted; the
     # already-finished run keeps its terminal status.
     db_session.expire_all()
-    assert db_session.get(PipelineRun, running.id).status == "interrupted"
-    assert db_session.get(PipelineRun, finished.id).status == "succeeded"
+    statuses = {run.id: run.status for run in db_session.execute(select(PipelineRun)).scalars()}
+    assert statuses[running.id] == "interrupted"
+    assert statuses[finished.id] == "succeeded"
 
 
 def test_stop_pipeline_run_failure_leaves_runs_untouched(
@@ -510,7 +511,8 @@ def test_stop_pipeline_run_failure_leaves_runs_untouched(
     assert "Failed to connect to bus" in response.json()["detail"]
     # The stop did not happen, so the row must still read running.
     db_session.expire_all()
-    assert db_session.get(PipelineRun, running.id).status == "running"
+    row = db_session.execute(select(PipelineRun).where(PipelineRun.id == running.id)).scalar_one()
+    assert row.status == "running"
 
 
 def test_stop_pipeline_run_can_be_disabled(

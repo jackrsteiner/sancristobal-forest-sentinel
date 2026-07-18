@@ -183,7 +183,8 @@ def _filtered_vectors(delta: MagicMock) -> MagicMock:
 
 def _vectorize_result(delta: MagicMock) -> MagicMock:
     """The node whose ``getInfo`` yields the features: the ``reduceRegions`` output."""
-    return delta.reduceRegions.return_value
+    result: MagicMock = delta.reduceRegions.return_value
+    return result
 
 
 def test_threshold_and_vectorize_returns_features(fake_ee: MagicMock) -> None:
