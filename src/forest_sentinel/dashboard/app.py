@@ -41,6 +41,7 @@ from forest_sentinel.models import (
     REVIEW_OPINIONS,
     Aoi,
     ChangeRaster,
+    ConfidenceAssessment,
     DisturbanceCandidate,
     DisturbanceEvent,
     EventObservation,
@@ -316,6 +317,8 @@ def create_app() -> FastAPI:
                 latest.c.area_m2,
                 latest.c.valid_pixel_fraction,
                 _latest_opinion_subquery(),
+                _latest_assessment_subquery(ConfidenceAssessment.level),
+                _latest_assessment_subquery(ConfidenceAssessment.score),
             )
             .outerjoin(latest, latest.c.event_id == DisturbanceEvent.id)
             .where(DisturbanceEvent.aoi_id == aoi_id)
@@ -324,8 +327,8 @@ def create_app() -> FastAPI:
         return {
             "type": "FeatureCollection",
             "features": [
-                _event_feature(event, footprint_area, count, latest_area, fraction, opinion)
-                for event, footprint_area, count, latest_area, fraction, opinion in rows
+                _event_feature(event, footprint_area, count, area, fraction, opinion, level, score)
+                for event, footprint_area, count, area, fraction, opinion, level, score in rows
             ],
         }
 
@@ -422,6 +425,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=f"event {event_id} not found")
         timeline = _timeline(session, event_id)
         reviews = _reviews(session, event_id)
+        assessments = _assessments(session, event_id)
         return {
             "id": event.id,
             "aoi_id": event.aoi_id,
@@ -435,6 +439,9 @@ def create_app() -> FastAPI:
             # Newest first: the head is the current opinion (or None when unreviewed).
             "reviews": reviews,
             "latest_opinion": reviews[0]["opinion"] if reviews else None,
+            # Newest first; each row explains itself (full inputs recorded at
+            # assessment time — nothing is recomputed here).
+            "confidence": assessments,
         }
 
     @app.post("/api/events/{event_id}/reviews", status_code=201)
@@ -493,6 +500,17 @@ def _latest_opinion_subquery() -> Any:
     )
 
 
+def _latest_assessment_subquery(column: Any) -> Any:
+    """Correlated scalar subquery: a column of the newest assessment per event."""
+    return (
+        select(column)
+        .where(ConfidenceAssessment.event_id == DisturbanceEvent.id)
+        .order_by(ConfidenceAssessment.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
 def _event_feature(
     event: DisturbanceEvent,
     footprint_area: float,
@@ -500,6 +518,8 @@ def _event_feature(
     latest_area: float | None,
     latest_valid_fraction: float | None,
     latest_opinion: str | None,
+    confidence_level: str | None,
+    confidence_score: float | None,
 ) -> dict[str, Any]:
     return {
         "type": "Feature",
@@ -510,6 +530,10 @@ def _event_feature(
             # The newest manual-review opinion — a human judgment held alongside
             # (never mutating) the automatic status; null when unreviewed.
             "latest_opinion": latest_opinion,
+            # The newest confidence assessment (E15); null before the first run
+            # under the rule.
+            "confidence_level": confidence_level,
+            "confidence_score": confidence_score,
             "first_detected_at": event.first_detected_at,
             "last_detected_at": event.last_detected_at,
             "observation_count": observation_count,
@@ -542,6 +566,29 @@ def _reviews(session: Session, event_id: int) -> list[dict[str, Any]]:
             "created_at": review.created_at,
         }
         for review in rows
+    ]
+
+
+def _assessments(session: Session, event_id: int) -> list[dict[str, Any]]:
+    rows = (
+        session.execute(
+            select(ConfidenceAssessment)
+            .where(ConfidenceAssessment.event_id == event_id)
+            .order_by(ConfidenceAssessment.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": assessment.id,
+            "level": assessment.level,
+            "score": assessment.score,
+            "rule_version": assessment.rule_version,
+            "inputs": assessment.inputs,
+            "created_at": assessment.created_at,
+        }
+        for assessment in rows
     ]
 
 

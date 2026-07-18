@@ -204,8 +204,10 @@ def _assess_event(session: Session, event: DisturbanceEvent, now: datetime) -> A
     days_since_last = max(0.0, (now - event.last_detected_at).total_seconds() / 86_400)
     return compute_assessment(
         delta_min=delta_min,
-        delta_mean=float(delta_mean) if delta_mean is not None else None,
-        mean_valid_fraction=float(mean_fraction) if mean_fraction is not None else None,
+        # Rounded: these are recorded verbatim in the explainable inputs, where
+        # float-average noise (-0.32999999999999996) would just be ugly.
+        delta_mean=round(float(delta_mean), 4) if delta_mean is not None else None,
+        mean_valid_fraction=round(float(mean_fraction), 4) if mean_fraction is not None else None,
         observation_count=observation_count,
         days_since_last=days_since_last,
     )

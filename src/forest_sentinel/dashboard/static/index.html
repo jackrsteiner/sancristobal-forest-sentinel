@@ -38,6 +38,15 @@
       .opinion-false_positive { color: #c0392b; }
       .opinion-uncertain { color: #e67e22; }
       .opinion-resolved { color: #7f8c8d; }
+      /* Confidence level: filled pill, third visual axis beside status + opinion. */
+      .conf {
+        border-radius: 3px; padding: 0 5px; font-size: 11px; margin-left: 4px; color: #fff;
+      }
+      .conf-high { background: #27ae60; }
+      .conf-medium { background: #e67e22; }
+      .conf-low { background: #95a5a6; }
+      .conf-explain { font-size: 12px; color: #555; margin: 2px 0 2px 12px; }
+      .conf-history { font-size: 12px; color: #888; margin: 2px 0 2px 12px; }
       #event-filters { margin: 8px 0 2px; font-size: 12px; }
       #event-filters select { font-size: 12px; padding: 2px; }
       .review-form { margin-top: 6px; }
@@ -103,6 +112,14 @@
           <option value="false_positive">false positive</option>
           <option value="uncertain">uncertain</option>
           <option value="resolved">resolved</option>
+        </select>
+        confidence
+        <select id="filter-confidence">
+          <option value="">all</option>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+          <option value="unassessed">unassessed</option>
         </select>
       </div>
       <div id="events"></div>
@@ -186,9 +203,15 @@
       function featurePassesFilters(p) {
         const status = document.getElementById("filter-status").value;
         const opinion = document.getElementById("filter-opinion").value;
+        const confidence = document.getElementById("filter-confidence").value;
         if (status && p.status !== status) return false;
-        if (opinion === "unreviewed") return p.latest_opinion == null;
-        if (opinion && p.latest_opinion !== opinion) return false;
+        if (opinion === "unreviewed") {
+          if (p.latest_opinion != null) return false;
+        } else if (opinion && p.latest_opinion !== opinion) {
+          return false;
+        }
+        if (confidence === "unassessed") return p.confidence_level == null;
+        if (confidence && p.confidence_level !== confidence) return false;
         return true;
       }
 
@@ -201,12 +224,16 @@
         // Drop layer references from the previous render so clicks can't zoom
         // to layers that are no longer on the map.
         Object.keys(layersById).forEach((id) => delete layersById[id]);
+        // Stroke encodes the automatic status; fill opacity encodes confidence
+        // (stronger evidence reads more solid on the map).
+        const CONF_OPACITY = { high: 0.45, medium: 0.25, low: 0.1 };
         eventsLayer = L.geoJSON(
           { type: "FeatureCollection", features },
           {
             style: (f) => ({
               color: STATUS_COLORS[f.properties.status] || "#2980b9",
               weight: 2,
+              fillOpacity: CONF_OPACITY[f.properties.confidence_level] ?? 0.2,
             }),
             onEachFeature: (feature, layer) => {
               layersById[feature.properties.id] = layer;
@@ -483,9 +510,72 @@
             div.querySelector("strong").after(document.createTextNode(" "));
             div.children[1].after(opinionBadge(p.latest_opinion));
           }
+          if (p.confidence_level) {
+            const conf = document.createElement("span");
+            conf.className = `conf conf-${p.confidence_level}`;
+            conf.textContent = p.confidence_level;
+            conf.title = p.confidence_score != null ? `score ${p.confidence_score}` : "";
+            div.querySelector(".muted").before(conf);
+          }
           div.onclick = () => showEvent(p.id);
           container.appendChild(div);
         });
+      }
+
+      // The explained "why" of the latest assessment: rendered entirely from
+      // the recorded inputs — nothing is recomputed client-side.
+      function confidenceSection(detail) {
+        const wrap = document.createElement("div");
+        const heading = document.createElement("div");
+        heading.className = "timeline";
+        heading.innerHTML = "<em>Confidence:</em>";
+        wrap.appendChild(heading);
+        if (!detail.confidence.length) {
+          const none = document.createElement("div");
+          none.className = "conf-explain muted";
+          none.textContent = "not yet assessed (runs after the next pipeline run)";
+          wrap.appendChild(none);
+          return wrap;
+        }
+        const latest = detail.confidence[0];
+        const summary = document.createElement("div");
+        summary.className = "conf-explain";
+        const badge = document.createElement("span");
+        badge.className = `conf conf-${latest.level}`;
+        badge.textContent = latest.level;
+        summary.appendChild(badge);
+        summary.appendChild(
+          document.createTextNode(
+            ` score ${latest.score} · rule ${latest.rule_version} · ${fmtDate(latest.created_at)}`,
+          ),
+        );
+        wrap.appendChild(summary);
+        const weights = latest.inputs.weights || {};
+        const subscores = latest.inputs.subscores || {};
+        const factors = latest.inputs.factors || {};
+        Object.keys(weights).forEach((name) => {
+          const line = document.createElement("div");
+          line.className = "conf-explain";
+          const subscore = subscores[name];
+          const raw = Object.entries(factors[name] || {})
+            .filter(([, value]) => value != null)
+            .map(([key, value]) => `${key} ${value}`)
+            .join(", ");
+          line.textContent =
+            subscore == null
+              ? `${name}: unavailable (weight redistributed)`
+              : `${name}: ${subscore.toFixed(2)} × weight ${weights[name]}` +
+                (raw ? ` (${raw})` : "");
+          wrap.appendChild(line);
+        });
+        detail.confidence.slice(1).forEach((entry) => {
+          const line = document.createElement("div");
+          line.className = "conf-history";
+          line.textContent =
+            `${fmtDate(entry.created_at)}: ${entry.level} (${entry.score}, ${entry.rule_version})`;
+          wrap.appendChild(line);
+        });
+        return wrap;
       }
 
       // Review section built with DOM APIs: notes/reviewer are free text from
@@ -586,6 +676,7 @@
           detailDiv.innerHTML =
             `<div class="timeline"><em>Timeline (expansion):</em></div>${rows}` +
             `<div class="timeline"><em>Evidence:</em></div>${evidence}`;
+          detailDiv.appendChild(confidenceSection(detail));
           detailDiv.appendChild(reviewSection(detail));
           card2.appendChild(detailDiv);
         }
@@ -731,6 +822,7 @@
       document.getElementById("stop-run").addEventListener("click", stopPipelineRun);
       document.getElementById("filter-status").addEventListener("change", renderEvents);
       document.getElementById("filter-opinion").addEventListener("change", renderEvents);
+      document.getElementById("filter-confidence").addEventListener("change", renderEvents);
       document.getElementById("aoi-upload").addEventListener("click", uploadAoi);
       document.getElementById("aoi-select").addEventListener("change", (e) =>
         loadEvents(e.target.value),

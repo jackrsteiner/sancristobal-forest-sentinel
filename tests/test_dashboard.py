@@ -667,3 +667,49 @@ def test_timeline_and_evidence_carry_quality_metadata(
     # Event features expose the LATEST detection's coverage (day 8 -> null here).
     features = client.get(f"/api/aois/{aoi.id}/events").json()["features"]
     assert features[0]["properties"]["latest_valid_fraction"] is None
+
+
+def test_event_features_and_detail_carry_confidence(
+    client: TestClient, db_session: Session
+) -> None:
+    """E15 surface (#107): latest level/score on features; explained history in detail."""
+    from forest_sentinel.confidence import assess_events_for_aoi
+
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    methodology = make_methodology(db_session)
+    make_candidate(
+        db_session,
+        aoi,
+        methodology,
+        day=1,
+        ring=_PATCH,
+        area_m2=10_000.0,
+        delta_min=-0.5,
+        delta_mean=-0.3,
+        valid_pixel_fraction=0.9,
+    )
+    track_events_for_aoi(db_session, aoi=aoi)
+    assess_events_for_aoi(db_session, aoi=aoi, now=datetime(2026, 1, 10, tzinfo=UTC))
+    db_session.flush()
+
+    features = client.get(f"/api/aois/{aoi.id}/events").json()["features"]
+    props = features[0]["properties"]
+    assert props["confidence_level"] in ("low", "medium", "high")
+    assert 0.0 <= props["confidence_score"] <= 1.0
+
+    detail = client.get(f"/api/events/{props['id']}").json()
+    (assessment,) = detail["confidence"]
+    assert assessment["level"] == props["confidence_level"]
+    assert assessment["rule_version"] == "optical-v1"
+    # The recorded inputs make the level explainable without recomputation.
+    assert assessment["inputs"]["factors"]["magnitude"]["delta_min"] == -0.5
+    assert "weights" in assessment["inputs"]
+
+
+def test_unassessed_events_read_null_confidence(client: TestClient, db_session: Session) -> None:
+    aoi = _seed_event(db_session)
+    props = client.get(f"/api/aois/{aoi.id}/events").json()["features"][0]["properties"]
+    assert props["confidence_level"] is None
+    assert props["confidence_score"] is None
+    detail = client.get(f"/api/events/{props['id']}").json()
+    assert detail["confidence"] == []
