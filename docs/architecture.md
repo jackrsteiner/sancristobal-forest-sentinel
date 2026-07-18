@@ -157,7 +157,7 @@ bead per table; the tables realized so far are specified in §5.1–§5.10. Obje
 | `radar_change_raster`   | implemented | Realized as `change_raster` rows with `change_type="delta_vv_db"` (§7, E16).             |
 | `context_layer`         | implemented | Legal / administrative / infrastructure overlay dataset (§5.11, E17).                    |
 | `context_feature`       | implemented | One geometry from a context layer, with its GeoJSON properties (§5.11, E17).             |
-| `event_context`         | planned     | Relationship between an event and contextual features (E17).                             |
+| `event_context`         | implemented | Relationship between an event and contextual features (§5.11, E17).                      |
 | `confidence_assessment` | implemented | Structured explanation of an event's confidence level (§5.9a, E15).                      |
 
 Relationships implied by the pipeline:
@@ -521,8 +521,18 @@ Two ingest paths (`forest_sentinel/context.py`): `forest-sentinel context load <
 `<kind>--<name>.geojson` — files that don't parse or don't follow the convention are skipped
 with a warning, never failing the run. Layers are **reference data, not provenance**: re-loading
 a name replaces its features wholesale (the current file is the truth), unlike the append-only
-detection tables. `event_context` (next bead) re-derives event relations from whatever layers
-exist at run time.
+detection tables. `event_context` re-derives event relations from whatever layers exist at run
+time.
+
+**`event_context`** (migration `0018`): `event_id` FK, `context_feature_id` FK, `relation`
+(`contains` — the feature contains the event — / `intersects` / `nearby`), `distance_m`
+(`nearby` only). Computed after confidence in every pipeline run, entirely PostGIS-side
+(`ST_Contains`/`ST_Intersects`; `ST_DWithin` + `ST_Distance` on geography for geodesic
+meters): every touching feature is recorded, and beyond that only the **nearest** feature per
+layer *kind* within the buffer (`CONTEXT_BUFFER_M`, default 5 km — lifecycle config, not a
+methodology input) — one row, not one per road segment in range. Relations are a **derived
+view, replaced wholesale per run**: layers change between runs and stale relations must not
+survive a layer update; nothing here is provenance.
 
 ## 6. Cross-cutting properties
 

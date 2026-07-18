@@ -537,6 +537,7 @@ def test_run_is_recorded_with_labelled_batch_events(
         "change",
         "events",
         "confidence",
+        "context",
     }
 
     # The journald-facing mirror carries the run-start datetime and batch position.

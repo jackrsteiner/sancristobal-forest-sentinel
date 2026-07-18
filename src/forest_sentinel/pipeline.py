@@ -26,6 +26,7 @@ from forest_sentinel import (
     candidates,
     change,
     confidence,
+    context,
     earthengine,
     events,
     indices,
@@ -113,6 +114,7 @@ class PipelineSummary:
     radar_change_rasters: int = 0  # VV dB deltas produced (radar stage, when enabled)
     radar_change_rasters_reused: int = 0
     radar_candidates: int = 0
+    context_relations: int = 0  # event-context rows recorded (replaced per run)
 
 
 def run_pipeline(
@@ -130,6 +132,7 @@ def run_pipeline(
     max_concurrent_exports: int = 1,
     resolved_after_days: int = events.DEFAULT_RESOLVED_AFTER_DAYS,
     radar_methodology: MethodologyVersion | None = None,
+    context_buffer_m: float = context.DEFAULT_CONTEXT_BUFFER_M,
     ee_module: Any = earthengine,
 ) -> PipelineSummary:
     """Run discover → indices → change → candidates → events for one AOI and window.
@@ -168,6 +171,7 @@ def run_pipeline(
                 max_concurrent_exports=max_concurrent_exports,
                 resolved_after_days=resolved_after_days,
                 radar_methodology=radar_methodology,
+                context_buffer_m=context_buffer_m,
                 ee_module=ee_module,
                 recorder=recorder,
             )
@@ -200,6 +204,7 @@ def _run_pipeline_locked(
     max_concurrent_exports: int,
     resolved_after_days: int,
     radar_methodology: MethodologyVersion | None,
+    context_buffer_m: float,
     ee_module: Any,
     recorder: runlog.RunRecorder,
 ) -> PipelineSummary:
@@ -412,6 +417,15 @@ def _run_pipeline_locked(
         ),
     )
 
+    # Context relations last: a derived view over final event footprints,
+    # replaced wholesale each run from whatever layers exist right now.
+    context_relations = context.compute_event_context(session, aoi=aoi, buffer_m=context_buffer_m)
+    recorder.record(
+        "context",
+        "info",
+        message=f"{context_relations} context relation(s) recorded (replaced per run)",
+    )
+
     return PipelineSummary(
         observations_discovered=discovery.discovered,
         observations_recorded=discovery.recorded,
@@ -429,6 +443,7 @@ def _run_pipeline_locked(
         radar_change_rasters=radar_count,
         radar_change_rasters_reused=radar_reused,
         radar_candidates=radar_candidates,
+        context_relations=context_relations,
     )
 
 

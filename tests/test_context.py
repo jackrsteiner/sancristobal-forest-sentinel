@@ -224,3 +224,134 @@ def test_pipeline_run_harvests_the_context_dir(
     with Session(migrated_database) as session:
         layer = session.execute(select(ContextLayer)).scalars().one()
         assert (layer.name, layer.kind) == ("acme", "concession")
+
+
+def _seed_event(session: Session) -> Any:
+    """One tracked event over the (0.1,0.1)-(0.2,0.2) patch; returns the AOI."""
+    from forest_sentinel.events import track_events_for_aoi
+    from tests.fakes import make_aoi, make_candidate, make_methodology
+
+    aoi = make_aoi(session)
+    methodology = make_methodology(session)
+    make_candidate(
+        session,
+        aoi,
+        methodology,
+        day=1,
+        ring=[(0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.1, 0.2), (0.1, 0.1)],
+        area_m2=10_000.0,
+    )
+    track_events_for_aoi(session, aoi=aoi)
+    return aoi
+
+
+def _layer(session: Session, name: str, kind: str, *geometries: dict[str, Any]) -> None:
+    replace_layer(
+        session,
+        name=name,
+        kind=kind,
+        document=load_context_document(_collection(*((g, {"name": name}) for g in geometries))),
+    )
+
+
+def test_compute_event_context_records_expected_relations(db_session: Session) -> None:
+    from forest_sentinel.context import compute_event_context
+    from forest_sentinel.models import DisturbanceEvent, EventContext
+
+    aoi = _seed_event(db_session)
+    # A concession containing the event, a road crossing it, two rivers within
+    # the 5 km buffer (only the nearest is recorded), and a mill far outside.
+    _layer(
+        db_session,
+        "acme",
+        "concession",
+        {"type": "Polygon", "coordinates": [[[0, 0], [0.3, 0], [0.3, 0.3], [0, 0.3], [0, 0]]]},
+    )
+    _layer(
+        db_session,
+        "crossing-road",
+        "road",
+        {"type": "LineString", "coordinates": [[0.05, 0.15], [0.25, 0.15]]},
+    )
+    _layer(
+        db_session,
+        "rivers",
+        "river",
+        {"type": "LineString", "coordinates": [[0.22, 0.0], [0.22, 0.3]]},
+        {"type": "LineString", "coordinates": [[0.24, 0.0], [0.24, 0.3]]},
+    )
+    _layer(db_session, "far-mill", "mill", {"type": "Point", "coordinates": [1.0, 1.0]})
+
+    recorded = compute_event_context(db_session, aoi=aoi)
+
+    assert recorded == 3
+    event = db_session.execute(select(DisturbanceEvent)).scalar_one()
+    rows = db_session.execute(select(EventContext)).scalars().all()
+    assert all(row.event_id == event.id for row in rows)
+    by_relation = {row.relation: row for row in rows}
+    assert set(by_relation) == {"contains", "intersects", "nearby"}
+    assert by_relation["contains"].distance_m is None
+    # The nearest river (x=0.22, ~2.2 km from the patch edge at x=0.2) wins;
+    # geodesic meters from PostGIS geography.
+    nearby = by_relation["nearby"]
+    assert nearby.distance_m is not None
+    assert 2000 < nearby.distance_m < 2400
+    river_feature = db_session.get(ContextFeature, nearby.context_feature_id)
+    assert river_feature is not None
+    from geoalchemy2.shape import to_shape
+
+    assert to_shape(river_feature.geometry).bounds[0] == pytest.approx(0.22)
+
+
+def test_compute_event_context_replaces_rows_per_run(db_session: Session) -> None:
+    from forest_sentinel.context import compute_event_context
+    from forest_sentinel.models import EventContext
+
+    aoi = _seed_event(db_session)
+    _layer(
+        db_session,
+        "rivers",
+        "river",
+        {"type": "LineString", "coordinates": [[0.22, 0.0], [0.22, 0.3]]},
+    )
+    assert compute_event_context(db_session, aoi=aoi) == 1
+    first = db_session.execute(select(EventContext)).scalars().one()
+
+    # The layer moved: recompute replaces the derived view, leaving no stale rows.
+    _layer(
+        db_session,
+        "rivers",
+        "river",
+        {"type": "LineString", "coordinates": [[0.15, 0.0], [0.15, 0.3]]},
+    )
+    assert compute_event_context(db_session, aoi=aoi) == 1
+    row = db_session.execute(select(EventContext)).scalars().one()
+    assert row.id != first.id
+    assert row.relation == "intersects"
+
+    # An empty buffer records nothing at all.
+    _layer(
+        db_session,
+        "rivers",
+        "river",
+        {"type": "LineString", "coordinates": [[0.9, 0.0], [0.9, 0.3]]},
+    )
+    assert compute_event_context(db_session, aoi=aoi) == 0
+    assert db_session.execute(select(EventContext)).scalars().all() == []
+
+
+def test_compute_event_context_buffer_is_configurable(db_session: Session) -> None:
+    from forest_sentinel.context import compute_event_context
+    from forest_sentinel.models import EventContext
+
+    aoi = _seed_event(db_session)
+    _layer(
+        db_session,
+        "rivers",
+        "river",
+        {"type": "LineString", "coordinates": [[0.22, 0.0], [0.22, 0.3]]},
+    )
+    # ~2.2 km away: outside a 1 km buffer, inside the 5 km default.
+    assert compute_event_context(db_session, aoi=aoi, buffer_m=1_000.0) == 0
+    assert compute_event_context(db_session, aoi=aoi) == 1
+    assert db_session.execute(select(EventContext)).scalars().one().relation == "nearby"

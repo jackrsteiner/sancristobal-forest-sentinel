@@ -564,3 +564,25 @@ def test_downgrade_removes_context_tables(alembic_config: Config, clean_database
     tables = inspect(clean_database).get_table_names()
     assert "context_layer" not in tables
     assert "context_feature" not in tables
+
+
+def test_migrations_create_event_context_table(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+
+    inspector = inspect(clean_database)
+    assert "event_context" in inspector.get_table_names()
+    columns = {c["name"] for c in inspector.get_columns("event_context")}
+    assert {"id", "event_id", "context_feature_id", "relation", "distance_m", "created_at"} <= (
+        columns
+    )
+
+
+def test_downgrade_removes_event_context_table(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0017_context_layers")
+
+    assert "event_context" not in inspect(clean_database).get_table_names()

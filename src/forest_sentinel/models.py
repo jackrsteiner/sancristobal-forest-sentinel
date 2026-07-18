@@ -481,6 +481,42 @@ class ContextFeature(Base):
     )
 
 
+# How an event relates to a context feature: the feature contains the event,
+# overlaps it, or is the nearest feature of its layer's kind within the buffer.
+CONTEXT_RELATIONS = ("contains", "intersects", "nearby")
+
+
+class EventContext(Base):
+    """One relationship between a disturbance event and a context feature (E17).
+
+    A derived view, not provenance: rows are replaced per event per run from
+    whatever layers exist at that moment (layers are reference data and change
+    between runs). ``distance_m`` is set only for ``nearby`` rows.
+    """
+
+    __tablename__ = "event_context"
+    __table_args__ = (
+        # Rendered ck_event_context_relation by the metadata naming convention.
+        CheckConstraint("relation IN ('contains', 'intersects', 'nearby')", name="relation"),
+        Index("ix_event_context_event_id", "event_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("disturbance_event.id", ondelete="CASCADE"), nullable=False
+    )
+    context_feature_id: Mapped[int] = mapped_column(
+        ForeignKey("context_feature.id", ondelete="CASCADE"), nullable=False
+    )
+    relation: Mapped[str] = mapped_column(String, nullable=False)
+    distance_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class PipelineRun(Base):
     """One pipeline invocation over an AOI and date window.
 

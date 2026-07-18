@@ -19,20 +19,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from geoalchemy2 import Geography
 from geoalchemy2.shape import from_shape
 from shapely.errors import ShapelyError
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
-from sqlalchemy import delete, select
+from sqlalchemy import cast, delete, func, select
 from sqlalchemy.orm import Session
 
-from forest_sentinel.models import AOI_SRID, CONTEXT_KINDS, ContextFeature, ContextLayer
+from forest_sentinel.models import (
+    AOI_SRID,
+    CONTEXT_KINDS,
+    Aoi,
+    ContextFeature,
+    ContextLayer,
+    DisturbanceEvent,
+    EventContext,
+)
 
 logger = logging.getLogger(__name__)
 
 # Directory of context GeoJSONs, harvested at pipeline start like config/aois.
 CONTEXT_DIR_ENV_VAR = "FOREST_SENTINEL_CONTEXT_DIR"
 DEFAULT_CONTEXT_DIR = "config/context"
+
+# How far to look for "nearby" context (#126). Lifecycle config, not a
+# methodology input: changing it never mints a new methodology version.
+CONTEXT_BUFFER_ENV_VAR = "CONTEXT_BUFFER_M"
+DEFAULT_CONTEXT_BUFFER_M = 5_000.0
 
 # Harvested filenames encode the kind: <kind>--<name>.geojson.
 _KIND_SEPARATOR = "--"
@@ -228,3 +242,79 @@ def harvest_context_dir(session: Session, directory: Path) -> HarvestResult:
         layers += 1
         features += len(document.geometries)
     return HarvestResult(layers=layers, features=features, skipped=skipped)
+
+
+def compute_event_context(
+    session: Session, *, aoi: Aoi, buffer_m: float = DEFAULT_CONTEXT_BUFFER_M
+) -> int:
+    """Recompute event↔context relations for every event of the AOI.
+
+    A derived view, replaced wholesale per run (layers are reference data and
+    change between runs — stale relations must not survive a layer update).
+    Every touching feature is recorded (``contains`` when the feature contains
+    the event, else ``intersects``); beyond that, only the **nearest** feature
+    per layer *kind* within ``buffer_m`` is recorded as ``nearby`` with its
+    distance — one row, not one per road segment in range. All predicates run
+    PostGIS-side; distances are geodesic (geography) meters. Returns the number
+    of relations recorded.
+    """
+    event_ids = select(DisturbanceEvent.id).where(DisturbanceEvent.aoi_id == aoi.id)
+    session.execute(delete(EventContext).where(EventContext.event_id.in_(event_ids)))
+
+    relations = 0
+    touching = session.execute(
+        select(
+            DisturbanceEvent.id,
+            ContextFeature.id,
+            func.ST_Contains(ContextFeature.geometry, DisturbanceEvent.geometry),
+        )
+        .select_from(DisturbanceEvent)
+        .join(
+            ContextFeature,
+            func.ST_Intersects(DisturbanceEvent.geometry, ContextFeature.geometry),
+        )
+        .where(DisturbanceEvent.aoi_id == aoi.id)
+    ).all()
+    for event_id, feature_id, contained in touching:
+        session.add(
+            EventContext(
+                event_id=event_id,
+                context_feature_id=feature_id,
+                relation="contains" if contained else "intersects",
+                distance_m=None,
+            )
+        )
+        relations += 1
+
+    event_geog = cast(DisturbanceEvent.geometry, Geography)
+    feature_geog = cast(ContextFeature.geometry, Geography)
+    candidates = session.execute(
+        select(
+            DisturbanceEvent.id,
+            ContextFeature.id,
+            ContextLayer.kind,
+            func.ST_Distance(event_geog, feature_geog),
+        )
+        .select_from(DisturbanceEvent)
+        .join(ContextFeature, func.ST_DWithin(event_geog, feature_geog, buffer_m))
+        .join(ContextLayer, ContextLayer.id == ContextFeature.context_layer_id)
+        .where(DisturbanceEvent.aoi_id == aoi.id)
+        .where(~func.ST_Intersects(DisturbanceEvent.geometry, ContextFeature.geometry))
+    ).all()
+    nearest: dict[tuple[int, str], tuple[int, float]] = {}
+    for event_id, feature_id, kind, distance in candidates:
+        key = (event_id, kind)
+        if key not in nearest or distance < nearest[key][1]:
+            nearest[key] = (feature_id, float(distance))
+    for (event_id, _kind), (feature_id, distance) in sorted(nearest.items()):
+        session.add(
+            EventContext(
+                event_id=event_id,
+                context_feature_id=feature_id,
+                relation="nearby",
+                distance_m=round(distance, 1),
+            )
+        )
+        relations += 1
+    session.flush()
+    return relations

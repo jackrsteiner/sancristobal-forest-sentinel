@@ -586,6 +586,12 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                         "RESOLVED_AFTER_DAYS", events.DEFAULT_RESOLVED_AFTER_DAYS
                     ),
                     radar_methodology=radar_methodology,
+                    context_buffer_m=float(
+                        _positive_int_env(
+                            context.CONTEXT_BUFFER_ENV_VAR,
+                            int(context.DEFAULT_CONTEXT_BUFFER_M),
+                        )
+                    ),
                 )
                 session.commit()
         except StorageConfigurationError as exc:
