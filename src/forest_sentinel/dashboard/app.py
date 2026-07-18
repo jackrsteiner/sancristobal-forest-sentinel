@@ -301,6 +301,38 @@ def create_app() -> FastAPI:
         detail["events"] = _run_events(session, run_id)
         return detail
 
+    @app.get("/api/methodologies")
+    def list_methodologies(session: SessionDep) -> list[dict[str, Any]]:
+        """Every methodology version with its full inputs, newest first.
+
+        The review surface for provenance: each row is one content-addressed
+        parameter set (the ``version`` hash is the identity, ``display_version``
+        the at-a-glance label) plus how many runs used it and when it last ran.
+        """
+        rows = session.execute(
+            select(
+                MethodologyVersion,
+                func.count(PipelineRun.id),
+                func.max(PipelineRun.started_at),
+            )
+            .outerjoin(PipelineRun, PipelineRun.methodology_version_id == MethodologyVersion.id)
+            .group_by(MethodologyVersion.id)
+            .order_by(MethodologyVersion.id.desc())
+        ).all()
+        return [
+            {
+                "id": methodology.id,
+                "name": methodology.name,
+                "version": methodology.version,
+                "display_version": methodology.display_version,
+                "parameters": methodology.parameters,
+                "created_at": methodology.created_at,
+                "run_count": run_count,
+                "last_run_at": last_run_at,
+            }
+            for methodology, run_count, last_run_at in rows
+        ]
+
     @app.get("/api/events/{event_id}")
     def event_detail(event_id: int, session: SessionDep) -> dict[str, Any]:
         """One event with its measurement timeline and supporting evidence."""
@@ -380,7 +412,12 @@ def _run_summary(
         "summary": run.summary,
         "last_event_at": last_event_at,
         "methodology": (
-            {"id": methodology.id, "name": methodology.name, "version": methodology.version}
+            {
+                "id": methodology.id,
+                "name": methodology.name,
+                "version": methodology.version,
+                "display_version": methodology.display_version,
+            }
             if methodology is not None
             else None
         ),

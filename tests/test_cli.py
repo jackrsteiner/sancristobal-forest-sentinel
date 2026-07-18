@@ -295,7 +295,8 @@ def test_pipeline_mode_auto_mints_methodology_when_parameters_change(
         ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
     )
     assert exit_code == 0
-    assert "Methodology: optical-change @ auto-" in capsys.readouterr().out
+    # The at-a-glance semantic label leads; the content-addressed identity follows.
+    assert "Methodology: optical-change v1.0.0 (auto-" in capsys.readouterr().out
     with Session(migrated_database) as session:
         versions = session.execute(select(MethodologyVersion.version)).scalars().all()
     assert "1.0.0" in versions

@@ -68,6 +68,10 @@
       </div>
       <div id="runs"></div>
       <div id="events"></div>
+      <div id="methodologies">
+        <h2>Methodologies</h2>
+        <div id="methodology-list"></div>
+      </div>
       <div id="add-aoi">
         <h2>Add AOI</h2>
         <input type="file" id="aoi-file" accept=".geojson,.json" />
@@ -216,6 +220,28 @@
 
       // The run's non-data inputs: methodology identity, expandable to the full
       // parameter set (threshold, min area, baseline window, EE script version…).
+      // At a glance only the semantic label shows (name vX.Y.Z); the expanded
+      // block carries the content-addressed version hash — the real identity —
+      // and the full parameter set.
+      function methodologyLabel(m) {
+        return m.display_version ? `${m.name} v${m.display_version}` : `${m.name} @ ${m.version}`;
+      }
+
+      function methodologyBody(container, m) {
+        if (m.display_version) {
+          const identity = document.createElement("div");
+          identity.className = "param muted";
+          identity.textContent = `version: ${m.version}`;
+          container.appendChild(identity);
+        }
+        Object.entries(m.parameters || {}).forEach(([key, value]) => {
+          const line = document.createElement("div");
+          line.className = "param";
+          line.textContent = `${key}: ${JSON.stringify(value)}`;
+          container.appendChild(line);
+        });
+      }
+
       function methodologySection(runId, m) {
         const meth = document.createElement("details");
         meth.className = "methodology";
@@ -224,15 +250,34 @@
           methodologyOpen[runId] = meth.open;
         });
         const summary = document.createElement("summary");
-        summary.textContent = `methodology ${m.name} @ ${m.version}`;
+        summary.textContent = `methodology ${methodologyLabel(m)}`;
         meth.appendChild(summary);
-        Object.entries(m.parameters || {}).forEach(([key, value]) => {
-          const line = document.createElement("div");
-          line.className = "param";
-          line.textContent = `${key}: ${JSON.stringify(value)}`;
-          meth.appendChild(line);
-        });
+        methodologyBody(meth, m);
         return meth;
+      }
+
+      // The provenance review list: every methodology version ever minted, its
+      // full inputs, and how much work ran under it.
+      async function loadMethodologies() {
+        const versions = await (await fetch("/api/methodologies")).json();
+        const container = document.getElementById("methodology-list");
+        container.innerHTML = "";
+        versions.forEach((m) => {
+          const entry = document.createElement("details");
+          entry.className = "methodology";
+          const summary = document.createElement("summary");
+          summary.textContent =
+            `${methodologyLabel(m)} · ${m.run_count} run${m.run_count === 1 ? "" : "s"}`;
+          entry.appendChild(summary);
+          const dates = document.createElement("div");
+          dates.className = "param muted";
+          dates.textContent =
+            `created ${fmtDate(m.created_at)}` +
+            (m.last_run_at ? ` · last run ${fmtDate(m.last_run_at)}` : "");
+          entry.appendChild(dates);
+          methodologyBody(entry, m);
+          container.appendChild(entry);
+        });
       }
 
       function progressSection(progress) {
@@ -339,6 +384,9 @@
           container.appendChild(line);
         });
         runsRenderKey = renderKey;
+        // A new run may have minted a new methodology version — keep the review
+        // list's entries and run counts in step with the runs panel.
+        loadMethodologies();
       }
 
       function renderEventList(features) {
@@ -481,6 +529,7 @@
         if (currentAoiId != null) loadRuns(currentAoiId);
       }, 15000);
       loadAois();
+      loadMethodologies();
     </script>
   </body>
 </html>

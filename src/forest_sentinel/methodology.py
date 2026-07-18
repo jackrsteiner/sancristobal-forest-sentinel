@@ -82,6 +82,32 @@ def auto_version(parameters: dict[str, Any]) -> str:
     return AUTO_VERSION_PREFIX + hashlib.sha256(canonical.encode()).hexdigest()[:10]
 
 
+_SCRIPT_VERSION_PARAM = "ee_script_version"
+
+
+def next_display_version(session: Session, *, name: str, parameters: dict[str, Any]) -> str:
+    """The next human-facing X.Y.Z label for a new version of ``name``.
+
+    The content-addressed ``version`` remains the identity; this is an at-a-glance
+    label attached to it at mint time. Per name, in mint order: the first version
+    is ``1.0.0``; a changed ``ee_script_version`` (new band math / EE code) bumps
+    the minor version; any other parameter change bumps the patch version.
+    """
+    latest = session.execute(
+        select(MethodologyVersion)
+        .where(MethodologyVersion.name == name)
+        .where(MethodologyVersion.display_version.is_not(None))
+        .order_by(MethodologyVersion.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest is None or latest.display_version is None:
+        return "1.0.0"
+    major, minor, patch = (int(part) for part in latest.display_version.split("."))
+    if latest.parameters.get(_SCRIPT_VERSION_PARAM) != parameters.get(_SCRIPT_VERSION_PARAM):
+        return f"{major}.{minor + 1}.0"
+    return f"{major}.{minor}.{patch + 1}"
+
+
 def get_or_create_methodology_version(
     session: Session,
     *,
@@ -110,7 +136,12 @@ def get_or_create_methodology_version(
             )
         return existing
 
-    created = MethodologyVersion(name=name, version=version, parameters=parameters)
+    created = MethodologyVersion(
+        name=name,
+        version=version,
+        display_version=next_display_version(session, name=name, parameters=parameters),
+        parameters=parameters,
+    )
     session.add(created)
     session.flush()
     return created

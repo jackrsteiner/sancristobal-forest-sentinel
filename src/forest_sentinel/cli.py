@@ -465,7 +465,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                 # rather than only after the first full run commits — and even if
                 # that run fails partway.
                 session.commit()
-                methodology_version = methodology.version
+                methodology_label = (
+                    f"v{methodology.display_version} ({methodology.version})"
+                    if methodology.display_version
+                    else methodology.version
+                )
                 summary = pipeline.run_pipeline(
                     session,
                     aoi=aoi,
@@ -500,7 +504,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
             return 1
 
     print(f"Ran Slice 1 pipeline for AOI {config.name!r} ({args.since} → {args.until})")
-    print(f"Methodology: {args.methodology_name} @ {methodology_version}")
+    print(f"Methodology: {args.methodology_name} {methodology_label}")
     print(
         "Observations: "
         f"{summary.observations_discovered} discovered, "

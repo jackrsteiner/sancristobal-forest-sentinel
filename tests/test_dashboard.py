@@ -162,6 +162,7 @@ def test_aoi_runs_lists_newest_first_with_last_event(
         "id": methodology.id,
         "name": "optical-change",
         "version": "1.0.0",
+        "display_version": "1.0.0",
     }
     assert runs[1]["status"] == "succeeded"
     assert runs[1]["last_event_at"] is None  # no progress events seeded
@@ -193,6 +194,40 @@ def test_run_detail_returns_events_in_order(client: TestClient, db_session: Sess
     assert all(event["outcome"] == "submitted" for event in events)
     assert all(event["exports"] == 4 for event in events)
     assert all(event["batch_total"] == 3 for event in events)
+
+
+def test_methodologies_lists_versions_with_inputs_newest_first(
+    client: TestClient, db_session: Session
+) -> None:
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    old = make_methodology(db_session, parameters={"ee_script_version": "s1"})
+    new = make_methodology(db_session, version="auto-bbb", parameters={"ee_script_version": "s2"})
+    _seed_run(
+        db_session,
+        aoi,
+        started_at=datetime(2026, 7, 15, 3, 0, tzinfo=UTC),
+        methodology_version_id=old.id,
+    )
+    _seed_run(
+        db_session,
+        aoi,
+        started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC),
+        methodology_version_id=new.id,
+    )
+    db_session.flush()
+
+    response = client.get("/api/methodologies")
+    assert response.status_code == 200
+    body = response.json()
+    assert [(m["version"], m["display_version"]) for m in body] == [
+        ("auto-bbb", "1.1.0"),  # a changed EE script bumped the minor version
+        ("1.0.0", "1.0.0"),
+    ]
+    # The review surface carries the full inputs and usage at a glance.
+    assert body[0]["parameters"] == {"ee_script_version": "s2"}
+    assert body[0]["run_count"] == 1
+    assert body[0]["last_run_at"] is not None
+    assert body[1]["run_count"] == 1
 
 
 def test_run_detail_reports_whole_run_progress(client: TestClient, db_session: Session) -> None:

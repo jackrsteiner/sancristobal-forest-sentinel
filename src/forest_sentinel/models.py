@@ -98,11 +98,16 @@ class MethodologyVersion(Base):
     __tablename__ = "methodology_version"
     __table_args__ = (
         UniqueConstraint("name", "version", name="uq_methodology_version_name_version"),
+        UniqueConstraint("name", "display_version", name="uq_methodology_version_name_display"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False)
+    # Human-facing semantic label minted alongside the content-addressed
+    # ``version`` (which stays the identity): X.Y.Z per name, minor-bumped when
+    # the EE script version changes, patch-bumped for parameter tweaks.
+    display_version: Mapped[str | None] = mapped_column(String, nullable=True)
     parameters: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
