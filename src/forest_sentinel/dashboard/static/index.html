@@ -469,11 +469,15 @@
           const div = document.createElement("div");
           div.className = "event";
           div.id = `event-${p.id}`;
+          const coverage =
+            p.latest_valid_fraction != null
+              ? ` · latest ${fmtPct(p.latest_valid_fraction)} clear`
+              : "";
           div.innerHTML =
             `<strong>Event #${p.id}</strong> ` +
             `<span class="status-${p.status}">${p.status}</span>` +
             `<div class="muted">first detected ${fmtDate(p.first_detected_at)} · ` +
-            `footprint ${fmtArea(p.footprint_area_m2)} · ${p.observation_count} obs</div>`;
+            `footprint ${fmtArea(p.footprint_area_m2)} · ${p.observation_count} obs${coverage}</div>`;
           // The human opinion sits beside — never replaces — the automatic status.
           if (p.latest_opinion) {
             div.querySelector("strong").after(document.createTextNode(" "));
@@ -560,11 +564,19 @@
             (m) =>
               `<div class="timeline">${fmtDate(m.observed_at)}: detected ${fmtArea(m.area_m2)}` +
               (m.growth_m2 != null ? ` (footprint +${fmtArea(m.growth_m2)})` : "") +
+              // Quality metadata (#95/E14): how clear the look was and how deep
+              // the drop — distinguishes strong evidence from obscured scenes.
+              `<span class="muted">${qualityNote(m)}</span>` +
               `</div>`,
           )
           .join("");
         const evidence = detail.evidence
-          .map((e) => `<div class="evidence">${e.change_type}: ${e.cog_path}</div>`)
+          .map(
+            (e) =>
+              `<div class="evidence">${e.change_type}` +
+              (e.valid_pixel_fraction != null ? ` (${fmtPct(e.valid_pixel_fraction)} clear)` : "") +
+              `: ${e.cog_path}</div>`,
+          )
           .join("");
         const card2 = document.getElementById(`event-${eventId}`);
         if (card2) {
@@ -587,6 +599,16 @@
       }
       function fmtTime(iso) {
         return iso ? iso.slice(11, 16) : "—";
+      }
+      function fmtPct(fraction) {
+        return `${Math.round(fraction * 100)}%`;
+      }
+      function qualityNote(m) {
+        const parts = [];
+        if (m.valid_pixel_fraction != null) parts.push(`${fmtPct(m.valid_pixel_fraction)} clear`);
+        if (m.delta_min != null) parts.push(`ΔNBR min ${m.delta_min.toFixed(2)}`);
+        if (m.delta_mean != null) parts.push(`mean ${m.delta_mean.toFixed(2)}`);
+        return parts.length ? ` · ${parts.join(" · ")}` : "";
       }
       function fmtArea(m2) {
         return m2 == null ? "—" : `${(m2 / 10000).toFixed(2)} ha`;

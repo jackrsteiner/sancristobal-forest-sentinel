@@ -285,6 +285,7 @@ def create_app() -> FastAPI:
             select(
                 EventObservation.event_id,
                 EventObservation.area_m2,
+                DisturbanceCandidate.valid_pixel_fraction,
                 func.count().over(partition_by=EventObservation.event_id).label("count"),
                 func.row_number()
                 .over(
@@ -292,10 +293,18 @@ def create_app() -> FastAPI:
                     order_by=(EventObservation.observed_at.desc(), EventObservation.id.desc()),
                 )
                 .label("recency"),
+            ).join(
+                DisturbanceCandidate,
+                DisturbanceCandidate.id == EventObservation.disturbance_candidate_id,
             )
         ).subquery()
         latest = (
-            select(measurements.c.event_id, measurements.c.area_m2, measurements.c.count)
+            select(
+                measurements.c.event_id,
+                measurements.c.area_m2,
+                measurements.c.valid_pixel_fraction,
+                measurements.c.count,
+            )
             .where(measurements.c.recency == 1)
             .subquery()
         )
@@ -305,6 +314,7 @@ def create_app() -> FastAPI:
                 func.ST_Area(cast(DisturbanceEvent.geometry, Geography)),
                 func.coalesce(latest.c.count, 0),
                 latest.c.area_m2,
+                latest.c.valid_pixel_fraction,
                 _latest_opinion_subquery(),
             )
             .outerjoin(latest, latest.c.event_id == DisturbanceEvent.id)
@@ -314,8 +324,8 @@ def create_app() -> FastAPI:
         return {
             "type": "FeatureCollection",
             "features": [
-                _event_feature(event, footprint_area, count, latest_area, latest_opinion)
-                for event, footprint_area, count, latest_area, latest_opinion in rows
+                _event_feature(event, footprint_area, count, latest_area, fraction, opinion)
+                for event, footprint_area, count, latest_area, fraction, opinion in rows
             ],
         }
 
@@ -488,6 +498,7 @@ def _event_feature(
     footprint_area: float,
     observation_count: int,
     latest_area: float | None,
+    latest_valid_fraction: float | None,
     latest_opinion: str | None,
 ) -> dict[str, Any]:
     return {
@@ -505,6 +516,9 @@ def _event_feature(
             # Cumulative unioned footprint vs the latest single-scene detection.
             "footprint_area_m2": footprint_area,
             "latest_area_m2": latest_area,
+            # Pixel coverage of the latest detection (#95): obscured vs clear
+            # evidence at a glance. Null on pre-statistics candidates.
+            "latest_valid_fraction": latest_valid_fraction,
         },
     }
 
@@ -539,23 +553,29 @@ def _optional_str(value: Any) -> str | None:
 
 
 def _timeline(session: Session, event_id: int) -> list[dict[str, Any]]:
-    observations = (
-        session.execute(
-            select(EventObservation)
-            .where(EventObservation.event_id == event_id)
-            .order_by(EventObservation.observed_at)
+    # Each measurement carries its source candidate's extraction-time ΔNBR
+    # statistics and pixel coverage (#95), so the dashboard can distinguish
+    # strong evidence from obscured observations (E14). Null on pre-#95 rows.
+    rows = session.execute(
+        select(EventObservation, DisturbanceCandidate)
+        .join(
+            DisturbanceCandidate,
+            DisturbanceCandidate.id == EventObservation.disturbance_candidate_id,
         )
-        .scalars()
-        .all()
-    )
+        .where(EventObservation.event_id == event_id)
+        .order_by(EventObservation.observed_at)
+    ).all()
     return [
         {
             "observed_at": obs.observed_at,
             "area_m2": obs.area_m2,
             "growth_m2": obs.growth_m2,
             "candidate_id": obs.disturbance_candidate_id,
+            "delta_mean": candidate.delta_mean,
+            "delta_min": candidate.delta_min,
+            "valid_pixel_fraction": candidate.valid_pixel_fraction,
         }
-        for obs in observations
+        for obs, candidate in rows
     ]
 
 
@@ -648,7 +668,12 @@ def _run_events(session: Session, run_id: int) -> list[dict[str, Any]]:
 
 def _evidence(session: Session, event_id: int) -> list[dict[str, Any]]:
     rows = session.execute(
-        select(ChangeRaster.change_type, ChangeRaster.cog_path, DisturbanceCandidate.id)
+        select(
+            ChangeRaster.change_type,
+            ChangeRaster.cog_path,
+            ChangeRaster.valid_pixel_fraction,
+            DisturbanceCandidate.id,
+        )
         .join(
             DisturbanceCandidate,
             DisturbanceCandidate.change_raster_id == ChangeRaster.id,
@@ -661,8 +686,14 @@ def _evidence(session: Session, event_id: int) -> list[dict[str, Any]]:
         .order_by(DisturbanceCandidate.id)
     ).all()
     return [
-        {"change_type": change_type, "cog_path": cog_path, "candidate_id": candidate_id}
-        for change_type, cog_path, candidate_id in rows
+        {
+            "change_type": change_type,
+            "cog_path": cog_path,
+            # Scene coverage of the source raster ("how much was observable").
+            "valid_pixel_fraction": fraction,
+            "candidate_id": candidate_id,
+        }
+        for change_type, cog_path, fraction, candidate_id in rows
     ]
 
 

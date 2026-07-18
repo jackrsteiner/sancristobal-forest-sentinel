@@ -627,3 +627,43 @@ def test_capabilities_reflect_env_guards(
         "pipeline_trigger": True,
         "reviews": False,
     }
+
+
+def test_timeline_and_evidence_carry_quality_metadata(
+    client: TestClient, db_session: Session
+) -> None:
+    """E14 residual (#105): the persisted ΔNBR statistics and coverage reach the API."""
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    methodology = make_methodology(db_session)
+    make_candidate(
+        db_session,
+        aoi,
+        methodology,
+        day=1,
+        ring=_PATCH,
+        area_m2=10_000.0,
+        delta_mean=-0.31,
+        delta_min=-0.52,
+        valid_pixel_fraction=0.82,
+    )
+    # A pre-statistics candidate: everything must degrade to null, not crash.
+    make_candidate(db_session, aoi, methodology, day=8, ring=_PATCH_GROWN, area_m2=15_000.0)
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.flush()
+
+    event_id = db_session.execute(select(DisturbanceEvent.id)).scalar_one()
+    detail = client.get(f"/api/events/{event_id}").json()
+    with_stats, without_stats = detail["timeline"]
+    assert with_stats["delta_mean"] == -0.31
+    assert with_stats["delta_min"] == -0.52
+    assert with_stats["valid_pixel_fraction"] == 0.82
+    assert without_stats["delta_mean"] is None
+    assert without_stats["valid_pixel_fraction"] is None
+
+    # Evidence carries the source raster's scene coverage (written by change.py;
+    # the seeded rasters have none, so it reads null rather than erroring).
+    assert all("valid_pixel_fraction" in item for item in detail["evidence"])
+
+    # Event features expose the LATEST detection's coverage (day 8 -> null here).
+    features = client.get(f"/api/aois/{aoi.id}/events").json()["features"]
+    assert features[0]["properties"]["latest_valid_fraction"] is None

@@ -245,8 +245,15 @@ def make_candidate(
     day: int,
     ring: list[tuple[float, float]],
     area_m2: float,
+    delta_mean: float | None = None,
+    delta_min: float | None = None,
+    valid_pixel_fraction: float | None = None,
 ) -> DisturbanceCandidate:
-    """Seed one detection: Observation -> ChangeRaster -> DisturbanceCandidate."""
+    """Seed one detection: Observation -> ChangeRaster -> DisturbanceCandidate.
+
+    The extraction-time ΔNBR statistics (#95) default to null, matching
+    pre-statistics rows; pass them explicitly to seed quality metadata.
+    """
     detected = datetime(2026, 1, day, tzinfo=UTC)
     obs = make_observation(session, aoi, day=day)
     change = make_change_raster(session, obs, methodology, cog_path=f"/cogs/{day}.tif")
@@ -256,6 +263,9 @@ def make_candidate(
         geometry=from_shape(Polygon(ring), srid=4326),
         detected_at=detected,
         area_m2=area_m2,
+        delta_mean=delta_mean,
+        delta_min=delta_min,
+        valid_pixel_fraction=valid_pixel_fraction,
     )
     session.add(candidate)
     session.flush()
