@@ -125,3 +125,59 @@ def test_resolve_with_explicit_version_stays_strict(db_session: Session) -> None
         resolve_methodology_version(
             db_session, name="m", parameters={"threshold": -0.30}, version="1"
         )
+
+
+def test_first_mint_gets_display_version_1_0_0(db_session: Session) -> None:
+    created = get_or_create_methodology_version(
+        db_session, name="optical-change", version="1.0.0", parameters=_PARAMS
+    )
+    assert created.display_version == "1.0.0"
+
+
+def test_parameter_tweak_bumps_the_patch_version(db_session: Session) -> None:
+    get_or_create_methodology_version(
+        db_session,
+        name="m",
+        version="a",
+        parameters={"ee_script_version": "s1", "threshold": -0.25},
+    )
+    tweaked = get_or_create_methodology_version(
+        db_session,
+        name="m",
+        version="b",
+        parameters={"ee_script_version": "s1", "threshold": -0.3},
+    )
+    assert tweaked.display_version == "1.0.1"
+
+
+def test_ee_script_change_bumps_the_minor_version(db_session: Session) -> None:
+    get_or_create_methodology_version(
+        db_session, name="m", version="a", parameters={"ee_script_version": "s1"}
+    )
+    get_or_create_methodology_version(
+        db_session,
+        name="m",
+        version="b",
+        parameters={"ee_script_version": "s1", "threshold": -0.3},
+    )
+    new_script = get_or_create_methodology_version(
+        db_session, name="m", version="c", parameters={"ee_script_version": "s2"}
+    )
+    assert new_script.display_version == "1.1.0"
+
+
+def test_display_versions_are_independent_per_name(db_session: Session) -> None:
+    get_or_create_methodology_version(db_session, name="m", version="a", parameters={"x": 1})
+    other = get_or_create_methodology_version(
+        db_session, name="radar-change", version="a", parameters={"x": 1}
+    )
+    assert other.display_version == "1.0.0"
+
+
+def test_reuse_keeps_the_existing_display_version(db_session: Session) -> None:
+    first = get_or_create_methodology_version(
+        db_session, name="m", version="a", parameters={"x": 1}
+    )
+    again = resolve_methodology_version(db_session, name="m", parameters={"x": 1})
+    assert again.id == first.id
+    assert again.display_version == "1.0.0"

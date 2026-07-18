@@ -330,3 +330,77 @@ def test_downgrade_removes_pipeline_run_methodology_column(
 
     columns = {column["name"] for column in inspect(clean_database).get_columns("pipeline_run")}
     assert "methodology_version_id" not in columns
+
+
+def test_migrations_add_candidate_statistics_columns(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+
+    columns = {
+        column["name"]: column
+        for column in inspect(clean_database).get_columns("disturbance_candidate")
+    }
+    for name in ("delta_mean", "delta_min", "valid_pixel_fraction"):
+        assert name in columns
+        assert columns[name]["nullable"]  # pre-#95 rows stay null
+
+
+def test_downgrade_removes_candidate_statistics_columns(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0010_pipeline_run_methodology")
+
+    columns = {
+        column["name"] for column in inspect(clean_database).get_columns("disturbance_candidate")
+    }
+    assert columns.isdisjoint({"delta_mean", "delta_min", "valid_pixel_fraction"})
+
+
+def test_migrations_backfill_methodology_display_versions(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    """0012 labels pre-existing rows with the same bump rule new mints use."""
+    from sqlalchemy import text
+
+    command.upgrade(alembic_config, "0011_candidate_statistics")
+    with clean_database.connect() as connection:
+        for version, params in (
+            ("1.0.0", '{"ee_script_version": "s1"}'),
+            ("auto-aaa", '{"ee_script_version": "s1", "threshold": -0.3}'),
+            ("auto-bbb", '{"ee_script_version": "s2"}'),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO methodology_version (name, version, parameters) "
+                    "VALUES ('optical-change', :v, CAST(:p AS jsonb))"
+                ),
+                {"v": version, "p": params},
+            )
+        connection.commit()
+
+    command.upgrade(alembic_config, "head")
+
+    with clean_database.connect() as connection:
+        rows = connection.execute(
+            text("SELECT version, display_version FROM methodology_version ORDER BY id")
+        ).all()
+    # Same script -> patch bump; changed script -> minor bump.
+    assert [tuple(row) for row in rows] == [
+        ("1.0.0", "1.0.0"),
+        ("auto-aaa", "1.0.1"),
+        ("auto-bbb", "1.1.0"),
+    ]
+
+
+def test_downgrade_removes_methodology_display_version(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0011_candidate_statistics")
+
+    columns = {
+        column["name"] for column in inspect(clean_database).get_columns("methodology_version")
+    }
+    assert "display_version" not in columns

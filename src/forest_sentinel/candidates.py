@@ -108,7 +108,8 @@ def extract_candidates_for_change_raster(
 
     candidates: list[DisturbanceCandidate] = []
     for feature in features:
-        area_m2 = float(feature.get("properties", {}).get("area_m2", 0.0))
+        properties = feature.get("properties", {})
+        area_m2 = float(properties.get("area_m2", 0.0))
         if area_m2 < resolved_min_area:
             continue  # belt-and-braces: also guard client-side against sub-threshold polygons
         geometry = shape(feature["geometry"])
@@ -118,12 +119,34 @@ def extract_candidates_for_change_raster(
             geometry=from_shape(geometry, srid=AOI_SRID),
             detected_at=detected_at,
             area_m2=area_m2,
+            # ΔNBR statistics reduced per polygon in EE at extraction time (#95);
+            # null when the feature carries none (statistics are never backfilled).
+            delta_mean=_optional_float(properties.get("delta_mean")),
+            delta_min=_optional_float(properties.get("delta_min")),
+            valid_pixel_fraction=_valid_pixel_fraction(
+                properties.get("valid_pixels"), scale=scale, area_m2=area_m2
+            ),
         )
         session.add(candidate)
         candidates.append(candidate)
 
     session.flush()
     return candidates
+
+
+def _optional_float(value: Any) -> float | None:
+    return float(value) if value is not None else None
+
+
+def _valid_pixel_fraction(valid_pixels: Any, *, scale: int, area_m2: float) -> float | None:
+    """Unmasked-delta coverage of the polygon: ``valid_pixels·scale² / area``.
+
+    Capped at 1.0 — pixel counting at ``scale`` against a geodesic polygon area is
+    approximate, and a fully valid polygon must read as exactly full coverage.
+    """
+    if valid_pixels is None or area_m2 <= 0:
+        return None
+    return min(1.0, float(valid_pixels) * scale * scale / area_m2)
 
 
 def count_candidates_for_change_raster(session: Session, change_raster_id: int) -> int:

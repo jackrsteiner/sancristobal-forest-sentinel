@@ -68,6 +68,10 @@ if [ -z "${PROJECT_ID:-}" ]; then
 fi
 DASHBOARD_PORT="${DASHBOARD_PORT:-8000}"
 PIPELINE_TIMEOUT="${PIPELINE_TIMEOUT:-20h}"
+# Image mode (#96): blank (the default) builds from source with uv; a
+# published image reference (e.g. ghcr.io/<owner>/open-forest-sentinel:<sha>)
+# runs the pipeline/dashboard/prune from that container instead.
+APP_IMAGE="${APP_IMAGE:-}"
 
 echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/instance.env)"
 {
@@ -108,7 +112,9 @@ if [ -z "${PROJECT_ID:-}" ]; then
 fi
 
 echo "==> Starting PostgreSQL + PostGIS and applying migrations"
-uv sync
+if [ -z "${APP_IMAGE}" ]; then
+    uv sync
+fi
 # sudo: the docker-group membership granted above does not apply to the current
 # login session, so plain `docker` would fail on the first (fresh-VM) run.
 sudo docker compose up -d
@@ -117,10 +123,17 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 set -a; . "${APP_DIR}/.env"; set +a
-uv run alembic upgrade head
+if [ -n "${APP_IMAGE}" ]; then
+    echo "==> Image mode: pulling ${APP_IMAGE} (no source build on the VM)"
+    sudo docker pull "${APP_IMAGE}"
+    sudo docker run --rm --network host --env-file "${APP_DIR}/.env" \
+        "${APP_IMAGE}" alembic upgrade head
+else
+    uv run alembic upgrade head
+fi
 
 echo "==> Installing systemd units"
-sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g; s#@DASHBOARD_PORT@#${DASHBOARD_PORT}#g" \
+sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g" \
     scripts/systemd/forest-sentinel-dashboard.service \
     | sudo tee /etc/systemd/system/forest-sentinel-dashboard.service >/dev/null
 sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g; s#@PIPELINE_TIMEOUT@#${PIPELINE_TIMEOUT}#g" \

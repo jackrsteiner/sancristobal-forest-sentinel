@@ -176,6 +176,13 @@ Untick `sync_upstream` to only refresh the VM (e.g. after committing a change
 to `config/instance.env`); untick `update_vm` to only bring the repo up to
 date.
 
+**Optional: run from the published image.** Set `APP_IMAGE` in
+`config/instance.env` (e.g. `ghcr.io/jackrsteiner/open-forest-sentinel:latest`,
+or a commit-SHA tag to pin) and run **Update instance**: the VM then pulls the
+CI-tested container instead of building from source, which makes updates
+faster and independent of PyPI weather on the tiny VM. Blank keeps the default
+from-source build. See `DEPLOYMENT.md` §8 for details.
+
 The manual equivalent, if you prefer it or need to resolve a merge conflict:
 
 ```sh

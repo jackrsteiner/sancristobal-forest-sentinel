@@ -1,5 +1,6 @@
 from typing import Any
 
+import pytest
 from geoalchemy2.shape import to_shape
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -119,6 +120,54 @@ def test_extracts_candidates_with_provenance(db_session: Session) -> None:
             "delta_image": "delta-ee-image",
         }
     ]
+
+
+def test_persists_per_candidate_delta_statistics(db_session: Session) -> None:
+    """ΔNBR statistics from the extraction call (#95) land on the candidate row."""
+    with_stats = _poly_feature(0.1, 9_000)
+    with_stats["properties"].update({"delta_mean": -0.31, "delta_min": -0.52, "valid_pixels": 8})
+    overshoot = _poly_feature(0.3, 9_000)
+    # Pixel counting at scale is approximate: an overshooting count must clamp to 1.0.
+    overshoot["properties"].update({"delta_mean": -0.4, "delta_min": -0.6, "valid_pixels": 11})
+    fake = FakeEarthEngine(features=[with_stats, overshoot])
+
+    extract_candidates_for_change_raster(
+        db_session,
+        change_raster=_setup(db_session)[0],
+        delta_image="img",
+        region=_REGION,
+        ee_module=fake,
+    )
+
+    rows = (
+        db_session.execute(select(DisturbanceCandidate).order_by(DisturbanceCandidate.id))
+        .scalars()
+        .all()
+    )
+    assert [row.delta_mean for row in rows] == [-0.31, -0.4]
+    assert [row.delta_min for row in rows] == [-0.52, -0.6]
+    # 8 valid pixels × 30 m² pixels = 7 200 m² of 9 000 m² → 0.8; 11 pixels clamps.
+    assert rows[0].valid_pixel_fraction == pytest.approx(0.8)
+    assert rows[1].valid_pixel_fraction == 1.0
+
+
+def test_features_without_statistics_read_null(db_session: Session) -> None:
+    # Features from an older extraction shape (no #95 properties) must not crash —
+    # the row simply records no statistics, matching pre-migration rows.
+    fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
+
+    extract_candidates_for_change_raster(
+        db_session,
+        change_raster=_setup(db_session)[0],
+        delta_image="img",
+        region=_REGION,
+        ee_module=fake,
+    )
+
+    row = db_session.execute(select(DisturbanceCandidate)).scalar_one()
+    assert row.delta_mean is None
+    assert row.delta_min is None
+    assert row.valid_pixel_fraction is None
 
 
 def test_no_features_yields_no_candidates(db_session: Session) -> None:

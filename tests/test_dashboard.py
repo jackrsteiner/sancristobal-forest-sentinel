@@ -162,6 +162,7 @@ def test_aoi_runs_lists_newest_first_with_last_event(
         "id": methodology.id,
         "name": "optical-change",
         "version": "1.0.0",
+        "display_version": "1.0.0",
     }
     assert runs[1]["status"] == "succeeded"
     assert runs[1]["last_event_at"] is None  # no progress events seeded
@@ -193,6 +194,40 @@ def test_run_detail_returns_events_in_order(client: TestClient, db_session: Sess
     assert all(event["outcome"] == "submitted" for event in events)
     assert all(event["exports"] == 4 for event in events)
     assert all(event["batch_total"] == 3 for event in events)
+
+
+def test_methodologies_lists_versions_with_inputs_newest_first(
+    client: TestClient, db_session: Session
+) -> None:
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    old = make_methodology(db_session, parameters={"ee_script_version": "s1"})
+    new = make_methodology(db_session, version="auto-bbb", parameters={"ee_script_version": "s2"})
+    _seed_run(
+        db_session,
+        aoi,
+        started_at=datetime(2026, 7, 15, 3, 0, tzinfo=UTC),
+        methodology_version_id=old.id,
+    )
+    _seed_run(
+        db_session,
+        aoi,
+        started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC),
+        methodology_version_id=new.id,
+    )
+    db_session.flush()
+
+    response = client.get("/api/methodologies")
+    assert response.status_code == 200
+    body = response.json()
+    assert [(m["version"], m["display_version"]) for m in body] == [
+        ("auto-bbb", "1.1.0"),  # a changed EE script bumped the minor version
+        ("1.0.0", "1.0.0"),
+    ]
+    # The review surface carries the full inputs and usage at a glance.
+    assert body[0]["parameters"] == {"ee_script_version": "s2"}
+    assert body[0]["run_count"] == 1
+    assert body[0]["last_run_at"] is not None
+    assert body[1]["run_count"] == 1
 
 
 def test_run_detail_reports_whole_run_progress(client: TestClient, db_session: Session) -> None:
@@ -416,6 +451,82 @@ def test_trigger_pipeline_run_requires_a_json_body(client: TestClient) -> None:
     # reach the handler: FastAPI rejects a non-JSON body before it runs.
     response = client.post(
         "/api/pipeline/run",
+        content="x=1",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 422
+
+
+def test_stop_pipeline_run_stops_the_service_and_stamps_interrupted(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The dashboard package re-exports `app` (the FastAPI instance), shadowing
+    # the submodule on attribute access — go through sys.modules instead.
+    app_module = sys.modules["forest_sentinel.dashboard.app"]
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    running = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
+    finished = _seed_run(
+        db_session, aoi, started_at=datetime(2026, 7, 15, 3, 0, tzinfo=UTC), status="succeeded"
+    )
+    db_session.flush()
+
+    recorded: list[tuple[str, ...]] = []
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> _Result:
+        recorded.append(tuple(command))
+        return _Result()
+
+    monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+    response = client.post("/api/pipeline/stop", json={})
+    assert response.status_code == 202
+    assert response.json() == {"stopped_runs": 1}
+    assert recorded == [app_module.PIPELINE_STOP_COMMAND]
+    # The runs panel tells the truth immediately: running -> interrupted; the
+    # already-finished run keeps its terminal status.
+    db_session.expire_all()
+    statuses = {run.id: run.status for run in db_session.execute(select(PipelineRun)).scalars()}
+    assert statuses[running.id] == "interrupted"
+    assert statuses[finished.id] == "succeeded"
+
+
+def test_stop_pipeline_run_failure_leaves_runs_untouched(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_module = sys.modules["forest_sentinel.dashboard.app"]
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    running = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
+    db_session.flush()
+
+    class _Result:
+        returncode = 1
+        stderr = "Failed to connect to bus"
+
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *a, **k: _Result())
+    response = client.post("/api/pipeline/stop", json={})
+    assert response.status_code == 502
+    assert "Failed to connect to bus" in response.json()["detail"]
+    # The stop did not happen, so the row must still read running.
+    db_session.expire_all()
+    row = db_session.execute(select(PipelineRun).where(PipelineRun.id == running.id)).scalar_one()
+    assert row.status == "running"
+
+
+def test_stop_pipeline_run_can_be_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_PIPELINE_TRIGGER", "0")
+    response = client.post("/api/pipeline/stop", json={})
+    assert response.status_code == 403
+    assert "disabled" in response.json()["detail"]
+
+
+def test_stop_pipeline_run_requires_a_json_body(client: TestClient) -> None:
+    response = client.post(
+        "/api/pipeline/stop",
         content="x=1",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )

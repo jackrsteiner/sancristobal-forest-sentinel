@@ -64,10 +64,15 @@
       <div id="summary" class="muted"></div>
       <div id="pipeline-controls">
         <button id="run-now">Run pipeline now</button>
+        <button id="stop-run">Stop run</button>
         <span id="run-now-status" class="muted"></span>
       </div>
       <div id="runs"></div>
       <div id="events"></div>
+      <div id="methodologies">
+        <h2>Methodologies</h2>
+        <div id="methodology-list"></div>
+      </div>
       <div id="add-aoi">
         <h2>Add AOI</h2>
         <input type="file" id="aoi-file" accept=".geojson,.json" />
@@ -216,6 +221,28 @@
 
       // The run's non-data inputs: methodology identity, expandable to the full
       // parameter set (threshold, min area, baseline window, EE script version…).
+      // At a glance only the semantic label shows (name vX.Y.Z); the expanded
+      // block carries the content-addressed version hash — the real identity —
+      // and the full parameter set.
+      function methodologyLabel(m) {
+        return m.display_version ? `${m.name} v${m.display_version}` : `${m.name} @ ${m.version}`;
+      }
+
+      function methodologyBody(container, m) {
+        if (m.display_version) {
+          const identity = document.createElement("div");
+          identity.className = "param muted";
+          identity.textContent = `version: ${m.version}`;
+          container.appendChild(identity);
+        }
+        Object.entries(m.parameters || {}).forEach(([key, value]) => {
+          const line = document.createElement("div");
+          line.className = "param";
+          line.textContent = `${key}: ${JSON.stringify(value)}`;
+          container.appendChild(line);
+        });
+      }
+
       function methodologySection(runId, m) {
         const meth = document.createElement("details");
         meth.className = "methodology";
@@ -224,15 +251,34 @@
           methodologyOpen[runId] = meth.open;
         });
         const summary = document.createElement("summary");
-        summary.textContent = `methodology ${m.name} @ ${m.version}`;
+        summary.textContent = `methodology ${methodologyLabel(m)}`;
         meth.appendChild(summary);
-        Object.entries(m.parameters || {}).forEach(([key, value]) => {
-          const line = document.createElement("div");
-          line.className = "param";
-          line.textContent = `${key}: ${JSON.stringify(value)}`;
-          meth.appendChild(line);
-        });
+        methodologyBody(meth, m);
         return meth;
+      }
+
+      // The provenance review list: every methodology version ever minted, its
+      // full inputs, and how much work ran under it.
+      async function loadMethodologies() {
+        const versions = await (await fetch("/api/methodologies")).json();
+        const container = document.getElementById("methodology-list");
+        container.innerHTML = "";
+        versions.forEach((m) => {
+          const entry = document.createElement("details");
+          entry.className = "methodology";
+          const summary = document.createElement("summary");
+          summary.textContent =
+            `${methodologyLabel(m)} · ${m.run_count} run${m.run_count === 1 ? "" : "s"}`;
+          entry.appendChild(summary);
+          const dates = document.createElement("div");
+          dates.className = "param muted";
+          dates.textContent =
+            `created ${fmtDate(m.created_at)}` +
+            (m.last_run_at ? ` · last run ${fmtDate(m.last_run_at)}` : "");
+          entry.appendChild(dates);
+          methodologyBody(entry, m);
+          container.appendChild(entry);
+        });
       }
 
       function progressSection(progress) {
@@ -339,6 +385,9 @@
           container.appendChild(line);
         });
         runsRenderKey = renderKey;
+        // A new run may have minted a new methodology version — keep the review
+        // list's entries and run counts in step with the runs panel.
+        loadMethodologies();
       }
 
       function renderEventList(features) {
@@ -470,7 +519,45 @@
         }
       }
 
+      async function stopPipelineRun() {
+        // A stop, not an undo: committed checkpoints are kept and reused, and
+        // the daily timer still fires the next scheduled run.
+        const confirmed = window.confirm(
+          "Stop the current pipeline run?\n\n" +
+            "Completed batches are kept and reused by the next run; " +
+            "the daily schedule still runs as normal.",
+        );
+        if (!confirmed) return;
+        const button = document.getElementById("stop-run");
+        const status = document.getElementById("run-now-status");
+        status.className = "muted";
+        status.textContent = "Stopping…";
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/pipeline/stop", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const body = await response.json();
+          if (!response.ok) {
+            status.className = "muted upload-error";
+            status.textContent = body.detail || `Failed (${response.status}).`;
+            return;
+          }
+          status.textContent =
+            body.stopped_runs > 0
+              ? `Stopped — ${body.stopped_runs} run${body.stopped_runs === 1 ? "" : "s"} marked interrupted.`
+              : "Stopped — no run was executing.";
+          // The interrupted stamp is synchronous; refresh sooner than the poll.
+          setTimeout(() => currentAoiId != null && loadRuns(currentAoiId), 1000);
+        } finally {
+          button.disabled = false;
+        }
+      }
+
       document.getElementById("run-now").addEventListener("click", runPipelineNow);
+      document.getElementById("stop-run").addEventListener("click", stopPipelineRun);
       document.getElementById("aoi-upload").addEventListener("click", uploadAoi);
       document.getElementById("aoi-select").addEventListener("change", (e) =>
         loadEvents(e.target.value),
@@ -481,6 +568,7 @@
         if (currentAoiId != null) loadRuns(currentAoiId);
       }, 15000);
       loadAois();
+      loadMethodologies();
     </script>
   </body>
 </html>

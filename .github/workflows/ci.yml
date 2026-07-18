@@ -50,3 +50,52 @@ jobs:
 
       - name: Test
         run: uv run pytest
+
+  # Publish the app image (#96) so instances can opt in to running a released,
+  # CI-tested artifact (APP_IMAGE in config/instance.env) instead of building
+  # from source on the e2-micro. PRs are covered by the unchanged `check` job.
+  publish-image:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    services:
+      db:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: forest_sentinel
+          POSTGRES_PASSWORD: forest_sentinel
+          POSTGRES_DB: forest_sentinel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U forest_sentinel"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"  # ghcr requires a lowercase name
+          echo "IMAGE=${image}" >> "${GITHUB_ENV}"
+          docker build -t "${image}:${GITHUB_SHA}" -t "${image}:latest" .
+
+      - name: Smoke test (CLI, migrations, dashboard)
+        run: |
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" forest-sentinel --help
+          docker run --rm --network host \
+            -e FOREST_SENTINEL_DATABASE_URL=postgresql+psycopg://forest_sentinel:forest_sentinel@localhost:5432/forest_sentinel \
+            "${IMAGE}:${GITHUB_SHA}" alembic upgrade head
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" python -c "import forest_sentinel.dashboard.app"
+
+      - name: Push
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
