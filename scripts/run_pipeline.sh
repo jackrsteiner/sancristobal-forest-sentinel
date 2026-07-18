@@ -36,6 +36,23 @@ AOI_PATH="${AOI_PATH:-examples/aoi-sample.geojson}"
 AOIS_DIR="${FOREST_SENTINEL_AOIS_DIR:-config/aois}"
 WINDOW_DAYS="${WINDOW_DAYS:-30}"
 
+# Image mode (#96): APP_IMAGE (config/instance.env -> .env) runs the CLI from
+# the CI-published container instead of the source checkout; blank (default)
+# keeps the from-source uv path. The COG root is mounted at the same path so
+# recorded cog_paths stay valid, and config/ is mounted read-write so AOI files
+# (committed seeds and dashboard uploads) are visible to the container.
+app_run() {
+    if [ -n "${APP_IMAGE:-}" ]; then
+        local cog_root="${FOREST_SENTINEL_COG_ROOT:-/data/cogs}"
+        local docker_args=(run --rm --network host)
+        [ -f "${ENV_FILE}" ] && docker_args+=(--env-file "${ENV_FILE}")
+        docker_args+=(-v "${cog_root}:${cog_root}" -v "$(pwd)/config:/app/config")
+        docker "${docker_args[@]}" "${APP_IMAGE}" "$@"
+    else
+        uv run "$@"
+    fi
+}
+
 UNTIL="$(date -u +%Y-%m-%d)"
 SINCE="$(date -u -d "-${WINDOW_DAYS} days" +%Y-%m-%d)"
 
@@ -59,7 +76,8 @@ common_args=(--since "${SINCE}" --until "${UNTIL}")
 if [ "${#aoi_files[@]}" -eq 0 ]; then
     # Preserve the single-AOI error path: let the CLI report the missing file.
     echo "==> forest-sentinel run --aoi ${AOI_PATH} ${common_args[*]}"
-    exec uv run forest-sentinel run --aoi "${AOI_PATH}" "${common_args[@]}"
+    app_run forest-sentinel run --aoi "${AOI_PATH}" "${common_args[@]}"
+    exit "$?"
 fi
 
 overall=0
@@ -71,6 +89,6 @@ for file in "${aoi_files[@]}"; do
     echo "==> forest-sentinel run --aoi ${file} ${common_args[*]}"
     # One failing AOI must not starve the others; the exit code still alerts
     # the scheduler if any AOI failed.
-    uv run forest-sentinel run --aoi "${file}" "${common_args[@]}" || overall=1
+    app_run forest-sentinel run --aoi "${file}" "${common_args[@]}" || overall=1
 done
 exit "${overall}"

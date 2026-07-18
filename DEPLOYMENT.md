@@ -354,6 +354,19 @@ It ships **disabled** (guarded by `if: false` and a commented `schedule`). To en
   re-derived (scene ∩ AOI is not stored), so output is "same conclusions" rather
   than bit-identical; and a row whose recorded `ee_script_version` differs from
   the running build is refused unless `--force-version` is passed.
+- **Running from the published image.** CI publishes the app as a container
+  image on every `main` push (#96): `ghcr.io/jackrsteiner/open-forest-sentinel`,
+  tagged `latest` and with the commit SHA, smoke-tested (CLI, migrations,
+  dashboard import) before pushing. Setting `APP_IMAGE` in `config/instance.env`
+  switches the VM to that image: `vm_setup.sh` pulls it and runs migrations in
+  the container, and the systemd wrappers (`run_pipeline.sh`, `prune_cogs.sh`,
+  `serve_dashboard.sh`) run the CLI/uvicorn via `docker run` — no `uv sync` /
+  source build on the e2-micro, and a pinned SHA tag means the instance runs a
+  released, CI-tested artifact. Blank `APP_IMAGE` (the default) keeps the
+  from-source path exactly as before. The container joins the host network (the
+  compose-published Postgres port and the metadata server both resolve) and
+  mounts the COG root at its host path plus `config/` read-write, so catalog
+  paths and AOI uploads behave identically in both modes.
 - **Database backups.** `pg_dump` the `forest_sentinel` database on a schedule;
   store dumps off-VM.
 - **Logs.** `journalctl -u forest-sentinel-pipeline` and

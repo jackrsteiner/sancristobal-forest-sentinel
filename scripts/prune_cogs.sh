@@ -25,4 +25,15 @@ if [ -f "${ENV_FILE}" ]; then
     set +a
 fi
 
+# Image mode (#96): APP_IMAGE (config/instance.env -> .env) runs the CLI from
+# the CI-published container; blank (default) keeps the from-source uv path.
+# The COG root is mounted at the same path so the store being pruned is the
+# host's canonical one.
+if [ -n "${APP_IMAGE:-}" ]; then
+    cog_root="${FOREST_SENTINEL_COG_ROOT:-/data/cogs}"
+    docker_args=(run --rm --network host)
+    [ -f "${ENV_FILE}" ] && docker_args+=(--env-file "${ENV_FILE}")
+    docker_args+=(-v "${cog_root}:${cog_root}")
+    exec docker "${docker_args[@]}" "${APP_IMAGE}" forest-sentinel cogs prune "$@"
+fi
 exec uv run forest-sentinel cogs prune "$@"
