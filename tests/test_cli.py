@@ -430,3 +430,53 @@ def test_aoi_delete_unknown_name_errors(
 ) -> None:
     assert main(["aoi", "delete", "No Such AOI"]) == 1
     assert "no AOI named" in capsys.readouterr().err
+
+
+def test_cogs_reproduce_unknown_raster_exits_nonzero(
+    migrated_database: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+
+    assert main(["cogs", "reproduce", "index", "999999"]) == 1
+    assert "index_raster 999999 not found" in capsys.readouterr().err
+
+
+def test_cogs_reproduce_dispatches_by_kind(
+    migrated_database: Engine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`cogs reproduce change <id>` routes to the change path with the build's pin."""
+    from forest_sentinel import reproduce
+    from forest_sentinel.cli import EE_SCRIPT_VERSION
+    from forest_sentinel.models import ChangeRaster
+    from tests.fakes import make_aoi, make_change_raster, make_methodology, make_observation
+
+    with migrated_database.connect() as connection, Session(bind=connection) as session:
+        aoi = make_aoi(session)
+        obs = make_observation(session, aoi, day=6)
+        methodology = make_methodology(session)
+        change = make_change_raster(session, obs, methodology, cog_path="/data/x.tif")
+        session.commit()
+        change_id = change.id
+
+    captured: dict[str, object] = {}
+
+    def fake_reproduce_change(session: object, *, raster: ChangeRaster, **kwargs: object) -> Path:
+        captured["raster_id"] = raster.id
+        captured.update(kwargs)
+        return tmp_path / "x.tif"
+
+    monkeypatch.setattr(earthengine, "initialize", lambda project=None: None)
+    monkeypatch.setattr(storage, "local_disk_storage_from_env", lambda: object())
+    monkeypatch.setattr(reproduce, "reproduce_change_raster", fake_reproduce_change)
+
+    assert main(["cogs", "reproduce", "change", str(change_id), "--force-version"]) == 0
+    assert captured["raster_id"] == change_id
+    assert captured["current_script_version"] == EE_SCRIPT_VERSION
+    assert captured["force_version"] is True
+    assert f"Reproduced change_raster {change_id}" in capsys.readouterr().out

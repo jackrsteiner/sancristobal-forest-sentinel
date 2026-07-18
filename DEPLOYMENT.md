@@ -345,6 +345,15 @@ It ships **disabled** (guarded by `if: false` and a commented `schedule`). To en
   **database rows are never deleted** — they are the reproduction recipe, and the
   pipeline's missing-file path re-exports a pruned raster on demand. Preview with
   `./scripts/prune_cogs.sh --dry-run`.
+- **Reproducing a pruned raster.** The pipeline only re-exports missing COGs
+  *inside* the active window; for anything older (e.g. evidence for an old event),
+  `forest-sentinel cogs reproduce {index|change} <raster-id>` (#94) rebuilds the
+  raster in Earth Engine from its recorded provenance — the scene id, methodology
+  parameters, and (for change rasters) the exact recorded baseline sources — and
+  re-exports it to its recorded `cog_path`. Two caveats: the export region is
+  re-derived (scene ∩ AOI is not stored), so output is "same conclusions" rather
+  than bit-identical; and a row whose recorded `ee_script_version` differs from
+  the running build is refused unless `--force-version` is passed.
 - **Database backups.** `pg_dump` the `forest_sentinel` database on a schedule;
   store dumps off-VM.
 - **Logs.** `journalctl -u forest-sentinel-pipeline` and

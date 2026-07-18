@@ -20,7 +20,16 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from forest_sentinel import earthengine, forestmask, indices, pipeline, qa, retention, storage
+from forest_sentinel import (
+    earthengine,
+    forestmask,
+    indices,
+    pipeline,
+    qa,
+    reproduce,
+    retention,
+    storage,
+)
 from forest_sentinel.aoi import (
     AOIS_DIR_ENV_VAR,
     DEFAULT_AOIS_DIR,
@@ -40,7 +49,14 @@ from forest_sentinel.methodology import (
     MethodologyVersionMismatch,
     resolve_methodology_version,
 )
-from forest_sentinel.models import Aoi, DisturbanceEvent, Observation, PipelineRun
+from forest_sentinel.models import (
+    Aoi,
+    ChangeRaster,
+    DisturbanceEvent,
+    IndexRaster,
+    Observation,
+    PipelineRun,
+)
 from forest_sentinel.storage import StorageConfigurationError, StorageError
 
 # Pins what Google ran for this build, recorded in the methodology version for reproducibility.
@@ -149,6 +165,27 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Report what would be pruned without deleting anything.",
     )
+    reproduce_parser = cogs_subparsers.add_parser(
+        "reproduce",
+        help=(
+            "Re-export one raster from its recorded provenance (e.g. after the "
+            "retention policy pruned its COG). Database rows are never modified."
+        ),
+    )
+    reproduce_parser.add_argument(
+        "kind", choices=["index", "change"], help="Which catalog table the id refers to."
+    )
+    reproduce_parser.add_argument("raster_id", type=int, help="The raster row's id.")
+    reproduce_parser.add_argument(
+        "--force-version",
+        action="store_true",
+        help=(
+            "Reproduce even when the recorded ee_script_version does not match this "
+            "build's pin (logged as a loud warning; the output may differ from the "
+            "recorded provenance)."
+        ),
+    )
+    reproduce_parser.add_argument("--gee-project", default=None)
     return parser
 
 
@@ -162,7 +199,9 @@ def _positive_int_env(name: str, default: int) -> int:
 
 
 def _run_cogs_command(args: argparse.Namespace) -> int:
-    """Dispatch `forest-sentinel cogs prune` (#80). No database access needed."""
+    """Dispatch `forest-sentinel cogs prune|reproduce` (#80/#94)."""
+    if args.cogs_command == "reproduce":
+        return _run_cogs_reproduce(args)
     retention_days = _positive_int_env(retention.RETENTION_DAYS_ENV_VAR, 0)
     if retention_days <= 0:
         print(
@@ -200,6 +239,50 @@ def _run_cogs_command(args: argparse.Namespace) -> int:
     )
     for path in report.pruned:
         print(f"  {path}")
+    return 0
+
+
+def _run_cogs_reproduce(args: argparse.Namespace) -> int:
+    """Dispatch `forest-sentinel cogs reproduce {index|change} <id>` (#94)."""
+    with _disposing_engine() as engine:
+        try:
+            earthengine.initialize(args.gee_project)
+            cog_storage = storage.local_disk_storage_from_env()
+            with Session(engine) as session:
+                if args.kind == "index":
+                    index_raster = session.get(IndexRaster, args.raster_id)
+                    if index_raster is None:
+                        print(f"error: index_raster {args.raster_id} not found", file=sys.stderr)
+                        return 1
+                    path = reproduce.reproduce_index_raster(
+                        session,
+                        raster=index_raster,
+                        storage=cog_storage,
+                        current_script_version=EE_SCRIPT_VERSION,
+                        force_version=args.force_version,
+                    )
+                else:
+                    change_raster = session.get(ChangeRaster, args.raster_id)
+                    if change_raster is None:
+                        print(f"error: change_raster {args.raster_id} not found", file=sys.stderr)
+                        return 1
+                    path = reproduce.reproduce_change_raster(
+                        session,
+                        raster=change_raster,
+                        storage=cog_storage,
+                        current_script_version=EE_SCRIPT_VERSION,
+                        force_version=args.force_version,
+                    )
+        except StorageConfigurationError as exc:
+            print(f"error: storage is not configured ({exc})", file=sys.stderr)
+            return 1
+        except (StorageError, EarthEngineError, reproduce.ReproduceError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except OperationalError as exc:
+            print(f"error: could not connect to the database ({exc})", file=sys.stderr)
+            return 1
+    print(f"Reproduced {args.kind}_raster {args.raster_id} -> {path}")
     return 0
 
 
