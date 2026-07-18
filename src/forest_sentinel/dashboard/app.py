@@ -116,6 +116,15 @@ def create_app() -> FastAPI:
         """The Leaflet map page that consumes the JSON/GeoJSON API."""
         return _INDEX_HTML.read_text()
 
+    @app.get("/api/capabilities")
+    def capabilities() -> dict[str, bool]:
+        """Which write features this instance has enabled (all off = world-open)."""
+        return {
+            "aoi_uploads": os.environ.get(AOI_UPLOADS_ENV_VAR, "1") != "0",
+            "pipeline_trigger": os.environ.get(PIPELINE_TRIGGER_ENV_VAR, "1") != "0",
+            "reviews": os.environ.get(REVIEWS_ENV_VAR, "1") != "0",
+        }
+
     @app.get("/api/aois")
     def list_aois(session: SessionDep) -> list[dict[str, Any]]:
         """AOIs with summary metrics (event counts)."""

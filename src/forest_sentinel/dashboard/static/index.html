@@ -26,6 +26,25 @@
       .event.selected { border-color: #c0392b; }
       .status-new { color: #2980b9; }
       .status-ongoing { color: #c0392b; }
+      .status-resolved { color: #7f8c8d; }
+      /* Manual-review opinions: outlined badges, visually distinct from the
+         filled-text automatic status so machine truth and human judgment never
+         blend. */
+      .opinion {
+        border: 1px solid currentColor; border-radius: 3px; padding: 0 4px;
+        font-size: 11px; margin-left: 4px;
+      }
+      .opinion-confirmed { color: #27ae60; }
+      .opinion-false_positive { color: #c0392b; }
+      .opinion-uncertain { color: #e67e22; }
+      .opinion-resolved { color: #7f8c8d; }
+      #event-filters { margin: 8px 0 2px; font-size: 12px; }
+      #event-filters select { font-size: 12px; padding: 2px; }
+      .review-form { margin-top: 6px; }
+      .review-form button { font-size: 11px; padding: 2px 6px; margin: 2px 4px 2px 0; }
+      .review-form input { font-size: 12px; width: 100%; margin-top: 4px; padding: 3px; }
+      .review-entry { font-size: 12px; color: #555; margin: 2px 0; }
+      body.reviews-disabled .review-form { display: none; }
       .timeline { font-size: 13px; margin: 6px 0; }
       .evidence { font-size: 12px; color: #555; }
       .muted { color: #888; }
@@ -68,6 +87,24 @@
         <span id="run-now-status" class="muted"></span>
       </div>
       <div id="runs"></div>
+      <div id="event-filters" class="muted">
+        status
+        <select id="filter-status">
+          <option value="">all</option>
+          <option value="new">new</option>
+          <option value="ongoing">ongoing</option>
+          <option value="resolved">resolved</option>
+        </select>
+        opinion
+        <select id="filter-opinion">
+          <option value="">all</option>
+          <option value="unreviewed">unreviewed</option>
+          <option value="confirmed">confirmed</option>
+          <option value="false_positive">false positive</option>
+          <option value="uncertain">uncertain</option>
+          <option value="resolved">resolved</option>
+        </select>
+      </div>
       <div id="events"></div>
       <div id="methodologies">
         <h2>Methodologies</h2>
@@ -97,6 +134,7 @@
       const layersById = {};
       const aoiBboxById = {};
       let currentAoiId = null;
+      let currentCollection = null;
       // A "running" run whose last progress event is older than this is likely dead
       // (SIGKILL / systemd timeout before the next run flips it to "interrupted").
       const STALE_RUN_MS = 2 * 60 * 60 * 1000;
@@ -137,27 +175,49 @@
         currentAoiId = aoiId;
         zoomToAoi(aoiId);
         loadRuns(aoiId);
-        const collection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
-        if (eventsLayer) map.removeLayer(eventsLayer);
-        // Drop layer references from the previous AOI so clicks can't zoom to
-        // layers that are no longer on the map.
-        Object.keys(layersById).forEach((id) => delete layersById[id]);
-        eventsLayer = L.geoJSON(collection, {
-          style: (f) => ({
-            color: f.properties.status === "ongoing" ? "#c0392b" : "#2980b9",
-            weight: 2,
-          }),
-          onEachFeature: (feature, layer) => {
-            layersById[feature.properties.id] = layer;
-            layer.on("click", () => showEvent(feature.properties.id));
-          },
-        }).addTo(map);
-
-        const features = collection.features;
-        document.getElementById("summary").textContent = `${features.length} disturbance events`;
-        renderEventList(features);
+        currentCollection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
+        renderEvents();
         // The map frames the whole AOI (zoomToAoi above); clicking an event in
         // the list or on the map still zooms to that event.
+      }
+
+      // The automatic status and the manual opinion are independent axes; both
+      // filters apply together (AND) so either or both can narrow the view.
+      function featurePassesFilters(p) {
+        const status = document.getElementById("filter-status").value;
+        const opinion = document.getElementById("filter-opinion").value;
+        if (status && p.status !== status) return false;
+        if (opinion === "unreviewed") return p.latest_opinion == null;
+        if (opinion && p.latest_opinion !== opinion) return false;
+        return true;
+      }
+
+      const STATUS_COLORS = { ongoing: "#c0392b", new: "#2980b9", resolved: "#7f8c8d" };
+
+      function renderEvents() {
+        const all = currentCollection ? currentCollection.features : [];
+        const features = all.filter((f) => featurePassesFilters(f.properties));
+        if (eventsLayer) map.removeLayer(eventsLayer);
+        // Drop layer references from the previous render so clicks can't zoom
+        // to layers that are no longer on the map.
+        Object.keys(layersById).forEach((id) => delete layersById[id]);
+        eventsLayer = L.geoJSON(
+          { type: "FeatureCollection", features },
+          {
+            style: (f) => ({
+              color: STATUS_COLORS[f.properties.status] || "#2980b9",
+              weight: 2,
+            }),
+            onEachFeature: (feature, layer) => {
+              layersById[feature.properties.id] = layer;
+              layer.on("click", () => showEvent(feature.properties.id));
+            },
+          },
+        ).addTo(map);
+        const filtered = features.length !== all.length ? ` (of ${all.length})` : "";
+        document.getElementById("summary").textContent =
+          `${features.length}${filtered} disturbance events`;
+        renderEventList(features);
       }
 
       function runStatusLabel(run) {
@@ -390,6 +450,17 @@
         loadMethodologies();
       }
 
+      function opinionLabel(opinion) {
+        return opinion === "false_positive" ? "false positive" : opinion;
+      }
+
+      function opinionBadge(opinion) {
+        const badge = document.createElement("span");
+        badge.className = `opinion opinion-${opinion}`;
+        badge.textContent = opinionLabel(opinion);
+        return badge;
+      }
+
       function renderEventList(features) {
         const container = document.getElementById("events");
         container.innerHTML = "";
@@ -403,9 +474,76 @@
             `<span class="status-${p.status}">${p.status}</span>` +
             `<div class="muted">first detected ${fmtDate(p.first_detected_at)} · ` +
             `footprint ${fmtArea(p.footprint_area_m2)} · ${p.observation_count} obs</div>`;
+          // The human opinion sits beside — never replaces — the automatic status.
+          if (p.latest_opinion) {
+            div.querySelector("strong").after(document.createTextNode(" "));
+            div.children[1].after(opinionBadge(p.latest_opinion));
+          }
           div.onclick = () => showEvent(p.id);
           container.appendChild(div);
         });
+      }
+
+      // Review section built with DOM APIs: notes/reviewer are free text from
+      // humans and must never be injected as HTML.
+      function reviewSection(detail) {
+        const wrap = document.createElement("div");
+        // Buttons and inputs live inside the card, whose click handler reloads
+        // the detail — don't let form interaction re-trigger it.
+        wrap.addEventListener("click", (e) => e.stopPropagation());
+        const heading = document.createElement("div");
+        heading.className = "timeline";
+        heading.innerHTML = "<em>Review:</em>";
+        wrap.appendChild(heading);
+
+        detail.reviews.forEach((review) => {
+          const entry = document.createElement("div");
+          entry.className = "review-entry";
+          entry.appendChild(document.createTextNode(`${fmtDate(review.created_at)} `));
+          entry.appendChild(opinionBadge(review.opinion));
+          const tail = [review.reviewer, review.notes].filter(Boolean).join(" — ");
+          if (tail) entry.appendChild(document.createTextNode(` ${tail}`));
+          wrap.appendChild(entry);
+        });
+        if (!detail.reviews.length) {
+          const none = document.createElement("div");
+          none.className = "review-entry muted";
+          none.textContent = "not yet reviewed";
+          wrap.appendChild(none);
+        }
+
+        const form = document.createElement("div");
+        form.className = "review-form";
+        const notes = document.createElement("input");
+        notes.placeholder = "notes (optional)";
+        const reviewer = document.createElement("input");
+        reviewer.placeholder = "your name (optional)";
+        ["confirmed", "false_positive", "uncertain", "resolved"].forEach((opinion) => {
+          const button = document.createElement("button");
+          button.textContent = opinionLabel(opinion);
+          button.onclick = () => postReview(detail.id, opinion, notes.value, reviewer.value);
+          form.appendChild(button);
+        });
+        form.appendChild(notes);
+        form.appendChild(reviewer);
+        wrap.appendChild(form);
+        return wrap;
+      }
+
+      async function postReview(eventId, opinion, notes, reviewer) {
+        const response = await fetch(`/api/events/${eventId}/reviews`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ opinion, notes: notes || null, reviewer: reviewer || null }),
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          window.alert(body.detail || `Review failed (${response.status}).`);
+          return;
+        }
+        // Refresh the list (badge + filters see the new opinion), then reopen.
+        await loadEvents(currentAoiId);
+        showEvent(eventId);
       }
 
       async function showEvent(eventId) {
@@ -436,6 +574,7 @@
           detailDiv.innerHTML =
             `<div class="timeline"><em>Timeline (expansion):</em></div>${rows}` +
             `<div class="timeline"><em>Evidence:</em></div>${evidence}`;
+          detailDiv.appendChild(reviewSection(detail));
           card2.appendChild(detailDiv);
         }
       }
@@ -556,8 +695,20 @@
         }
       }
 
+      // Reviews are disabled on a world-open dashboard; hide the form entirely.
+      async function loadCapabilities() {
+        try {
+          const caps = await (await fetch("/api/capabilities")).json();
+          document.body.classList.toggle("reviews-disabled", !caps.reviews);
+        } catch (e) {
+          /* leave the default (enabled) — the API guard is the backstop */
+        }
+      }
+
       document.getElementById("run-now").addEventListener("click", runPipelineNow);
       document.getElementById("stop-run").addEventListener("click", stopPipelineRun);
+      document.getElementById("filter-status").addEventListener("change", renderEvents);
+      document.getElementById("filter-opinion").addEventListener("change", renderEvents);
       document.getElementById("aoi-upload").addEventListener("click", uploadAoi);
       document.getElementById("aoi-select").addEventListener("change", (e) =>
         loadEvents(e.target.value),
@@ -569,6 +720,7 @@
       }, 15000);
       loadAois();
       loadMethodologies();
+      loadCapabilities();
     </script>
   </body>
 </html>

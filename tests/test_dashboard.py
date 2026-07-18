@@ -610,3 +610,20 @@ def test_record_review_requires_a_json_body(client: TestClient, db_session: Sess
 def test_vm_setup_disables_reviews_on_a_world_open_dashboard() -> None:
     setup = (Path(__file__).resolve().parents[1] / "scripts" / "vm_setup.sh").read_text()
     assert 'echo "FOREST_SENTINEL_REVIEWS=0"' in setup
+
+
+def test_capabilities_reflect_env_guards(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert client.get("/api/capabilities").json() == {
+        "aoi_uploads": True,
+        "pipeline_trigger": True,
+        "reviews": True,
+    }
+    monkeypatch.setenv("FOREST_SENTINEL_REVIEWS", "0")
+    monkeypatch.setenv("FOREST_SENTINEL_AOI_UPLOADS", "0")
+    assert client.get("/api/capabilities").json() == {
+        "aoi_uploads": False,
+        "pipeline_trigger": True,
+        "reviews": False,
+    }
