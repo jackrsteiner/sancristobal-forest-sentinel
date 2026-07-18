@@ -1,25 +1,23 @@
-# Scheduled pipeline run — the intended-direction scheduler for Slice 3 / epic E11
-# (see docs/work-plan.md). It triggers the optical-change pipeline on the GCE VM
-# over a rolling window. Disabled by default: you opt in by removing the
-# `if: false` guard and uncommenting the `schedule` trigger.
+# Manual remote pipeline trigger (epic E11 closed 2026-07-18 — see docs/work-plan.md).
+# Scheduling is owned by the on-VM systemd timer (forest-sentinel-pipeline.timer,
+# daily 03:00 UTC, installed by vm_setup.sh); the Actions-cron path was retired as
+# redundant. This workflow remains as a manual, no-SSH-client-needed way to kick a
+# run from the GitHub UI.
 #
-# This is the GitHub-Actions-cron path from docs/architecture.md. The VM owns the
-# Earth Engine credentials and the COG store; this workflow just kicks the run via
-# SSH. Authentication uses Workload Identity Federation (set up per instance by
-# scripts/setup_wif.sh) — short-lived OIDC tokens, no service-account keys.
+# The VM owns the Earth Engine credentials and the COG store; this workflow just
+# starts the systemd unit over SSH. Authentication uses Workload Identity
+# Federation (set up per instance by scripts/setup_wif.sh) — short-lived OIDC
+# tokens, no service-account keys.
 #
 # Required repository variables (printed by scripts/setup_wif.sh):
 #   WIF_PROVIDER     workload identity provider resource name
 #   PROVISIONER_SA   service account email to impersonate
 # The project / VM name / zone come from the committed config/instance.env.
 
-name: Scheduled pipeline run
+name: Run pipeline now (manual)
 
 on:
   workflow_dispatch:
-  # Uncomment to enable the cron schedule (daily at 03:00 UTC):
-  # schedule:
-  #   - cron: "0 3 * * *"
 
 permissions:
   id-token: write   # OIDC token for Workload Identity Federation
@@ -28,8 +26,6 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    # Remove this guard once the variables above are configured.
-    if: ${{ false }}
     steps:
       - uses: actions/checkout@v4
 

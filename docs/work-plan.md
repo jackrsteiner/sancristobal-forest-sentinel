@@ -118,12 +118,12 @@ Run the end-to-end pipeline on a cron schedule on a Google Compute Engine VM, tr
 
 **Acceptance:** scheduled runs refresh the dashboard without manual intervention.
 
-> **Status: substantially delivered ahead of Slice 3.** Unattended scheduling ships today as a
+> **Status: DELIVERED (epic closed 2026-07-18).** Unattended scheduling ships as a
 > systemd timer on the VM (`scripts/systemd/forest-sentinel-pipeline.timer`, daily 03:00 UTC,
 > installed by `vm_setup.sh`) with failure handling via the CLI's nonzero exit and `journalctl`
-> logging; VM provisioning is automated end to end (see E18). The GitHub-Actions cron path
-> exists as `.github/workflows/scheduled-run.yml` (WIF-authenticated, shipped **disabled**);
-> enabling it is the remaining E11 work.
+> logging; VM provisioning is automated end to end (see E18). The GitHub-Actions cron path was
+> **retired** rather than enabled — redundant with the proven timer; `scheduled-run.yml` keeps
+> only its `workflow_dispatch` manual remote trigger.
 
 ### E12 — Raster storage layout
 Store COGs on the **VM's local filesystem** (e.g. `/data/cogs/`) with a deterministic layout, behind a storage abstraction, for $0 cost. Earth Engine exports COGs to a transient GCS staging area (`Export.image.toCloudStorage`); the abstraction owns the EE export-task lifecycle (submit, poll, locate output), copies the finished COG to local disk, clears the staging object, and provides the local COG path to the metadata catalog. (Future path: keep COGs in GCS once volume outgrows the free disk — a backend swap behind the same interface.)
@@ -240,14 +240,14 @@ This map is the *horizontal* view. The "Vertical slices" section below is the *d
 
 The epics above describe *where code lives*. Vertical slices describe *what working capability ships and when*. Each slice is a thin end-to-end thread across several epics and ends in a concrete hallway test. Build the thinnest slice first (a "walking skeleton") and deepen it; do not finish one horizontal epic at a time. Each slice is tracked as a GitHub milestone.
 
-Slices 0–2 are complete: Slice 1 shipped as beads #35–#42 (plus QA masking, #54, pulled forward from E14), and Slice 2 shipped event tracking and the FastAPI + Leaflet dashboard (see `docs/architecture.md` §5.9–§5.10 for the resolved designs). Slice 3's *scheduling* half shipped early — the systemd timer (E11) and the full instance-deployment machinery (E18) are live — so its remaining scope is manual review (E8) plus enabling the Actions cron; it still needs a planning pass for the review work. Slices 4–6 are sketched at the table level only.
+Slices 0–2 are complete: Slice 1 shipped as beads #35–#42 (plus QA masking, #54, pulled forward from E14), and Slice 2 shipped event tracking and the FastAPI + Leaflet dashboard (see `docs/architecture.md` §5.9–§5.10 for the resolved designs). Slice 3's *scheduling* half shipped early — the systemd timer (E11) and the full instance-deployment machinery (E18) are live — so its remaining scope is manual review (E8); the Actions cron path is **retired** (the timer is the scheduling answer). The planning pass for Slices 3–6 was completed 2026-07-18: the open design questions are resolved below and in `docs/architecture.md`, and each slice has a bead breakdown ready to file.
 
 | Slice | Capability delivered | Epics touched | Hallway test |
 |-------|----------------------|---------------|--------------|
 | **Slice 0 — Walking skeleton** | Project foundations plus the thinnest end-to-end thread: load a configured AOI, persist it, report it. | E1, E13, E2, E11 (thin) | `forest-sentinel run --aoi <fixture>` loads a configured AOI, persists it to PostGIS, and prints a summary; CI is green on pull requests. |
 | **Slice 1 — Optical change detection** | AOI → HLS observations → NBR/NDVI COGs → ΔNBR vs. baseline → candidate disturbance polygons in PostGIS. | E3, E4, E5, E6, E12, E9, E13 | Run over a small test AOI and eyeball the emitted candidate polygons on a map or GeoJSON dump. |
 | **Slice 2 — Events + dashboard** | Track candidates over time into disturbance events with per-date measurements; stand up the lightweight web dashboard. | E7, E10 | Open the dashboard and see events on a map with timelines, sizes, and status. |
-| **Slice 3 — Scheduling + review** | Run the pipeline on a schedule (systemd timer: **shipped**; Actions cron: scaffolded, disabled); let a human validate detections. | E11, E8 | A scheduled run refreshes the dashboard unattended (✓ via the timer); a reviewer can mark an event reviewed, false-positive, or uncertain. |
+| **Slice 3 — Scheduling + review** | Run the pipeline on a schedule (systemd timer: **shipped**; Actions cron: **retired** — `workflow_dispatch` remains as a manual remote trigger); let a human validate detections. | E11, E8 | A scheduled run refreshes the dashboard unattended (✓ via the timer); a reviewer can record confirmed / false-positive / uncertain / resolved opinions with notes, shown and filterable alongside the automatic status. |
 | **Slice 4 — QA & confidence hardening** | A transparent confidence model on outputs, plus the remaining QA hardening (Fmask masking itself shipped early, inside Slice 1 — see E14; what remains is surfacing quality metadata in the dashboard). | E14 (residual), E15 | Detections show honest quality metadata and an explained confidence level in the dashboard. |
 | **Slice 5 — Radar augmentation** | Sentinel-1 GRD backscatter change feeding the existing event model. | E16, E13 | The pipeline produces radar change products and radar-derived candidates for a configured AOI. |
 | **Slice 6 — Context layers** | Concessions, roads, rivers, and other context joined to disturbance events. | E17, E10 | The dashboard shows how a detection relates to concessions, protected areas, roads, and rivers. |
@@ -287,31 +287,102 @@ Slice 2 is implemented and merged. The design questions its planning pass resolv
 Delivered: `disturbance_event` + `event_observation` tables and models (migration `0008`),
 `events.py` tracking wired into `forest-sentinel run`, and the dashboard backend / API + map UI.
 
-### Slice 3 — bead outline
+### Slice 3 — bead breakdown (planning pass complete, 2026-07-18)
 
-> **OUTLINE ONLY — not ready for agentic work.** These beads are a sketch. Before any are implemented, this slice needs a dedicated planning pass that (a) resolves the open design questions below and (b) expands each into a full `agent-bead` issue. Do not file or start these as-is.
+Depends on Slice 2. The open design questions are resolved and recorded in
+`docs/architecture.md` §5.9/§7:
 
-Depends on Slice 2. Open questions to resolve first: the review UI shape (tied to the dashboard framework); the review **auth / access model**.
+- **Auth / access model: tunnel-as-auth.** No app-level auth; review endpoints follow the
+  existing env-guard pattern (`FOREST_SENTINEL_REVIEWS`, forced to `0` by `vm_setup.sh` when
+  `OPEN_DASHBOARD=1`). The SSH tunnel remains the access boundary, exactly as for the
+  run/stop/upload endpoints.
+- **Statuses vs opinions.** The automatic event lifecycle (`new`/`ongoing`/`resolved`) is
+  machine-owned and never mutated by review. Manual review records a **parallel opinion**
+  (`confirmed`/`false_positive`/`uncertain`/`resolved` + notes), append-only, shown alongside
+  the automatic status; the dashboard filters by either or both.
+- **Actions cron: retired.** The on-VM systemd timer is the scheduling answer;
+  `scheduled-run.yml` keeps only its `workflow_dispatch` manual trigger. E11 is closed.
 
-- `manual_review` table + model (E8, E13).
-- Review actions surfaced in the dashboard (E8, E10).
-- GitHub Actions cron workflow + scheduled pipeline run (E11) — *largely shipped:* the
-  systemd-timer scheduler is live and `.github/workflows/scheduled-run.yml` exists
-  (WIF-based, disabled); the remaining bead is enabling/validating the Actions path.
-- Run logging + failure handling (E11) — *shipped:* nonzero exit on export failures,
-  `journalctl` logging via the systemd units.
+Beads:
+
+- **3.1** `manual_review` table + model (E8, E13) — migration `0013`: event FK, opinion enum,
+  notes, optional free-text reviewer, `created_at`; append-only, latest opinion is current.
+- **3.2** Review API (E8, E10) — `POST /api/events/{id}/reviews` under the new guard;
+  reviews in `event_detail`; latest opinion on event features. Depends on 3.1.
+- **3.3** Review UI (E8, E10) — opinion buttons + notes on the event card; status badge and
+  opinion badge side by side; filters by status / opinion / unreviewed. Depends on 3.2.
+- **3.4** Automatic `resolved` lifecycle (E7, E11) — `ongoing → resolved` when
+  `last_detected_at` is older than `RESOLVED_AFTER_DAYS` (default 90, `config/instance.env`)
+  **and** a later sufficiently clear observation exists (cloud gaps must not fake resolution);
+  re-detection flips back to `ongoing`. No dependencies.
+
+### Slice 4 — bead breakdown (planned)
+
+Depends on Slice 3 (3.4 for lifecycle inputs). Decisions recorded in `docs/architecture.md`
+§5.11: a **full transparent weighted rule** — magnitude (candidate `delta_min`/`delta_mean`) +
+persistence (observation count) + coverage (valid-pixel fractions) + currency (days since last
+observation) → `low`/`medium`/`high`, every input and the rule version recorded;
+**append-only** assessments, one per pipeline run per touched event.
+
+- **4.1** Surface quality metadata in the dashboard (E14 residual) — timeline rows gain the
+  candidate ΔNBR statistics + valid fraction; evidence gains raster fractions.
+- **4.2** `confidence_assessment` + rule engine (E15) — migration `0014`, new
+  `confidence.py`, runs in the pipeline after event tracking. Depends on 3.4.
+- **4.3** Confidence in the dashboard (E15, E10) — level badges/filtering, expandable
+  recorded inputs, assessment history. Depends on 4.2.
+
+### Slice 5 — bead breakdown (planned)
+
+Depends on Slice 4. Decisions: radar is its **own methodology lineage** (`radar-change`,
+content-addressed parameters); events stay methodology-scoped, and "radar-confirmed" is
+computed in the confidence model as spatial cross-lineage agreement. Metric: **VV backscatter
+(dB) drop vs the trailing median** of prior same-orbit-direction scenes, threshold ≈ −3 dB as
+a tunable methodology parameter. Radar statistics are persisted per candidate at extraction
+time; radar COGs stay droppable (architecture §7 constraint). SLC coherence remains out of
+scope.
+
+- **5.1** `sensor_source` registry + Sentinel-1 GRD discovery (E16, E13) — migration `0015`,
+  `sentinel1.py` mirroring `hls.py`; orbit fields on `observation`.
+- **5.2** Backscatter change stage (E16) — VV dB delta vs same-orbit trailing median, stored
+  as `change_raster` rows with `change_type="delta_vv_db"` (the `radar_change_raster` domain
+  object realized through the existing FK graph). Depends on 5.1.
+- **5.3** Radar candidates (E16, E6) — threshold/vectorize the dB delta, forest mask applies,
+  extraction-time dB statistics persisted; per-source change-type maps replace the optical
+  constants in `pipeline.py`/`change.py`. Depends on 5.2.
+- **5.4** Cross-lineage agreement in confidence (E15, E16) — optical-only / radar-only / both
+  classification feeding the confidence rule. Depends on 5.3 and 4.2.
+- **5.5** Sensor attribution in the dashboard (E16, E10) — optical/radar/both badges and
+  sensor/method in event detail. Depends on 5.4.
+
+### Slice 6 — bead breakdown (planned)
+
+Depends on Slice 2 (dashboard); independent of Slices 4–5. Decision: context layers are
+**operator-uploaded GeoJSON**, mirroring the AOI upload/harvest pattern; `event_context` is
+containment/intersection + nearest-distance within a configurable buffer (default 5 km).
+
+- **6.1** `context_layer` + `context_feature` schemas + loader (E17, E13) — migration `0016`,
+  `forest-sentinel context load`, `config/context/*.geojson` harvested like AOIs.
+- **6.2** `event_context` computation (E17) — PostGIS containment + proximity per layer kind
+  after event tracking; rows replaced per event per run. Depends on 6.1.
+- **6.3** Context in the dashboard (E17, E10) — map layer toggles, per-event context
+  relations, guarded layer upload. Depends on 6.2.
 
 ## Open questions
 
 These are points the README does not resolve. They should be answered inside the relevant epic and recorded in `docs/architecture.md` once decided.
 
-- Concrete table schema for `manual_review` (Slice 3).
-- Authentication / access model for the review workflows (Slice 3; the Slice 2 dashboard shipped read-only and unauthenticated).
-- Retention policy for COGs and observations — partially resolved: tracked as the
-  automated-retention bead (#80, epic E19); the design constraints (COGs are outputs never
+- ~~Concrete table schema for `manual_review` (Slice 3).~~ **Resolved 2026-07-18** — see the
+  Slice 3 bead breakdown (bead 3.1) and `docs/architecture.md` §5.9.
+- ~~Authentication / access model for the review workflows.~~ **Resolved 2026-07-18:
+  tunnel-as-auth** — no app-level auth; review endpoints use the same env-guard pattern as the
+  other write endpoints and are disabled on a world-open dashboard.
+- Retention policy for COGs and observations — partially resolved: COG retention shipped
+  (#80, epic E19); the design constraints (COGs are outputs never
   inputs; never prune inside `WINDOW_DAYS` + a baseline margin; keep the database rows as the
   reproduction recipe; raster-derived statistics must be persisted at extraction time) are
-  recorded in `docs/architecture.md` §7.
+  recorded in `docs/architecture.md` §7. **Row retention remains open** — deliberately
+  unscheduled until data volume warrants it (rows are small; they are the reproduction
+  recipe).
 
 **Resolved:**
 
