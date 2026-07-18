@@ -512,3 +512,23 @@ def test_downgrade_removes_sensor_source_and_orbit_fields(
     assert "sensor_source" not in inspector.get_table_names()
     observation_columns = {c["name"] for c in inspector.get_columns("observation")}
     assert observation_columns.isdisjoint({"orbit_direction", "relative_orbit"})
+
+
+def test_migrations_add_radar_baseline_provenance(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+    columns = {
+        column["name"]: column for column in inspect(clean_database).get_columns("change_raster")
+    }
+    assert "baseline_source_scene_ids" in columns
+    assert columns["baseline_source_scene_ids"]["nullable"]  # optical rows stay null
+
+
+def test_downgrade_removes_radar_baseline_provenance(
+    alembic_config: Config, clean_database: Engine
+) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0015_sensor_source")
+    columns = {c["name"] for c in inspect(clean_database).get_columns("change_raster")}
+    assert "baseline_source_scene_ids" not in columns

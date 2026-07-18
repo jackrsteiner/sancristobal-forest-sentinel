@@ -89,6 +89,9 @@ class FakeEarthEngine:
             raise EarthEngineError("footprint unavailable")
         return self._footprint
 
+    def select_band(self, image: Any, band: str) -> dict[str, Any]:
+        return {"band": (band, image)}
+
     def normalized_difference(self, image: Any, bands: list[str]) -> dict[str, Any]:
         self.nd_bands.append(list(bands))
         return {"nd": tuple(bands), "image": image}

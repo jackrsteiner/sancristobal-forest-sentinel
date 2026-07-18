@@ -200,6 +200,11 @@ class ChangeRaster(Base):
     cog_path: Mapped[str] = mapped_column(String, nullable=False)
     baseline_window: Mapped[int] = mapped_column(Integer, nullable=False)
     valid_pixel_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Radar baseline provenance (#116): the ordered source scene ids the trailing
+    # median was built from. Optical deltas record their baseline through
+    # change_raster_source (index-raster FKs) instead; radar has no per-scene
+    # index rasters, so the recipe is recorded here. Null for optical rows.
+    baseline_source_scene_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
