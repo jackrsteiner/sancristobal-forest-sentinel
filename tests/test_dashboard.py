@@ -455,3 +455,77 @@ def test_trigger_pipeline_run_requires_a_json_body(client: TestClient) -> None:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     assert response.status_code == 422
+
+
+def test_stop_pipeline_run_stops_the_service_and_stamps_interrupted(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The dashboard package re-exports `app` (the FastAPI instance), shadowing
+    # the submodule on attribute access — go through sys.modules instead.
+    app_module = sys.modules["forest_sentinel.dashboard.app"]
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    running = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
+    finished = _seed_run(
+        db_session, aoi, started_at=datetime(2026, 7, 15, 3, 0, tzinfo=UTC), status="succeeded"
+    )
+    db_session.flush()
+
+    recorded: list[tuple[str, ...]] = []
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> _Result:
+        recorded.append(tuple(command))
+        return _Result()
+
+    monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+    response = client.post("/api/pipeline/stop", json={})
+    assert response.status_code == 202
+    assert response.json() == {"stopped_runs": 1}
+    assert recorded == [app_module.PIPELINE_STOP_COMMAND]
+    # The runs panel tells the truth immediately: running -> interrupted; the
+    # already-finished run keeps its terminal status.
+    db_session.expire_all()
+    assert db_session.get(PipelineRun, running.id).status == "interrupted"
+    assert db_session.get(PipelineRun, finished.id).status == "succeeded"
+
+
+def test_stop_pipeline_run_failure_leaves_runs_untouched(
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_module = sys.modules["forest_sentinel.dashboard.app"]
+    aoi = make_aoi(db_session, name="Seeded AOI")
+    running = _seed_run(db_session, aoi, started_at=datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
+    db_session.flush()
+
+    class _Result:
+        returncode = 1
+        stderr = "Failed to connect to bus"
+
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *a, **k: _Result())
+    response = client.post("/api/pipeline/stop", json={})
+    assert response.status_code == 502
+    assert "Failed to connect to bus" in response.json()["detail"]
+    # The stop did not happen, so the row must still read running.
+    db_session.expire_all()
+    assert db_session.get(PipelineRun, running.id).status == "running"
+
+
+def test_stop_pipeline_run_can_be_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_PIPELINE_TRIGGER", "0")
+    response = client.post("/api/pipeline/stop", json={})
+    assert response.status_code == 403
+    assert "disabled" in response.json()["detail"]
+
+
+def test_stop_pipeline_run_requires_a_json_body(client: TestClient) -> None:
+    response = client.post(
+        "/api/pipeline/stop",
+        content="x=1",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert response.status_code == 422

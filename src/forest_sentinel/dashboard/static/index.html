@@ -64,6 +64,7 @@
       <div id="summary" class="muted"></div>
       <div id="pipeline-controls">
         <button id="run-now">Run pipeline now</button>
+        <button id="stop-run">Stop run</button>
         <span id="run-now-status" class="muted"></span>
       </div>
       <div id="runs"></div>
@@ -518,7 +519,45 @@
         }
       }
 
+      async function stopPipelineRun() {
+        // A stop, not an undo: committed checkpoints are kept and reused, and
+        // the daily timer still fires the next scheduled run.
+        const confirmed = window.confirm(
+          "Stop the current pipeline run?\n\n" +
+            "Completed batches are kept and reused by the next run; " +
+            "the daily schedule still runs as normal.",
+        );
+        if (!confirmed) return;
+        const button = document.getElementById("stop-run");
+        const status = document.getElementById("run-now-status");
+        status.className = "muted";
+        status.textContent = "Stopping…";
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/pipeline/stop", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const body = await response.json();
+          if (!response.ok) {
+            status.className = "muted upload-error";
+            status.textContent = body.detail || `Failed (${response.status}).`;
+            return;
+          }
+          status.textContent =
+            body.stopped_runs > 0
+              ? `Stopped — ${body.stopped_runs} run${body.stopped_runs === 1 ? "" : "s"} marked interrupted.`
+              : "Stopped — no run was executing.";
+          // The interrupted stamp is synchronous; refresh sooner than the poll.
+          setTimeout(() => currentAoiId != null && loadRuns(currentAoiId), 1000);
+        } finally {
+          button.disabled = false;
+        }
+      }
+
       document.getElementById("run-now").addEventListener("click", runPipelineNow);
+      document.getElementById("stop-run").addEventListener("click", stopPipelineRun);
       document.getElementById("aoi-upload").addEventListener("click", uploadAoi);
       document.getElementById("aoi-select").addEventListener("change", (e) =>
         loadEvents(e.target.value),

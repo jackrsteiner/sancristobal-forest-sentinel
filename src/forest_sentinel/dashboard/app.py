@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse
 from geoalchemy2 import Geography
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
-from sqlalchemy import Engine, cast, func, select
+from sqlalchemy import Engine, cast, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -47,6 +47,7 @@ from forest_sentinel.models import (
     PipelineRun,
     PipelineRunEvent,
 )
+from forest_sentinel.runlog import STATUS_INTERRUPTED, STATUS_RUNNING
 from forest_sentinel.storage import StorageError, sanitize_path_component
 
 # How many runs / progress events the runs endpoints return.
@@ -70,6 +71,17 @@ PIPELINE_START_COMMAND = (
     "start",
     "forest-sentinel-pipeline.service",
     "--no-block",
+)
+# Stop is synchronous (no --no-block): SIGTERM is fast, and a blocking result
+# lets the endpoint report failures instead of guessing. The pipeline is
+# checkpoint-committed and resume-safe, so a deliberate stop is exactly the
+# kill it already tolerates (timeouts, SIGKILL) — committed work is kept and
+# the next run (daily timer or Run now) resumes from the last checkpoint.
+PIPELINE_STOP_COMMAND = (
+    "sudo",
+    "systemctl",
+    "stop",
+    "forest-sentinel-pipeline.service",
 )
 
 
@@ -200,6 +212,48 @@ def create_app() -> FastAPI:
                 ),
             )
         return {"detail": "pipeline run requested; progress appears in the runs panel"}
+
+    @app.post("/api/pipeline/stop", status_code=202)
+    def stop_pipeline_run(
+        session: SessionDep, _payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Stop the executing pipeline run (all AOIs run inside one systemd unit).
+
+        Guarded by the same knob as the run trigger — a world-open dashboard must
+        expose neither. This is a stop, not a pause: committed checkpoints are
+        kept and reused, and the daily timer still fires the next run. After a
+        successful stop, rows still marked ``running`` are stamped
+        ``interrupted`` so the runs panel tells the truth immediately instead of
+        waiting for the next run start (or the stale-heartbeat threshold).
+        """
+        if os.environ.get(PIPELINE_TRIGGER_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="pipeline triggering is disabled on this dashboard"
+            )
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed command, no user input
+                PIPELINE_STOP_COMMAND, capture_output=True, text=True, check=False, timeout=30
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(
+                status_code=502, detail=f"could not stop the pipeline service: {exc}"
+            ) from exc
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "could not stop the pipeline service: "
+                    f"{result.stderr.strip() or f'exit code {result.returncode}'}"
+                ),
+            )
+        stopped = session.execute(
+            update(PipelineRun)
+            .where(PipelineRun.status == STATUS_RUNNING)
+            .values(status=STATUS_INTERRUPTED)
+            .returning(PipelineRun.id)
+        ).all()
+        session.commit()
+        return {"stopped_runs": len(stopped)}
 
     @app.get("/api/aois/{aoi_id}/events")
     def aoi_events(aoi_id: int, session: SessionDep) -> dict[str, Any]:
