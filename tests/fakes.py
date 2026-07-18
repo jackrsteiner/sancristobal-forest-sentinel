@@ -197,6 +197,15 @@ def make_methodology(
     )
 
 
+def make_radar_methodology(
+    session: Session, *, version: str = "1.0.0", parameters: dict[str, Any] | None = None
+) -> MethodologyVersion:
+    """Get or create the radar-change methodology version (a separate lineage)."""
+    return get_or_create_methodology_version(
+        session, name="radar-change", version=version, parameters=parameters or {}
+    )
+
+
 def make_observation(
     session: Session,
     aoi: Aoi,
@@ -251,14 +260,19 @@ def make_candidate(
     delta_mean: float | None = None,
     delta_min: float | None = None,
     valid_pixel_fraction: float | None = None,
+    sensor: str = "HLSL30",
 ) -> DisturbanceCandidate:
     """Seed one detection: Observation -> ChangeRaster -> DisturbanceCandidate.
 
     The extraction-time ΔNBR statistics (#95) default to null, matching
-    pre-statistics rows; pass them explicitly to seed quality metadata.
+    pre-statistics rows; pass them explicitly to seed quality metadata. Pass
+    ``sensor="S1GRD"`` (with a radar methodology) to seed a radar-lineage
+    detection — the scene id is sensor-qualified so optical and radar
+    observations on the same day never collide.
     """
     detected = datetime(2026, 1, day, tzinfo=UTC)
-    obs = make_observation(session, aoi, day=day)
+    scene_id = f"scene-{day}" if sensor == "HLSL30" else f"{sensor}-scene-{day}"
+    obs = make_observation(session, aoi, day=day, sensor=sensor, source_scene_id=scene_id)
     change = make_change_raster(session, obs, methodology, cog_path=f"/cogs/{day}.tif")
     candidate = DisturbanceCandidate(
         change_raster_id=change.id,

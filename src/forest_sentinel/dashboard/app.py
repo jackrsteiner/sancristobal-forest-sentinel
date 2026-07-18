@@ -319,6 +319,9 @@ def create_app() -> FastAPI:
                 _latest_opinion_subquery(),
                 _latest_assessment_subquery(ConfidenceAssessment.level),
                 _latest_assessment_subquery(ConfidenceAssessment.score),
+                _latest_assessment_subquery(
+                    ConfidenceAssessment.inputs["factors"]["agreement"]["basis"].astext
+                ),
             )
             .outerjoin(latest, latest.c.event_id == DisturbanceEvent.id)
             .where(DisturbanceEvent.aoi_id == aoi_id)
@@ -326,10 +329,7 @@ def create_app() -> FastAPI:
         ).all()
         return {
             "type": "FeatureCollection",
-            "features": [
-                _event_feature(event, footprint_area, count, area, fraction, opinion, level, score)
-                for event, footprint_area, count, area, fraction, opinion, level, score in rows
-            ],
+            "features": [_event_feature(*row) for row in rows],
         }
 
     @app.get("/api/aois/{aoi_id}/runs")
@@ -442,6 +442,10 @@ def create_app() -> FastAPI:
             # Newest first; each row explains itself (full inputs recorded at
             # assessment time — nothing is recomputed here).
             "confidence": assessments,
+            # Detection basis from the newest assessment's agreement factor
+            # (fused-v2, #118): "optical-only" / "radar-only" / "both". Null
+            # before the first fused-rule assessment.
+            "basis": _assessment_basis(assessments),
         }
 
     @app.post("/api/events/{event_id}/reviews", status_code=201)
@@ -520,6 +524,7 @@ def _event_feature(
     latest_opinion: str | None,
     confidence_level: str | None,
     confidence_score: float | None,
+    basis: str | None,
 ) -> dict[str, Any]:
     return {
         "type": "Feature",
@@ -534,6 +539,10 @@ def _event_feature(
             # under the rule.
             "confidence_level": confidence_level,
             "confidence_score": confidence_score,
+            # Detection basis from the newest assessment's agreement factor
+            # (fused-v2, #118): "optical-only" / "radar-only" / "both"; null
+            # before the first fused-rule assessment.
+            "basis": basis,
             "first_detected_at": event.first_detected_at,
             "last_detected_at": event.last_detected_at,
             "observation_count": observation_count,
@@ -590,6 +599,19 @@ def _assessments(session: Session, event_id: int) -> list[dict[str, Any]]:
         }
         for assessment in rows
     ]
+
+
+def _assessment_basis(assessments: list[dict[str, Any]]) -> str | None:
+    """Detection basis recorded by the newest assessment's agreement factor.
+
+    Mirrors the feature subquery: only the latest row is consulted, so the
+    detail view and the map never disagree. Null on pre-fused-rule history.
+    """
+    if not assessments:
+        return None
+    agreement = assessments[0]["inputs"].get("factors", {}).get("agreement") or {}
+    basis = agreement.get("basis")
+    return str(basis) if basis is not None else None
 
 
 def _optional_str(value: Any) -> str | None:

@@ -1,8 +1,9 @@
 """Transparent confidence scoring for disturbance events (E15).
 
 The rule is a **fully explained weighted average** over normalized factors —
-no learned weights, no hidden state. Rule ``optical-v1`` uses the optical-only
-inputs that are all persisted at extraction time (docs/architecture.md §7):
+no learned weights, no hidden state. Rule ``fused-v2`` (superseding
+``optical-v1``, whose rows remain valid history) scores five factors, all of
+whose inputs are persisted at extraction time (docs/architecture.md §7):
 
 - **magnitude** — the deepest candidate ΔNBR drop across the event
   (``delta_min``, #95): a −0.5 drop is unambiguous clearing, −0.1 is noise-adjacent.
@@ -10,21 +11,30 @@ inputs that are all persisted at extraction time (docs/architecture.md §7):
 - **coverage** — mean valid-pixel fraction of the event's candidates: how much
   of each detection was actually observable.
 - **currency** — days since the last detection: fresh evidence beats stale.
+- **agreement** (E16, #118) — cross-lineage confirmation. Event lineages stay
+  methodology-scoped (fusion decision, PR #100); "radar-confirmed" is computed
+  here instead: an event whose footprint intersects candidates of the *other*
+  sensor kind (via the ``sensor_source`` registry) within ±30 days of its
+  detection span scores 1 and is classified ``both``; other-kind coverage with
+  no overlap scores 0 (``optical-only``/``radar-only``); no other-kind
+  observations in the window at all leaves the factor missing — absence of
+  looking is not disagreement.
 
 Every factor value, subscore, weight, and the rule version are recorded in the
 ``confidence_assessment.inputs`` JSONB, so a level is fully explainable from the
-row alone. Factors whose inputs predate #95 are recorded as ``null`` and the
-weights renormalize over what is available — degraded, never fabricated.
+row alone. Factors whose inputs are unavailable (statistics predating #95, no
+radar coverage) are recorded as ``null`` and the weights renormalize over what
+is available — degraded, never fabricated.
 
 Assessments are **append-only**, but only appended when the outcome moved:
 a new row is written when the event has no assessment under the current rule
 version or when the (level, rounded score) changed — so history captures every
-change of conclusion without a row per daily run. Radar agreement (E16) and
-context proximity (E17) join the same structure under a bumped rule version.
+change of conclusion without a row per daily run. Context proximity (E17)
+joins the same structure under a bumped rule version.
 """
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -32,20 +42,24 @@ from sqlalchemy.orm import Session
 
 from forest_sentinel.models import (
     Aoi,
+    ChangeRaster,
     ConfidenceAssessment,
     DisturbanceCandidate,
     DisturbanceEvent,
     EventObservation,
+    Observation,
+    SensorSource,
 )
 
-RULE_VERSION = "optical-v1"
+RULE_VERSION = "fused-v2"
 
-# Factor weights (renormalized over available factors when statistics are null).
+# Factor weights (renormalized over available factors when inputs are null).
 WEIGHTS = {
-    "magnitude": 0.35,
-    "persistence": 0.30,
-    "coverage": 0.20,
+    "magnitude": 0.30,
+    "persistence": 0.25,
+    "coverage": 0.15,
     "currency": 0.15,
+    "agreement": 0.15,
 }
 
 # Normalization constants, recorded implicitly by the rule version.
@@ -53,6 +67,7 @@ MAGNITUDE_FLOOR = 0.1  # |ΔNBR| at or below this scores 0 (noise-adjacent)
 MAGNITUDE_CEIL = 0.5  # |ΔNBR| at or above this scores 1 (unambiguous clearing)
 PERSISTENCE_CEIL = 5  # observations at or above this score 1
 CURRENCY_HORIZON_DAYS = 180  # this many days since last detection scores 0
+AGREEMENT_WINDOW_DAYS = 30  # other-lineage evidence within ± this window counts
 
 # score >= HIGH_CUTOFF -> high; >= MEDIUM_CUTOFF -> medium; else low.
 MEDIUM_CUTOFF = 0.4
@@ -113,13 +128,21 @@ def compute_assessment(
     mean_valid_fraction: float | None,
     observation_count: int,
     days_since_last: float,
+    agreement: float | None,
+    agreement_details: dict[str, Any],
 ) -> Assessment:
-    """Apply the rule to raw factor inputs; pure and fully deterministic."""
+    """Apply the rule to raw factor inputs; pure and fully deterministic.
+
+    ``agreement`` is already 0..1 (or ``None`` when the other lineage never
+    looked); ``agreement_details`` is recorded verbatim as the factor's
+    explainable inputs (basis classification, matching evidence ids, window).
+    """
     subscores: dict[str, float | None] = {
         "magnitude": normalize_magnitude(delta_min),
         "persistence": normalize_persistence(observation_count),
         "coverage": normalize_coverage(mean_valid_fraction),
         "currency": normalize_currency(days_since_last),
+        "agreement": None if agreement is None else _clamp(agreement),
     }
     available = {name: value for name, value in subscores.items() if value is not None}
     total_weight = sum(WEIGHTS[name] for name in available)
@@ -140,6 +163,7 @@ def compute_assessment(
                 "persistence": {"observation_count": observation_count},
                 "coverage": {"mean_valid_fraction": mean_valid_fraction},
                 "currency": {"days_since_last": round(days_since_last, 2)},
+                "agreement": agreement_details,
             },
             "subscores": subscores,
             "missing": sorted(set(subscores) - set(available)),
@@ -202,6 +226,7 @@ def _assess_event(session: Session, event: DisturbanceEvent, now: datetime) -> A
         .where(EventObservation.event_id == event.id)
     ).one()
     days_since_last = max(0.0, (now - event.last_detected_at).total_seconds() / 86_400)
+    agreement, agreement_details = _assess_agreement(session, event)
     return compute_assessment(
         delta_min=delta_min,
         # Rounded: these are recorded verbatim in the explainable inputs, where
@@ -210,7 +235,93 @@ def _assess_event(session: Session, event: DisturbanceEvent, now: datetime) -> A
         mean_valid_fraction=round(float(mean_fraction), 4) if mean_fraction is not None else None,
         observation_count=observation_count,
         days_since_last=days_since_last,
+        agreement=agreement,
+        agreement_details=agreement_details,
     )
+
+
+def _assess_agreement(
+    session: Session, event: DisturbanceEvent
+) -> tuple[float | None, dict[str, Any]]:
+    """Cross-lineage agreement for one event: (subscore, explainable details).
+
+    The event's own sensor kind comes from its candidates' observations through
+    the ``sensor_source`` registry — data-driven, so radar lineages need no
+    special-casing here. Scoring: other-kind candidates intersecting the event
+    footprint within ±``AGREEMENT_WINDOW_DAYS`` of the detection span → 1.0
+    (basis ``both``); other-kind *observations* in the window but no overlapping
+    candidate → 0.0 (the other sensor looked and saw nothing); no other-kind
+    observations at all → ``None`` (absence of looking is not disagreement, the
+    factor is missing and the weights renormalize).
+    """
+    details: dict[str, Any] = {"window_days": AGREEMENT_WINDOW_DAYS}
+    own_kinds = set(
+        session.execute(
+            select(SensorSource.kind)
+            .distinct()
+            .select_from(EventObservation)
+            .join(
+                DisturbanceCandidate,
+                DisturbanceCandidate.id == EventObservation.disturbance_candidate_id,
+            )
+            .join(ChangeRaster, ChangeRaster.id == DisturbanceCandidate.change_raster_id)
+            .join(Observation, Observation.id == ChangeRaster.observation_id)
+            .join(SensorSource, SensorSource.name == Observation.sensor)
+            .where(EventObservation.event_id == event.id)
+        )
+        .scalars()
+        .all()
+    )
+    if len(own_kinds) != 1:
+        # Sensor absent from the registry (or, impossibly, a mixed lineage):
+        # unattributable, so the factor degrades like any other missing input.
+        details.update({"own_kind": None, "basis": None})
+        return None, details
+    own_kind = own_kinds.pop()
+    other_kind = "radar" if own_kind == "optical" else "optical"
+    window = timedelta(days=AGREEMENT_WINDOW_DAYS)
+    start = event.first_detected_at - window
+    end = event.last_detected_at + window
+    other_observations = session.execute(
+        select(func.count(Observation.id))
+        .join(SensorSource, SensorSource.name == Observation.sensor)
+        .where(Observation.aoi_id == event.aoi_id)
+        .where(SensorSource.kind == other_kind)
+        .where(Observation.acquired_at >= start)
+        .where(Observation.acquired_at <= end)
+    ).scalar_one()
+    matching_candidate_ids = list(
+        session.execute(
+            select(DisturbanceCandidate.id)
+            .join(ChangeRaster, ChangeRaster.id == DisturbanceCandidate.change_raster_id)
+            .join(Observation, Observation.id == ChangeRaster.observation_id)
+            .join(SensorSource, SensorSource.name == Observation.sensor)
+            .where(Observation.aoi_id == event.aoi_id)
+            .where(SensorSource.kind == other_kind)
+            .where(DisturbanceCandidate.detected_at >= start)
+            .where(DisturbanceCandidate.detected_at <= end)
+            .where(func.ST_Intersects(DisturbanceCandidate.geometry, event.geometry))
+            .order_by(DisturbanceCandidate.id)
+        )
+        .scalars()
+        .all()
+    )
+    if matching_candidate_ids:
+        agreement: float | None = 1.0
+        basis = "both"
+    else:
+        agreement = 0.0 if other_observations else None
+        basis = f"{own_kind}-only"
+    details.update(
+        {
+            "own_kind": own_kind,
+            "other_kind": other_kind,
+            "other_kind_observations": other_observations,
+            "matching_candidate_ids": matching_candidate_ids,
+            "basis": basis,
+        }
+    )
+    return agreement, details
 
 
 def _conclusion_moved(session: Session, event_id: int, assessment: Assessment) -> bool:

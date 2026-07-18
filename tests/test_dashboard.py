@@ -700,10 +700,15 @@ def test_event_features_and_detail_carry_confidence(
     detail = client.get(f"/api/events/{props['id']}").json()
     (assessment,) = detail["confidence"]
     assert assessment["level"] == props["confidence_level"]
-    assert assessment["rule_version"] == "optical-v1"
+    assert assessment["rule_version"] == "fused-v2"
     # The recorded inputs make the level explainable without recomputation.
     assert assessment["inputs"]["factors"]["magnitude"]["delta_min"] == -0.5
     assert "weights" in assessment["inputs"]
+
+    # Detection basis (#118) from the agreement factor: no radar lineage was
+    # seeded, so this optical event reads optical-only on features and detail.
+    assert props["basis"] == "optical-only"
+    assert detail["basis"] == "optical-only"
 
 
 def test_unassessed_events_read_null_confidence(client: TestClient, db_session: Session) -> None:
@@ -711,5 +716,7 @@ def test_unassessed_events_read_null_confidence(client: TestClient, db_session: 
     props = client.get(f"/api/aois/{aoi.id}/events").json()["features"][0]["properties"]
     assert props["confidence_level"] is None
     assert props["confidence_score"] is None
+    assert props["basis"] is None
     detail = client.get(f"/api/events/{props['id']}").json()
     assert detail["confidence"] == []
+    assert detail["basis"] is None

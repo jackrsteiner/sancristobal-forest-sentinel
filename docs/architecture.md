@@ -444,21 +444,34 @@ confidence record: `id`, `event_id` (FK, CASCADE), `pipeline_run_id` (FK, nullab
 `level` (`low`/`medium`/`high`), `score`, `inputs` (JSONB — every factor value,
 subscore, weight, and which factors were unavailable), `rule_version`, `created_at`.
 
-**Rule `optical-v1`** (`forest_sentinel/confidence.py`) is a transparent weighted
-average over normalized factors, all persisted at extraction time (§7 constraint):
-**magnitude** (deepest candidate `delta_min`; 0 at |ΔNBR| ≤ 0.1, 1 at ≥ 0.5, weight
-0.35), **persistence** (observation count; 1 look = 0, ≥ 5 = 1, weight 0.30),
-**coverage** (mean candidate valid-pixel fraction, weight 0.20), **currency** (days
-since last detection; 0 d = 1, ≥ 180 d = 0, weight 0.15). Score ≥ 0.65 → `high`,
-≥ 0.4 → `medium`, else `low`. Factors missing on pre-#95 rows are recorded as null
-and the weights renormalize — degraded, never fabricated.
+**Rule `fused-v2`** (`forest_sentinel/confidence.py`; supersedes `optical-v1`, whose
+rows remain valid history) is a transparent weighted average over normalized
+factors, all persisted at extraction time (§7 constraint): **magnitude** (deepest
+candidate `delta_min`; 0 at |ΔNBR| ≤ 0.1, 1 at ≥ 0.5, weight 0.30), **persistence**
+(observation count; 1 look = 0, ≥ 5 = 1, weight 0.25), **coverage** (mean candidate
+valid-pixel fraction, weight 0.15), **currency** (days since last detection; 0 d = 1,
+≥ 180 d = 0, weight 0.15), and **agreement** (weight 0.15) — the cross-lineage
+factor E16 reserved a slot for. Score ≥ 0.65 → `high`, ≥ 0.4 → `medium`, else `low`.
+Factors whose inputs are unavailable are recorded as null and the weights
+renormalize — degraded, never fabricated.
+
+**Agreement** implements the fusion decision (event lineages stay methodology-scoped;
+"radar-confirmed" is computed in the confidence model): the event's own sensor kind
+is resolved data-driven through the `sensor_source` registry, and candidates of the
+*other* kind intersecting the event footprint within ±30 days of its detection span
+score 1 and classify the event `both`; other-kind **observations** in the window with
+no overlapping candidate score 0 (`optical-only`/`radar-only` — the other sensor
+looked and saw nothing); no other-kind observations at all leave the factor missing
+(absence of looking is not disagreement). The recorded `inputs` carry the basis
+classification, the matching candidate ids, and the window, and the dashboard API
+exposes `basis` on event features and detail from the newest assessment.
 
 The pipeline assesses **all** of the AOI's events after event tracking and the
 resolved lifecycle (currency decays even without new detections), but appends a row
 only when the conclusion moved (no assessment under the current rule version, or the
 level / rounded score changed) — history captures every change of conclusion without
-a row per daily run. Radar agreement (E16) and context proximity (E17) join the same
-structure under a bumped `rule_version`.
+a row per daily run. Context proximity (E17) joins the same structure under a bumped
+`rule_version`.
 
 ### 5.10 Dashboard (Slice 2, E10)
 
