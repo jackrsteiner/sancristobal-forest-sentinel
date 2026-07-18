@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from forest_sentinel import (
+    context,
     earthengine,
     events,
     forestmask,
@@ -53,6 +54,7 @@ from forest_sentinel.methodology import (
     resolve_methodology_version,
 )
 from forest_sentinel.models import (
+    CONTEXT_KINDS,
     Aoi,
     ChangeRaster,
     DisturbanceEvent,
@@ -98,6 +100,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_cogs_command(args)
     if args.command == "aoi":
         return _run_aoi_command(args)
+    if args.command == "context":
+        return _run_context_command(args)
     if (args.since is None) != (args.until is None):
         # A lone window flag used to fall through to the Slice 0 load silently.
         parser.error("--since and --until must be provided together")
@@ -158,6 +162,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Actually delete. Without it, print what would be deleted and exit 1.",
+    )
+
+    context_parser = subparsers.add_parser(
+        "context", help="Manage contextual GeoJSON layers (concessions, roads, rivers, ...)."
+    )
+    context_subparsers = context_parser.add_subparsers(dest="context_command", required=True)
+    context_load_parser = context_subparsers.add_parser(
+        "load",
+        help=(
+            "Load (or replace) one context layer from a GeoJSON file. Re-loading "
+            "a name replaces its features wholesale."
+        ),
+    )
+    context_load_parser.add_argument("file", type=Path, help="GeoJSON Feature/FeatureCollection.")
+    context_load_parser.add_argument(
+        "--kind", required=True, choices=list(CONTEXT_KINDS), help="What the layer represents."
+    )
+    context_load_parser.add_argument(
+        "--name",
+        default=None,
+        help=(
+            "Layer name (default: derived from the filename — the part after "
+            "'--' for <kind>--<name>.geojson, else the whole stem)."
+        ),
     )
 
     cogs_parser = subparsers.add_parser("cogs", help="Manage the local COG store.")
@@ -292,6 +320,33 @@ def _run_cogs_reproduce(args: argparse.Namespace) -> int:
             print(f"error: could not connect to the database ({exc})", file=sys.stderr)
             return 1
     print(f"Reproduced {args.kind}_raster {args.raster_id} -> {path}")
+    return 0
+
+
+def _run_context_command(args: argparse.Namespace) -> int:
+    """Dispatch `forest-sentinel context load` (E17, #125)."""
+    try:
+        document = context.load_context_file(args.file)
+    except context.ContextConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    parsed = context.parse_harvest_filename(args.file)
+    name = args.name or (parsed[1] if parsed else args.file.stem)
+    with _disposing_engine() as engine:
+        try:
+            with Session(engine) as session:
+                context.replace_layer(
+                    session,
+                    name=name,
+                    kind=args.kind,
+                    document=document,
+                    source_file=str(args.file),
+                )
+                session.commit()
+        except OperationalError as exc:
+            print(f"error: could not connect to the database ({exc})", file=sys.stderr)
+            return 1
+    print(f"Loaded context layer {name!r} ({args.kind}): {len(document.geometries)} feature(s)")
     return 0
 
 
@@ -492,6 +547,17 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                             "min_area_m2": min_area,
                             **forestmask.parameters_entry(forest_mask_config),
                         },
+                    )
+                # Harvest config/context/*.geojson (E17): idempotent replace, so
+                # running per AOI file is safe; a bad file warns, never blocks.
+                harvest = context.harvest_context_dir(
+                    session,
+                    Path(os.environ.get(context.CONTEXT_DIR_ENV_VAR, context.DEFAULT_CONTEXT_DIR)),
+                )
+                if harvest.layers or harvest.skipped:
+                    print(
+                        f"Context layers: {harvest.layers} loaded "
+                        f"({harvest.features} features), {harvest.skipped} skipped"
                     )
                 # Commit the AOI/methodology rows before the (hours-long) pipeline
                 # body so the dashboard lists the AOI as soon as a run starts,

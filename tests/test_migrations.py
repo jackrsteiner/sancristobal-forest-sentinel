@@ -532,3 +532,35 @@ def test_downgrade_removes_radar_baseline_provenance(
     command.downgrade(alembic_config, "0015_sensor_source")
     columns = {c["name"] for c in inspect(clean_database).get_columns("change_raster")}
     assert "baseline_source_scene_ids" not in columns
+
+
+def test_migrations_create_context_tables(alembic_config: Config, clean_database: Engine) -> None:
+    command.upgrade(alembic_config, "head")
+
+    inspector = inspect(clean_database)
+    assert "context_layer" in inspector.get_table_names()
+    assert "context_feature" in inspector.get_table_names()
+    layer_columns = {c["name"] for c in inspector.get_columns("context_layer")}
+    assert {"id", "name", "kind", "source_file", "created_at"} <= layer_columns
+    feature_columns = {c["name"] for c in inspector.get_columns("context_feature")}
+    assert {"id", "context_layer_id", "geometry", "properties", "created_at"} <= feature_columns
+
+    # Mixed geometry types by design (polygons, lines, points), in WGS 84.
+    with clean_database.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT type, srid FROM geometry_columns "
+                "WHERE f_table_name = 'context_feature' AND f_geometry_column = 'geometry'"
+            )
+        ).one()
+    assert row[0] == "GEOMETRY"
+    assert row[1] == 4326
+
+
+def test_downgrade_removes_context_tables(alembic_config: Config, clean_database: Engine) -> None:
+    command.upgrade(alembic_config, "head")
+    command.downgrade(alembic_config, "0016_radar_baseline_provenance")
+
+    tables = inspect(clean_database).get_table_names()
+    assert "context_layer" not in tables
+    assert "context_feature" not in tables

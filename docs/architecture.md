@@ -152,12 +152,13 @@ bead per table; the tables realized so far are specified in §5.1–§5.10. Obje
 | `disturbance_event`     | implemented | Tracked logging / disturbance event over time.                                           |
 | `event_observation`     | implemented | Per-date measurement of event area, severity, and growth.                                |
 | `methodology_version`   | implemented | Processing and detection method provenance.                                              |
-| `manual_review`         | planned     | Human validation, notes, uncertainty, false-positive status (Slice 3, E8).               |
-| `sensor_source`         | planned     | Source dataset metadata beyond HLS (E16).                                                |
-| `radar_change_raster`   | planned     | Sentinel-1-derived SAR change metadata (E16).                                            |
-| `context_layer`         | planned     | Legal / administrative / infrastructure overlay dataset (E17).                           |
+| `manual_review`         | implemented | Human opinion recorded alongside the automatic status (§5.9, E8).                        |
+| `sensor_source`         | implemented | Registry of source datasets: kind (optical/radar), collection (E16).                     |
+| `radar_change_raster`   | implemented | Realized as `change_raster` rows with `change_type="delta_vv_db"` (§7, E16).             |
+| `context_layer`         | implemented | Legal / administrative / infrastructure overlay dataset (§5.11, E17).                    |
+| `context_feature`       | implemented | One geometry from a context layer, with its GeoJSON properties (§5.11, E17).             |
 | `event_context`         | planned     | Relationship between an event and contextual features (E17).                             |
-| `confidence_assessment` | planned     | Structured explanation of an event's confidence level (E15).                             |
+| `confidence_assessment` | implemented | Structured explanation of an event's confidence level (§5.9a, E15).                      |
 
 Relationships implied by the pipeline:
 
@@ -501,6 +502,27 @@ with E14–E17. The database
 session is an injectable dependency (`get_session`), so endpoints are tested headlessly with
 FastAPI's `TestClient` against a transactional session; no Earth Engine or storage access occurs
 in the dashboard.
+
+### 5.11 Context layers (Slice 6, E17)
+
+Context layers are **operator-uploaded GeoJSON** (the resolved E17 decision), mirroring the AOI
+pattern rather than inventing a source-fetching subsystem. Migration `0017`:
+
+- **`context_layer`** — the registry: `name` (unique), `kind`
+  (`concession`/`protected_area`/`road`/`river`/`settlement`/`mill`/`port`/`other`),
+  `source_file`, `created_at`.
+- **`context_feature`** — one geometry per row (`GEOMETRY`, SRID 4326 — concessions are
+  polygons, roads and rivers are lines, mills/ports/settlements are points) with the feature's
+  GeoJSON `properties` as JSONB.
+
+Two ingest paths (`forest_sentinel/context.py`): `forest-sentinel context load <file> --kind
+<kind> [--name <name>]` loads one file explicitly, and every pipeline run harvests
+`config/context/*.geojson` (`FOREST_SENTINEL_CONTEXT_DIR`) named by the convention
+`<kind>--<name>.geojson` — files that don't parse or don't follow the convention are skipped
+with a warning, never failing the run. Layers are **reference data, not provenance**: re-loading
+a name replaces its features wholesale (the current file is the truth), unlike the append-only
+detection tables. `event_context` (next bead) re-derives event relations from whatever layers
+exist at run time.
 
 ## 6. Cross-cutting properties
 

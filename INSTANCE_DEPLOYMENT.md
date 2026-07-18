@@ -121,6 +121,14 @@ history graft):
   `uv run python scripts/make_aoi.py --bbox … --name … --out config/aoi.geojson`.
   Keep AOIs small: the e2-micro VM has 1 GB RAM and a 30 GB disk
   (`docs/scaling.md`).
+- **Context layers — optional.** Commit GeoJSON overlays (concessions,
+  protected areas, roads, rivers, settlements, mills, ports) under
+  `config/context/` named `<kind>--<name>.geojson` (e.g.
+  `concession--acme-palm.geojson`; kinds: `concession`, `protected_area`,
+  `road`, `river`, `settlement`, `mill`, `port`, `other`). Every pipeline run
+  loads them, and re-committing a revised file replaces the layer's features
+  on the next run. One-off loads work too:
+  `uv run forest-sentinel context load <file> --kind <kind>`.
 
 ## 5. Run the "Deploy instance" workflow
 

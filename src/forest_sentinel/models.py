@@ -411,6 +411,76 @@ class ConfidenceAssessment(Base):
     )
 
 
+# The context-layer kinds the README's "Contextual Evidence Layers" enumerate.
+# Free-form sources land under "other" rather than growing this list ad hoc.
+CONTEXT_KINDS = (
+    "concession",
+    "protected_area",
+    "road",
+    "river",
+    "settlement",
+    "mill",
+    "port",
+    "other",
+)
+
+
+class ContextLayer(Base):
+    """A named contextual dataset (E17): one operator-loaded GeoJSON file.
+
+    The registry row: features live in ``context_feature``. Re-loading a layer
+    under the same name replaces its features (layers are reference data, not
+    provenance — the current file is the truth).
+    """
+
+    __tablename__ = "context_layer"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_context_layer_name"),
+        # Rendered ck_context_layer_kind by the metadata naming convention.
+        CheckConstraint(
+            "kind IN ('concession', 'protected_area', 'road', 'river', "
+            "'settlement', 'mill', 'port', 'other')",
+            name="kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    source_file: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class ContextFeature(Base):
+    """One geometry from a context layer, with its GeoJSON properties.
+
+    Mixed geometry types by design: concessions are polygons, roads and rivers
+    are lines, mills/ports/settlements are points.
+    """
+
+    __tablename__ = "context_feature"
+    __table_args__ = (Index("ix_context_feature_context_layer_id", "context_layer_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    context_layer_id: Mapped[int] = mapped_column(
+        ForeignKey("context_layer.id", ondelete="CASCADE"), nullable=False
+    )
+    geometry: Mapped[WKBElement] = mapped_column(
+        Geometry(geometry_type="GEOMETRY", srid=AOI_SRID),
+        nullable=False,
+    )
+    properties: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class PipelineRun(Base):
     """One pipeline invocation over an AOI and date window.
 
