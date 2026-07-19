@@ -10,6 +10,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
 from sqlalchemy import func, select
@@ -417,6 +418,92 @@ def test_detection_change_reuses_every_raster_and_reextracts(
     calls_after_second = len(fake_ee.calls)
     run(loose, FakeStorage(tmp_path))
     assert len(fake_ee.calls) == calls_after_second
+
+
+def test_detection_change_extracts_locally_from_real_cogs(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Finding 2: when the stored change COG is a readable raster, a new
+    detection layer re-extracts from it with ZERO Earth Engine calls — no
+    export, no delta rebuild, no vectorization."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from forest_sentinel.models import DisturbanceCandidate
+    from tests.fakes import make_methodology
+
+    aoi = make_aoi(db_session, name="Local AOI")
+    strict = make_methodology(
+        db_session, version="auto-strict", parameters={"delta_nbr_threshold": -0.25}
+    )
+    fake_ee = _fake_ee((1, 2, 3))
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=strict,
+        storage=FakeStorage(tmp_path),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    # Replace the fake (empty) ΔNBR files with real rasters carrying one patch.
+    data = np.zeros((20, 20), dtype="float32")
+    data[5:10, 5:10] = -0.5
+    delta_rows = (
+        db_session.execute(select(ChangeRaster).where(ChangeRaster.change_type == "delta_nbr"))
+        .scalars()
+        .all()
+    )
+    for row in delta_rows:
+        with rasterio.open(
+            row.cog_path,
+            "w",
+            driver="GTiff",
+            height=20,
+            width=20,
+            count=1,
+            dtype="float32",
+            crs="EPSG:4326",
+            transform=from_origin(0.1, 0.9, 0.0003, 0.0003),
+            nodata=-9999.0,
+        ) as dst:
+            dst.write(data, 1)
+
+    loose = make_methodology(
+        db_session, version="auto-loose", parameters={"delta_nbr_threshold": -0.10}
+    )
+    storage = FakeStorage(tmp_path)
+    ee_calls_before = len(fake_ee.calls)
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=loose,
+        storage=storage,
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    # Zero EE: no exports and no threshold_and_vectorize calls this run.
+    assert storage.exports == []
+    assert len(fake_ee.calls) == ee_calls_before
+    local_candidates = (
+        db_session.execute(
+            select(DisturbanceCandidate).where(
+                DisturbanceCandidate.methodology_version_id == loose.id
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(local_candidates) == len(delta_rows)
+    # Statistics came from the raster itself (#95 parity with the EE path).
+    assert all(c.delta_min == pytest.approx(-0.5) for c in local_candidates)
+    assert all((c.area_m2 or 0) > 4_500.0 for c in local_candidates)
 
 
 def test_wholesale_missing_cogs_record_a_preflight_warning(

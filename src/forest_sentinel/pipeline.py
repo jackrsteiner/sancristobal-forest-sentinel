@@ -30,7 +30,9 @@ from forest_sentinel import (
     context,
     earthengine,
     events,
+    forestmask,
     indices,
+    localextract,
     radar,
     reproduce,
     runlog,
@@ -39,7 +41,7 @@ from forest_sentinel import (
 from forest_sentinel.earthengine import EarthEngineError
 from forest_sentinel.hls import discover_observations
 from forest_sentinel.models import Aoi, ChangeRaster, IndexRaster, MethodologyVersion, Observation
-from forest_sentinel.storage import Storage, StorageError
+from forest_sentinel.storage import CogKey, Storage, StorageError
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +234,8 @@ def _candidates_for_product(
     *,
     product: change.ChangeProduct,
     methodology: MethodologyVersion,
+    aoi: Aoi,
+    storage: Storage,
     fallback_region: Any,
     scale: int,
     threshold: float | None,
@@ -243,8 +247,9 @@ def _candidates_for_product(
     A product with a live delta extracts directly. A frozen/reused product
     (``delta_image is None``) usually already has this methodology's candidates
     — count them. When it does not, the raster was minted under a different
-    detection layer of the same raster lineage (Finding 1): the delta is
-    rebuilt from recorded provenance and extracted with **no new export**.
+    detection layer of the same raster lineage (Finding 1) and is re-extracted
+    with **no new export**: preferably zero-EE from the stored COG (Finding 2),
+    else from a delta graph rebuilt out of recorded provenance.
     """
     raster = product.change_raster
     delta_image = product.delta_image
@@ -252,6 +257,19 @@ def _candidates_for_product(
     if delta_image is None:
         if candidates.has_extraction(session, raster.id, methodology.id):
             return candidates.count_candidates_for_change_raster(session, raster.id, methodology.id)
+        local = _extract_locally(
+            session,
+            raster=raster,
+            methodology=methodology,
+            aoi=aoi,
+            storage=storage,
+            scale=scale,
+            threshold=threshold,
+            min_area_m2=min_area_m2,
+            ee_module=ee_module,
+        )
+        if local is not None:
+            return local
         delta_image, region, _, _ = reproduce.rebuild_change_delta(
             session, raster=raster, ee_module=ee_module
         )
@@ -268,6 +286,97 @@ def _candidates_for_product(
             ee_module=ee_module,
         )
     )
+
+
+def _extract_locally(
+    session: Session,
+    *,
+    raster: ChangeRaster,
+    methodology: MethodologyVersion,
+    aoi: Aoi,
+    storage: Storage,
+    scale: int,
+    threshold: float | None,
+    min_area_m2: float | None,
+    ee_module: Any,
+) -> int | None:
+    """Finding 2: zero-EE re-extraction from the stored COG; ``None`` = fall back.
+
+    Requires the COG on disk and — when the methodology has a forest mask — a
+    local mask COG (exported once per AOI + mask config, then reused forever).
+    Any local failure logs and falls back to the EE rebuild path rather than
+    failing the observation.
+    """
+    if not Path(raster.cog_path).exists():
+        return None
+    if raster.change_type == CANDIDATE_CHANGE_TYPE:
+        resolved_threshold = candidates.resolve_threshold(methodology, threshold)
+    elif threshold is not None:
+        resolved_threshold = threshold
+    else:  # radar callers always resolve; refuse to guess a dB cutoff here
+        return None
+    mask_cog_path: str | None = None
+    mask_config = forestmask.resolve_config(methodology, None)
+    if mask_config.get("source") != forestmask.SOURCE_NONE:
+        mask_cog_path = _ensure_mask_cog(
+            aoi, mask_config, storage=storage, scale=scale, ee_module=ee_module
+        )
+        if mask_cog_path is None:
+            return None
+    try:
+        features = localextract.extract_features_from_cog(
+            raster.cog_path,
+            threshold=resolved_threshold,
+            min_area_m2=candidates.resolve_min_area(methodology, min_area_m2),
+            mask_cog_path=mask_cog_path,
+        )
+    except localextract.LocalExtractError as exc:
+        logger.warning("local extraction fell back to Earth Engine: %s", exc)
+        return None
+    return len(
+        candidates.persist_candidate_features(
+            session,
+            change_raster=raster,
+            methodology=methodology,
+            features=features,
+            scale=scale,
+            min_area_m2=min_area_m2,
+        )
+    )
+
+
+def _ensure_mask_cog(
+    aoi: Aoi,
+    mask_config: dict[str, Any],
+    *,
+    storage: Storage,
+    scale: int,
+    ee_module: Any,
+) -> str | None:
+    """The local forest-mask COG for (AOI, mask config), exporting it on first use.
+
+    Static reference data, so the CogKey date component is ``static`` — the
+    retention pruner only deletes files under parseable ISO date directories,
+    so the mask survives pruning and is exported exactly once.
+    """
+    key = CogKey(
+        aoi=f"{aoi.id}-{aoi.name}",
+        product="forest_mask",
+        date="static",
+        filename=localextract.mask_cog_key_filename(mask_config),
+    )
+    path = storage.path_for(key)
+    if path.exists():
+        return str(path)
+    try:
+        mask_image = forestmask.build_mask(mask_config, ee_module=ee_module)
+        if mask_image is None:
+            return None
+        region = mapping(to_shape(aoi.geometry))
+        return str(storage.export_image(mask_image, key, scale=scale, region=region))
+    except (StorageError, EarthEngineError) as exc:
+        logger.warning("forest-mask COG export failed; falling back to EE extraction: %s", exc)
+        return None
 
 
 def _run_pipeline_locked(
@@ -416,6 +525,8 @@ def _run_pipeline_locked(
                     session,
                     product=product,
                     methodology=methodology,
+                    aoi=aoi,
+                    storage=storage,
                     fallback_region=region,
                     scale=scale,
                     threshold=threshold,
@@ -606,6 +717,8 @@ def _run_radar_stage(
                     session,
                     product=product,
                     methodology=methodology,
+                    aoi=aoi,
+                    storage=storage,
                     fallback_region=mapping(to_shape(aoi.geometry)),
                     scale=scale,
                     threshold=threshold,

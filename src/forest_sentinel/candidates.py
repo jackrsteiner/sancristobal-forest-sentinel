@@ -106,13 +106,64 @@ def extract_candidates_for_change_raster(
         min_area_m2=resolved_min_area,
     )
 
+    return _persist_features(
+        session,
+        change_raster=change_raster,
+        methodology=methodology,
+        features=features,
+        detected_at=detected_at,
+        scale=scale,
+        min_area_m2=resolved_min_area,
+    )
+
+
+def persist_candidate_features(
+    session: Session,
+    *,
+    change_raster: ChangeRaster,
+    methodology: MethodologyVersion,
+    features: list[dict[str, Any]],
+    scale: int = indices.DEFAULT_SCALE_METERS,
+    min_area_m2: float | None = None,
+) -> list[DisturbanceCandidate]:
+    """Persist pre-computed candidate features (the local-extraction path, Finding 2).
+
+    Features must carry the same shape ``threshold_and_vectorize`` returns; the
+    freeze/replace semantics are identical to the EE path.
+    """
+    if candidates_are_frozen(session, change_raster.id, methodology.id):
+        return _existing_candidates(session, change_raster.id, methodology.id)
+    observation = session.get(Observation, change_raster.observation_id)
+    if observation is None:
+        raise ValueError(f"change_raster {change_raster.id} has no source observation")
+    return _persist_features(
+        session,
+        change_raster=change_raster,
+        methodology=methodology,
+        features=features,
+        detected_at=observation.acquired_at,
+        scale=scale,
+        min_area_m2=resolve_min_area(methodology, min_area_m2),
+    )
+
+
+def _persist_features(
+    session: Session,
+    *,
+    change_raster: ChangeRaster,
+    methodology: MethodologyVersion,
+    features: list[dict[str, Any]],
+    detected_at: Any,
+    scale: int,
+    min_area_m2: float,
+) -> list[DisturbanceCandidate]:
     _delete_existing(session, change_raster.id, methodology.id)
 
     candidates: list[DisturbanceCandidate] = []
     for feature in features:
         properties = feature.get("properties", {})
         area_m2 = float(properties.get("area_m2", 0.0))
-        if area_m2 < resolved_min_area:
+        if area_m2 < min_area_m2:
             continue  # belt-and-braces: also guard client-side against sub-threshold polygons
         geometry = shape(feature["geometry"])
         candidate = DisturbanceCandidate(
@@ -121,7 +172,7 @@ def extract_candidates_for_change_raster(
             geometry=from_shape(geometry, srid=AOI_SRID),
             detected_at=detected_at,
             area_m2=area_m2,
-            # ΔNBR statistics reduced per polygon in EE at extraction time (#95);
+            # ΔNBR statistics reduced per polygon at extraction time (#95);
             # null when the feature carries none (statistics are never backfilled).
             delta_mean=_optional_float(properties.get("delta_mean")),
             delta_min=_optional_float(properties.get("delta_min")),
