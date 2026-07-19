@@ -22,9 +22,13 @@ whose inputs are persisted at extraction time (docs/architecture.md §7):
 
 Every factor value, subscore, weight, and the rule version are recorded in the
 ``confidence_assessment.inputs`` JSONB, so a level is fully explainable from the
-row alone. Factors whose inputs are unavailable (statistics predating #95, no
-radar coverage) are recorded as ``null`` and the weights renormalize over what
-is available — degraded, never fabricated.
+row alone. The rule version is content-addressed like ``methodology_version``:
+``RULE_VERSION`` is the rule family name plus a hash of every weight, cutoff,
+and normalization constant, so editing a tunable mints a new version instead of
+silently relabeling old semantics (config-inventory Finding 6). Factors whose
+inputs are unavailable (statistics predating #95, no radar coverage) are
+recorded as ``null`` and the weights renormalize over what is available —
+degraded, never fabricated.
 
 Assessments are **append-only**, but only appended when the outcome moved:
 a new row is written when the event has no assessment under the current rule
@@ -40,6 +44,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from forest_sentinel.methodology import parameter_hash
 from forest_sentinel.models import (
     Aoi,
     ChangeRaster,
@@ -51,7 +56,7 @@ from forest_sentinel.models import (
     SensorSource,
 )
 
-RULE_VERSION = "fused-v2"
+RULE_NAME = "fused-v2"
 
 # Factor weights (renormalized over available factors when inputs are null).
 WEIGHTS = {
@@ -72,6 +77,22 @@ AGREEMENT_WINDOW_DAYS = 30  # other-lineage evidence within ± this window count
 # score >= HIGH_CUTOFF -> high; >= MEDIUM_CUTOFF -> medium; else low.
 MEDIUM_CUTOFF = 0.4
 HIGH_CUTOFF = 0.65
+
+# The rule version is content-addressed over every tunable above, mirroring
+# methodology_version: editing a weight or cutoff cannot silently reuse the old
+# label. The human-readable RULE_NAME still identifies the rule family; the
+# suffix pins the exact numbers an assessment was scored with.
+_TUNABLES = {
+    "weights": WEIGHTS,
+    "magnitude_floor": MAGNITUDE_FLOOR,
+    "magnitude_ceil": MAGNITUDE_CEIL,
+    "persistence_ceil": PERSISTENCE_CEIL,
+    "currency_horizon_days": CURRENCY_HORIZON_DAYS,
+    "agreement_window_days": AGREEMENT_WINDOW_DAYS,
+    "medium_cutoff": MEDIUM_CUTOFF,
+    "high_cutoff": HIGH_CUTOFF,
+}
+RULE_VERSION = f"{RULE_NAME}+{parameter_hash(_TUNABLES, length=8)}"
 
 # Appending threshold: a score move smaller than this (with an unchanged level)
 # is not a changed conclusion worth a history row.

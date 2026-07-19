@@ -76,10 +76,15 @@ def resolve_methodology_version(
     )
 
 
+def parameter_hash(parameters: dict[str, Any], *, length: int = 10) -> str:
+    """Deterministic content hash of a parameter dict (canonical-JSON SHA-256)."""
+    canonical = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:length]
+
+
 def auto_version(parameters: dict[str, Any]) -> str:
     """Deterministic content-derived version string for a parameter set."""
-    canonical = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
-    return AUTO_VERSION_PREFIX + hashlib.sha256(canonical.encode()).hexdigest()[:10]
+    return AUTO_VERSION_PREFIX + parameter_hash(parameters)
 
 
 _SCRIPT_VERSION_PARAM = "ee_script_version"

@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from forest_sentinel import confidence
 from forest_sentinel.confidence import (
     HIGH_CUTOFF,
     MEDIUM_CUTOFF,
@@ -18,6 +19,7 @@ from forest_sentinel.confidence import (
     score_to_level,
 )
 from forest_sentinel.events import track_events_for_aoi
+from forest_sentinel.methodology import parameter_hash
 from forest_sentinel.models import ConfidenceAssessment, DisturbanceEvent
 from tests.fakes import (
     make_aoi,
@@ -55,6 +57,19 @@ def test_level_cutoffs_are_pinned() -> None:
     assert score_to_level(HIGH_CUTOFF - 0.01) == "medium"
     assert score_to_level(MEDIUM_CUTOFF) == "medium"
     assert score_to_level(MEDIUM_CUTOFF - 0.01) == "low"
+
+
+def test_rule_version_is_content_addressed() -> None:
+    """Editing any tunable mints a new rule version (config-inventory Finding 6)."""
+    assert RULE_VERSION.startswith(f"{confidence.RULE_NAME}+")
+    tweaked = dict(confidence._TUNABLES, high_cutoff=confidence.HIGH_CUTOFF + 0.01)
+    relabeled = f"{confidence.RULE_NAME}+{parameter_hash(tweaked, length=8)}"
+    assert relabeled != RULE_VERSION
+    # The label pins the exact numbers: recomputing over the live constants
+    # reproduces the shipped version string.
+    assert (
+        f"{confidence.RULE_NAME}+{parameter_hash(confidence._TUNABLES, length=8)}" == RULE_VERSION
+    )
 
 
 def test_compute_assessment_records_every_input() -> None:

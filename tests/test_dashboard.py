@@ -678,6 +678,7 @@ def test_event_features_and_detail_carry_confidence(
     client: TestClient, db_session: Session
 ) -> None:
     """E15 surface (#107): latest level/score on features; explained history in detail."""
+    from forest_sentinel import confidence
     from forest_sentinel.confidence import assess_events_for_aoi
 
     aoi = make_aoi(db_session, name="Seeded AOI")
@@ -705,7 +706,7 @@ def test_event_features_and_detail_carry_confidence(
     detail = client.get(f"/api/events/{props['id']}").json()
     (assessment,) = detail["confidence"]
     assert assessment["level"] == props["confidence_level"]
-    assert assessment["rule_version"] == "fused-v2"
+    assert assessment["rule_version"] == confidence.RULE_VERSION
     # The recorded inputs make the level explainable without recomputation.
     assert assessment["inputs"]["factors"]["magnitude"]["delta_min"] == -0.5
     assert "weights" in assessment["inputs"]
