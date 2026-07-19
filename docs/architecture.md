@@ -438,6 +438,16 @@ events rather than falsifying it. The pipeline (`run_pipeline`) calls tracking a
 so a single `forest-sentinel run` goes discover → indices → change → candidates → **events**, and
 the per-stage summary reports events created and event-observations tracked.
 
+> **Operator note — methodology changes break event continuity.** Because events extend only
+> within one methodology version, changing *any* methodology input (threshold, min-area,
+> baseline window, forest mask, a bumped EE script version) on a live instance splits incident
+> history at that boundary: existing events stop growing, linger until `RESOLVED_AFTER_DAYS`
+> auto-resolves them, and the new lineage starts fresh events with new first-detected dates. An
+> ongoing disturbance will appear as two events, one per methodology. This is the deliberate
+> price of honest provenance — old events are never silently reinterpreted under new
+> parameters — but plan parameter changes accordingly (the run records a prominent
+> methodology-change warning when it happens; see `runlog.start_run`).
+
 ### 5.9a Confidence assessments (Slice 4, E15)
 
 **`confidence_assessment`** (migration `0014`) is the append-only, fully explained
