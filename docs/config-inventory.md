@@ -99,21 +99,21 @@ deleted, so neither value affects reproducibility.
 
 Every value in this table is a key in the content-addressed parameters dict, so **Versions
 now? = Yes** for all of them, and that is correct — each changes what a detection means.
-The interesting column is the last one: for several of these, the forced re-export is
-partially or entirely redundant, because raster reuse is keyed on the *whole* methodology
-version (`models.py:157-163`, `185-191`) while the value itself only affects a late,
-cheap stage. See Findings 1–4.
+At the time of the original audit, raster reuse was keyed on the *whole* methodology
+version, so detection-only changes forced a fully redundant re-export; Findings 1–4 are now
+implemented (raster lineage split, migration `0020`, plus local COG extraction), and the
+table below reflects the post-split behavior. Only `baseline_window` still re-exports.
 
 | Config | Where set | Default | Live-safe? | New EE? | Redundant? | Source / reference |
 | --- | --- | --- | --- | --- | --- | --- |
-| `--threshold` / `THRESHOLD` → `delta_nbr_threshold` | `cli.py:150`, `candidates.py:29` | `-0.25` ΔNBR | Yes¹ | Yes — full window re-export | **Yes, entirely**² | ΔNBR disturbance thresholding [4], [5] |
-| `--min-area` / `MIN_AREA` → `min_area_m2` | `cli.py:151`, `candidates.py:30` | `4500` m² (≈0.45 ha) | Yes¹ | Yes — full window re-export | **Yes, entirely**² | Project-defined (≈5 HLS pixels; adjacent to FAO's 0.5 ha forest definition [13]) |
-| `--baseline-window` / `BASELINE_WINDOW` | `cli.py:149`, `change.py:32` | `5` observations | Yes¹ | Yes — full window re-export | **Partially**³ | Project-defined trailing-median baseline; time-series precedent in CCDC [12] |
-| `FOREST_SENTINEL_FOREST_MASK` (`hansen`\|`worldcover`\|`none`) | `forestmask.py:33,40` | `hansen` | Yes¹ | Yes — full window re-export | **Yes, entirely**² | Hansen GFC [6]; ESA WorldCover [7] |
-| `FOREST_SENTINEL_FOREST_MASK_ASSET` | `forestmask.py:34,44,46` | `UMD/hansen/global_forest_change_2023_v1_11` / `ESA/WorldCover/v200` | Yes¹ | Yes — full window re-export | **Yes, entirely**² | EE Data Catalog [6], [7] |
-| `FOREST_SENTINEL_FOREST_MASK_CANOPY_PCT` | `forestmask.py:35,45` | `30.0` % | Yes¹ | Yes — full window re-export | **Yes, entirely**² | ≥30 % canopy convention from Hansen-based studies [6]; FAO definition context [13] |
+| `--threshold` / `THRESHOLD` → `delta_nbr_threshold` | `cli.py:150`, `candidates.py:29` | `-0.25` ΔNBR | Yes¹ | No — rasters reused (lineage split); candidates re-extract locally² | Resolved² | ΔNBR disturbance thresholding [4], [5] |
+| `--min-area` / `MIN_AREA` → `min_area_m2` | `cli.py:151`, `candidates.py:30` | `4500` m² (≈0.45 ha) | Yes¹ | No — rasters reused (lineage split); candidates re-extract locally² | Resolved² | Project-defined (≈5 HLS pixels; adjacent to FAO's 0.5 ha forest definition [13]) |
+| `--baseline-window` / `BASELINE_WINDOW` | `cli.py:149`, `change.py:32` | `5` observations | Yes¹ | Yes — full window re-export | **Partially**³ (index-reuse refinement still future work) | Project-defined trailing-median baseline; time-series precedent in CCDC [12] |
+| `FOREST_SENTINEL_FOREST_MASK` (`hansen`\|`worldcover`\|`none`) | `forestmask.py:33,40` | `hansen` | Yes¹ | No — rasters reused (lineage split); candidates re-extract locally² | Resolved² | Hansen GFC [6]; ESA WorldCover [7] |
+| `FOREST_SENTINEL_FOREST_MASK_ASSET` | `forestmask.py:34,44,46` | `UMD/hansen/global_forest_change_2023_v1_11` / `ESA/WorldCover/v200` | Yes¹ | No — rasters reused (lineage split); candidates re-extract locally² | Resolved² | EE Data Catalog [6], [7] |
+| `FOREST_SENTINEL_FOREST_MASK_CANOPY_PCT` | `forestmask.py:35,45` | `30.0` % | Yes¹ | No — rasters reused (lineage split); candidates re-extract locally² | Resolved² | ≥30 % canopy convention from Hansen-based studies [6]; FAO definition context [13] |
 | `FOREST_SENTINEL_RADAR` (enable) | `cli.py:73,530` | `0` (off) | Yes — adds a lineage | Yes — new S1 work only | No — genuinely new data | Sentinel-1 GRD [8]; SAR disturbance alerting [9] |
-| `FOREST_SENTINEL_RADAR_THRESHOLD` → `delta_vv_db_threshold` | `cli.py:74`, `radar.py:42` | `-3.0` dB | Yes¹ | Yes — radar window re-export | **Yes, entirely**² | Project-chosen magnitude; VV-backscatter-drop approach per RADD [9] |
+| `FOREST_SENTINEL_RADAR_THRESHOLD` → `delta_vv_db_threshold` | `cli.py:74`, `radar.py:42` | `-3.0` dB | Yes¹ | No — rasters reused (lineage split); candidates re-extract² | Resolved² | Project-chosen magnitude; VV-backscatter-drop approach per RADD [9] |
 | `scale_m` | constant `indices.py:30` | `30` m | Yes¹ (code edit) | Yes | No — raster content changes | HLS native 30 m grid [1], [2] |
 | `masked_categories` | constant `qa.py:22` | cloud, cloud_shadow, snow_ice, high_aerosol | Yes¹ (code edit) | Yes | No — index content changes | HLS Fmask QA band [2]; Fmask algorithm [3] |
 | HLS collections | constant `hls.py:28-31` | `NASA/HLS/HLSL30/v002`, `NASA/HLS/HLSS30/v002` | Yes¹ (code edit) | Yes | No — source data changes | HLS v2.0 [1], [2] |
@@ -188,6 +188,16 @@ cheap stage. See Findings 1–4.
 
 ### 1. Threshold-class changes force a fully redundant re-export of the whole window
 
+> **Status: implemented.** The methodology now splits into a content-addressed
+> `raster_lineage` (script pin, collections, scale, masked categories, baseline window) that
+> index/change rasters key on, and the detection layer (threshold, min area, forest mask)
+> that candidates/events key on — migration `0020`. A detection-parameter change reuses
+> every COG with zero exports; a `candidate_extraction` marker table tracks which
+> methodology has extracted from which raster. One deliberate simplification: the raster
+> lineage keeps `baseline_window` (change-COG paths don't encode it, so splitting it out
+> would collide files), so baseline changes still re-export — the index-reuse refinement
+> below remains future work.
+
 The biggest avoidable EE cost in the current design. `delta_nbr_threshold`, `min_area_m2`,
 the forest-mask trio, and `delta_vv_db_threshold` affect **only** the candidate-extraction
 stage, yet changing any of them re-exports every index and change COG in the window, because:
@@ -209,6 +219,11 @@ already tracked from it. The recorded full parameter set stays reproducible beca
 detection-layer row references its raster-layer parent.
 
 ### 2. Even re-vectorization doesn't need EE — polygonize the stored COG client-side
+
+> **Status: implemented** (`localextract.py`): windowed threshold + polygonize + per-polygon
+> statistics from the stored COG, with the forest mask applied from a one-time static
+> per-AOI mask COG via `WarpedVRT`. The pipeline prefers this path for re-extraction and
+> falls back to the EE delta rebuild when the COG is pruned or unreadable.
 
 Vectorization currently reduces the live EE delta-image graph (`earthengine.py:251-269`);
 the exported COG is never read back. Since the COG *is* the raw signed delta, thresholding +
@@ -254,11 +269,18 @@ compositing itself is best left in EE.
 
 ### 4. `EE_SCRIPT_VERSION` is a coarse invalidation pin
 
+> **Status: implemented.** `RASTER_SCRIPT_VERSION` (per lineage) now invalidates rasters;
+> `EE_SCRIPT_VERSION` invalidates only detection.
+
 Bumping it for any code change re-exports everything, even when raster math is untouched.
 If Finding 1's split is adopted, split the pin too (raster-stage vs detection-stage script
 versions) so vectorization-only fixes don't invalidate rasters.
 
 ### 5. `FOREST_SENTINEL_COG_ROOT` (and `DATABASE_URL`) are silent re-export footguns
+
+> **Status: mitigation implemented.** The pipeline records a prominent warning event at run
+> start when ≥50 % of the window's cataloged COGs are missing on disk, before EE quota is
+> spent.
 
 Moving either without migrating its counterpart makes every reuse check miss and re-exports
 the whole window with no warning. Cheap mitigation: at run start, if a large fraction of
@@ -266,6 +288,9 @@ in-window catalog rows point at missing files, log a prominent warning ("COG roo
 files pruned? N rasters will be re-exported") before spending EE quota.
 
 ### 6. Confidence weights rely on manual version discipline
+
+> **Status: implemented.** `RULE_VERSION` is now `fused-v2+<hash>` over every weight,
+> cutoff, and normalization constant.
 
 Methodology parameters are content-addressed, but `confidence.py`'s weights/cutoffs are
 versioned by a hand-bumped string (`RULE_VERSION = "fused-v2"`). Editing a weight without
@@ -276,6 +301,9 @@ append-only and record their `inputs` — but the label lies). Recommendation: d
 
 ### 7. Methodology changes break incident continuity on a live instance
 
+> **Status: documented** — operator note added to `docs/architecture.md` §5.9 (the
+> carry-forward linking table remains future work).
+
 Parallel lineages are the right reproducibility call, but operators should know the
 consequence: after any methodology change, existing events stop growing (candidates only
 extend events under the same methodology version), linger until `RESOLVED_AFTER_DAYS`
@@ -285,6 +313,9 @@ prominent note in operator docs; a future "event carry-forward" linking table co
 associate successor events across versions without falsifying provenance.
 
 ### 8. AOI geometry is unversioned instance data
+
+> **Status: implemented.** Every run stamps `pipeline_run.aoi_geometry_hash` (migration
+> `0019`) and a changed hash records a warning event mirroring the methodology-change one.
 
 Editing an existing AOI's polygon changes discovery scope from the next run onward while
 all history recorded under the old footprint persists silently. Consider either recording a
