@@ -612,6 +612,18 @@ def test_vm_setup_disables_reviews_on_a_world_open_dashboard() -> None:
     setup = (Path(__file__).resolve().parents[1] / "scripts" / "vm_setup.sh").read_text()
     assert 'echo "FOREST_SENTINEL_REVIEWS=0"' in setup
     assert 'echo "FOREST_SENTINEL_CONTEXT_UPLOADS=0"' in setup
+    assert 'echo "FOREST_SENTINEL_SETTINGS_EDIT=0"' in setup
+
+
+def test_vm_setup_appends_overrides_before_the_forced_off_guards() -> None:
+    """Bead 7.2 (#135): overrides win over instance.env (last assignment) but the
+    world-open guard lines must still win over the overrides file."""
+    setup = (Path(__file__).resolve().parents[1] / "scripts" / "vm_setup.sh").read_text()
+    instance_at = setup.index("# --- from config/instance.env ---")
+    overrides_at = setup.index("config/overrides.env (dashboard settings edits)")
+    computed_at = setup.index("# --- computed by vm_setup.sh")
+    guard_at = setup.index('echo "FOREST_SENTINEL_SETTINGS_EDIT=0"')
+    assert instance_at < overrides_at < computed_at < guard_at
 
 
 def test_capabilities_reflect_env_guards(
@@ -622,15 +634,18 @@ def test_capabilities_reflect_env_guards(
         "pipeline_trigger": True,
         "reviews": True,
         "context_uploads": True,
+        "settings_edit": True,
     }
     monkeypatch.setenv("FOREST_SENTINEL_REVIEWS", "0")
     monkeypatch.setenv("FOREST_SENTINEL_AOI_UPLOADS", "0")
     monkeypatch.setenv("FOREST_SENTINEL_CONTEXT_UPLOADS", "0")
+    monkeypatch.setenv("FOREST_SENTINEL_SETTINGS_EDIT", "0")
     assert client.get("/api/capabilities").json() == {
         "aoi_uploads": False,
         "pipeline_trigger": True,
         "reviews": False,
         "context_uploads": False,
+        "settings_edit": False,
     }
 
 
@@ -927,3 +942,97 @@ def test_settings_endpoint_serves_the_catalogue(
     assert by_key["MIN_AREA"]["recorded"] == 9000.0
     # Secrets never reach the response.
     assert "secret" not in json.dumps(body)
+
+
+def test_settings_write_persists_override_and_audit_row(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bead 7.2 (#135): an allowlisted edit lands in overrides.env + settings_change."""
+    from forest_sentinel.models import SettingsChange
+    from forest_sentinel.settings import OVERRIDES_PATH_ENV_VAR
+
+    overrides = tmp_path / "overrides.env"
+    monkeypatch.setenv(OVERRIDES_PATH_ENV_VAR, str(overrides))
+
+    response = client.post("/api/settings", json={"key": "RESOLVED_AFTER_DAYS", "value": "120"})
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["old"], body["new"]) == ("90", "120")
+    assert "RESOLVED_AFTER_DAYS=120" in overrides.read_text()
+
+    row = db_session.execute(select(SettingsChange)).scalar_one()
+    assert (row.key, row.old_value, row.new_value, row.category) == (
+        "RESOLVED_AFTER_DAYS",
+        "90",
+        "120",
+        "lifecycle",
+    )
+    # The catalogue immediately resolves the new value from the overrides layer.
+    catalogue = client.get("/api/settings").json()
+    entry = next(s for s in catalogue["settings"] if s["key"] == "RESOLVED_AFTER_DAYS")
+    assert (entry["resolved"], entry["source"]) == ("120", "override")
+
+
+def test_settings_write_guard_and_allowlist(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forest_sentinel.settings import OVERRIDES_PATH_ENV_VAR
+
+    monkeypatch.setenv(OVERRIDES_PATH_ENV_VAR, str(tmp_path / "overrides.env"))
+
+    # Footguns and unknown keys are indistinguishable: both are unknown to the
+    # write path.
+    for key in ("FOREST_SENTINEL_DATABASE_URL", "FOREST_SENTINEL_COG_ROOT", "NO_SUCH_KEY"):
+        response = client.post("/api/settings", json={"key": key, "value": "x"})
+        assert response.status_code == 422
+        assert "unknown or non-editable" in response.json()["detail"]
+
+    # Validation failures write nothing.
+    response = client.post("/api/settings", json={"key": "WINDOW_DAYS", "value": "zero"})
+    assert response.status_code == 422
+    assert not (tmp_path / "overrides.env").exists()
+
+    # The guard turns the whole surface off.
+    monkeypatch.setenv("FOREST_SENTINEL_SETTINGS_EDIT", "0")
+    response = client.post("/api/settings", json={"key": "WINDOW_DAYS", "value": "45"})
+    assert response.status_code == 403
+
+
+def test_methodology_settings_require_confirmation(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Guarded keys reject without the flag, carrying the consequence copy."""
+    from forest_sentinel.settings import OVERRIDES_PATH_ENV_VAR
+
+    overrides = tmp_path / "overrides.env"
+    monkeypatch.setenv(OVERRIDES_PATH_ENV_VAR, str(overrides))
+
+    refused = client.post("/api/settings", json={"key": "THRESHOLD", "value": "-0.3"})
+    assert refused.status_code == 422
+    assert "mints a new content-addressed methodology version" in refused.json()["detail"]
+    assert not overrides.exists()
+
+    confirmed = client.post(
+        "/api/settings",
+        json={"key": "THRESHOLD", "value": "-0.3", "confirm_methodology_change": True},
+    )
+    assert confirmed.status_code == 200
+    assert "THRESHOLD=-0.3" in overrides.read_text()
+
+
+def test_retention_floor_cross_rule(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forest_sentinel.settings import OVERRIDES_PATH_ENV_VAR
+
+    monkeypatch.setenv(OVERRIDES_PATH_ENV_VAR, str(tmp_path / "overrides.env"))
+    monkeypatch.setenv("WINDOW_DAYS", "30")
+
+    below_floor = client.post("/api/settings", json={"key": "COG_RETENTION_DAYS", "value": "20"})
+    assert below_floor.status_code == 422
+    assert "WINDOW_DAYS + 14 floor" in below_floor.json()["detail"]
+    # 0 (keep forever) and at-floor values pass.
+    keep_forever = client.post("/api/settings", json={"key": "COG_RETENTION_DAYS", "value": "0"})
+    at_floor = client.post("/api/settings", json={"key": "COG_RETENTION_DAYS", "value": "44"})
+    assert keep_forever.status_code == 200
+    assert at_floor.status_code == 200

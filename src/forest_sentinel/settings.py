@@ -33,7 +33,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from forest_sentinel.models import MethodologyVersion
+from forest_sentinel.models import MethodologyVersion, SettingsChange
 
 OVERRIDES_PATH_ENV_VAR = "FOREST_SENTINEL_OVERRIDES_PATH"
 DEFAULT_OVERRIDES_PATH = "config/overrides.env"
@@ -47,6 +47,10 @@ CATEGORIES = (CATEGORY_INSTANCE, CATEGORY_PIPELINE, CATEGORY_METHODOLOGY, CATEGO
 EDITABLE = "editable"
 GUARDED = "guarded"  # editable, but only with an explicit consequence confirmation
 DISPLAY_ONLY = "display-only"
+
+class SettingsError(ValueError):
+    """A rejected settings write (unknown key, bad value, missing confirmation)."""
+
 
 # The consequence copy echoed by the UI and required-by-error for guarded keys
 # (config-inventory Finding 7 / architecture §5.9 operator note).
@@ -445,3 +449,104 @@ def read_overrides() -> dict[str, str]:
         key, _, value = stripped.partition("=")
         overrides[key.strip()] = value.strip()
     return overrides
+
+
+# --- bead 7.2 (#135): guarded writes -----------------------------------------
+
+
+def apply_change(
+    session: Session,
+    *,
+    key: str,
+    value: str,
+    confirm_methodology_change: bool = False,
+) -> dict[str, Any]:
+    """Validate and persist one settings change; returns ``{key, old, new}``.
+
+    Allowlist semantics: keys that are not registered editable/guarded do not
+    exist for this function — including every display-only instance value —
+    and are rejected identically to typos. Guarded (methodology) keys require
+    ``confirm_methodology_change``; the rejection carries the consequence copy
+    so the UI can show exactly what is being agreed to.
+    """
+    setting = _writable().get(key)
+    if setting is None:
+        raise SettingsError(f"unknown or non-editable setting {key!r}")
+    if setting.editability == GUARDED and not confirm_methodology_change:
+        raise SettingsError(
+            f"{key} is a methodology parameter; confirm the change to proceed. "
+            + METHODOLOGY_CHANGE_CONSEQUENCE
+        )
+    normalized = _validate(setting, value)
+
+    overrides = read_overrides()
+    old = _resolve(setting, overrides)
+    _write_override(setting.key, normalized)
+    session.add(
+        SettingsChange(
+            key=setting.key,
+            category=setting.category,
+            old_value=old,
+            new_value=normalized,
+        )
+    )
+    session.flush()
+    return {"key": setting.key, "old": old, "new": normalized}
+
+
+def _writable() -> dict[str, Setting]:
+    return {s.key: s for s in _registry() if s.editability in (EDITABLE, GUARDED)}
+
+
+def _validate(setting: Setting, value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise SettingsError(f"{setting.key} requires a value")
+    if setting.value_type == "choice":
+        if setting.choices and value not in setting.choices:
+            raise SettingsError(f"{setting.key} must be one of {', '.join(setting.choices or ())}")
+        return value
+    if setting.value_type in ("int", "float"):
+        try:
+            number = int(value) if setting.value_type == "int" else float(value)
+        except ValueError as exc:
+            raise SettingsError(f"{setting.key} must be a {setting.value_type}") from exc
+        if setting.minimum is not None and number < setting.minimum:
+            raise SettingsError(f"{setting.key} must be >= {setting.minimum:g}")
+        if setting.maximum is not None and number > setting.maximum:
+            raise SettingsError(f"{setting.key} must be <= {setting.maximum:g}")
+        _check_cross_rules(setting, float(number))
+        return str(number)
+    return value
+
+
+def _check_cross_rules(setting: Setting, number: float) -> None:
+    """Cross-value rules mirroring runtime behavior, so the UI tells the truth."""
+    if setting.key == "COG_RETENTION_DAYS" and number != 0:
+        overrides = read_overrides()
+        window_raw = overrides.get("WINDOW_DAYS") or os.environ.get("WINDOW_DAYS") or "30"
+        try:
+            floor = int(window_raw) + 14
+        except ValueError:
+            floor = 44
+        if number < floor:
+            raise SettingsError(
+                f"COG_RETENTION_DAYS below the WINDOW_DAYS + 14 floor ({floor}) would be "
+                "raised back at prune time; set it to at least the floor (or 0 to keep "
+                "everything)"
+            )
+
+
+def _write_override(key: str, value: str) -> None:
+    """Read-modify-write the overrides file, preserving other keys, sorted."""
+    path = overrides_path()
+    overrides = read_overrides()
+    overrides[key] = value
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Dashboard settings edits (Slice 7). Appended after instance.env by",
+        "# vm_setup.sh when regenerating .env — last assignment wins; the",
+        "# world-open guard lines still win over this file.",
+    ]
+    lines += [f"{k}={overrides[k]}" for k in sorted(overrides)]
+    path.write_text("\n".join(lines) + "\n")

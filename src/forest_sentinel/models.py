@@ -294,6 +294,27 @@ class DisturbanceCandidate(Base):
     )
 
 
+class SettingsChange(Base):
+    """Append-only audit of dashboard settings edits (Slice 7 bead 7.2).
+
+    Tunnel-as-auth records no "who" — the row is the what/when, and the
+    repo-synced overrides file gives the same history as git commits.
+    """
+
+    __tablename__ = "settings_change"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False)
+    old_value: Mapped[str | None] = mapped_column(String, nullable=True)
+    new_value: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class CandidateExtraction(Base):
     """Marker: this methodology has extracted candidates from this raster.
 

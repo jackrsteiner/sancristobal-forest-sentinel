@@ -85,6 +85,10 @@ REVIEWS_ENV_VAR = "FOREST_SENTINEL_REVIEWS"
 # Set to "0" to disable context-layer uploads (vm_setup.sh does this when the
 # dashboard port is opened to the world, same as AOI uploads).
 CONTEXT_UPLOADS_ENV_VAR = "FOREST_SENTINEL_CONTEXT_UPLOADS"
+
+# Set to "0" to disable settings edits (vm_setup.sh does this when the
+# dashboard port is opened to the world — the fifth write guard, Slice 7).
+SETTINGS_EDIT_ENV_VAR = "FOREST_SENTINEL_SETTINGS_EDIT"
 # The same systemd unit the daily timer fires; --no-block returns immediately
 # and systemd merges a start into an already-running job, so repeated clicks
 # are harmless (the per-AOI advisory lock backstops everything else). The `ofs`
@@ -141,6 +145,7 @@ def create_app() -> FastAPI:
             "pipeline_trigger": os.environ.get(PIPELINE_TRIGGER_ENV_VAR, "1") != "0",
             "reviews": os.environ.get(REVIEWS_ENV_VAR, "1") != "0",
             "context_uploads": os.environ.get(CONTEXT_UPLOADS_ENV_VAR, "1") != "0",
+            "settings_edit": os.environ.get(SETTINGS_EDIT_ENV_VAR, "1") != "0",
         }
 
     @app.get("/api/aois")
@@ -445,6 +450,43 @@ def create_app() -> FastAPI:
         response.
         """
         return settings.catalogue(session)
+
+    @app.post("/api/settings")
+    def change_setting(
+        session: SessionDep, payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Apply one allowlisted settings change (Slice 7 bead 7.2, #135).
+
+        The body is ``{"key", "value", "confirm_methodology_change"?}`` —
+        mandatory JSON, like every write endpoint (structural CSRF defense).
+        The allowlist lives server-side in ``settings.apply_change``; guarded
+        (methodology) keys are rejected with the consequence copy until the
+        confirmation flag is sent. The change lands in ``config/overrides.env``
+        (picked up by the next pipeline run and synced to the instance repo)
+        and appends a ``settings_change`` audit row.
+        """
+        if os.environ.get(SETTINGS_EDIT_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="settings edits are disabled on this dashboard"
+            )
+        key = payload.get("key")
+        value = payload.get("value")
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise HTTPException(status_code=422, detail="body must carry string key and value")
+        try:
+            change = settings.apply_change(
+                session,
+                key=key,
+                value=value,
+                confirm_methodology_change=bool(payload.get("confirm_methodology_change")),
+            )
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        session.commit()
+        return {
+            **change,
+            "detail": "applied; takes effect on the next pipeline run",
+        }
 
     @app.get("/api/context/layers")
     def list_context_layers(session: SessionDep) -> list[dict[str, Any]]:

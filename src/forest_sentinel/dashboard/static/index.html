@@ -70,6 +70,9 @@
       .review-form input { font-size: 12px; width: 100%; margin-top: 4px; padding: 3px; }
       .review-entry { font-size: 12px; color: #555; margin: 2px 0; }
       body.reviews-disabled .review-form { display: none; }
+      body.settings-edit-disabled .setting-edit { display: none; }
+      .setting { margin: 6px 0; }
+      .setting-edit input, .setting-edit select { width: 110px; }
       .timeline { font-size: 13px; margin: 6px 0; }
       .evidence { font-size: 12px; color: #555; }
       .muted { color: #888; }
@@ -1146,7 +1149,70 @@
           recorded.textContent = `current methodology recorded: ${setting.recorded}`;
           row.appendChild(recorded);
         }
+        if (setting.editability !== "display-only") {
+          row.appendChild(settingEditor(setting));
+        }
         return row;
+      }
+
+      // Bead 7.2: the edit affordance — hidden entirely when the settings-edit
+      // capability is off (world-open dashboard); the API guard is the backstop.
+      function settingEditor(setting) {
+        const form = document.createElement("div");
+        form.className = "setting-edit";
+        let input;
+        if (setting.choices && setting.choices.length) {
+          input = document.createElement("select");
+          setting.choices.forEach((choice) => {
+            const option = document.createElement("option");
+            option.value = choice;
+            option.textContent = choice;
+            if (choice === setting.resolved) option.selected = true;
+            input.appendChild(option);
+          });
+        } else {
+          input = document.createElement("input");
+          input.type = "text";
+          input.value = setting.resolved == null ? "" : setting.resolved;
+        }
+        const save = document.createElement("button");
+        save.textContent = "Save";
+        const status = document.createElement("span");
+        status.className = "muted";
+        save.addEventListener("click", async () => {
+          const payload = { key: setting.key, value: input.value };
+          if (setting.editability === "guarded") {
+            // The consequence copy is the contract: agreeing here sends the
+            // explicit confirmation flag the API requires.
+            if (!window.confirm(`${setting.key}: ${setting.implications}\n\nProceed?`)) {
+              return;
+            }
+            payload.confirm_methodology_change = true;
+          }
+          save.disabled = true;
+          status.textContent = "Saving…";
+          try {
+            const response = await fetch("/api/settings", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              status.textContent = body.detail || `Failed (${response.status}).`;
+              return;
+            }
+            status.textContent = `Saved (was ${body.old ?? "unset"}); applies next run.`;
+          } catch (e) {
+            status.textContent = "Failed to save.";
+          } finally {
+            save.disabled = false;
+          }
+        });
+        form.appendChild(input);
+        form.appendChild(save);
+        form.appendChild(status);
+        return form;
       }
 
       // Reviews are disabled on a world-open dashboard; hide the form entirely.
@@ -1155,6 +1221,7 @@
           const caps = await (await fetch("/api/capabilities")).json();
           document.body.classList.toggle("reviews-disabled", !caps.reviews);
           document.body.classList.toggle("context-uploads-disabled", !caps.context_uploads);
+          document.body.classList.toggle("settings-edit-disabled", !caps.settings_edit);
         } catch (e) {
           /* leave the default (enabled) — the API guard is the backstop */
         }

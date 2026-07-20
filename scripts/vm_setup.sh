@@ -85,6 +85,14 @@ echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/i
         echo "# --- from config/instance.env ---"
         cat "${INSTANCE_ENV}"
     fi
+    # Dashboard settings edits (Slice 7): appended AFTER instance.env so the
+    # latest edit wins, but BEFORE the computed + world-open lines below, which
+    # must always win over anything this file could carry.
+    if [ -f "${APP_DIR}/config/overrides.env" ]; then
+        echo ""
+        echo "# --- from config/overrides.env (dashboard settings edits) ---"
+        cat "${APP_DIR}/config/overrides.env"
+    fi
     echo ""
     echo "# --- computed by vm_setup.sh (last assignment wins) ---"
     echo "FOREST_SENTINEL_COG_ROOT=/data/cogs"
@@ -96,13 +104,14 @@ echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/i
         echo "AOI_PATH=config/aoi.geojson"
     fi
     # A world-open dashboard must stay read-only: disable the AOI-upload,
-    # run-now/stop, review, and context-upload endpoints whenever the
-    # firewall exposes the port publicly.
+    # run-now/stop, review, context-upload, and settings-edit endpoints
+    # whenever the firewall exposes the port publicly.
     if [ "${OPEN_DASHBOARD:-0}" = "1" ]; then
         echo "FOREST_SENTINEL_AOI_UPLOADS=0"
         echo "FOREST_SENTINEL_PIPELINE_TRIGGER=0"
         echo "FOREST_SENTINEL_REVIEWS=0"
         echo "FOREST_SENTINEL_CONTEXT_UPLOADS=0"
+        echo "FOREST_SENTINEL_SETTINGS_EDIT=0"
     fi
 } >"${APP_DIR}/.env"
 
