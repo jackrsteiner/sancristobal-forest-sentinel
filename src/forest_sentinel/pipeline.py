@@ -15,6 +15,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time
+from pathlib import Path
 from typing import Any
 
 from geoalchemy2.shape import to_shape
@@ -22,11 +23,25 @@ from shapely.geometry import mapping
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from forest_sentinel import candidates, change, earthengine, events, indices, runlog
+from forest_sentinel import (
+    candidates,
+    change,
+    confidence,
+    context,
+    earthengine,
+    events,
+    forestmask,
+    indices,
+    localextract,
+    radar,
+    reproduce,
+    runlog,
+    sentinel1,
+)
 from forest_sentinel.earthengine import EarthEngineError
 from forest_sentinel.hls import discover_observations
-from forest_sentinel.models import Aoi, MethodologyVersion, Observation
-from forest_sentinel.storage import Storage, StorageError
+from forest_sentinel.models import Aoi, ChangeRaster, IndexRaster, MethodologyVersion, Observation
+from forest_sentinel.storage import CogKey, Storage, StorageError
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +75,45 @@ def _release_aoi_run_lock(session: Session, aoi_id: int) -> None:
 # NBR + NDVI per observation.
 _EXPORTS_PER_OBSERVATION = 2
 
+# A majority of the window's cataloged COGs missing on disk points at a moved
+# FOREST_SENTINEL_COG_ROOT or a repointed database — not routine churn — and the
+# run is about to silently re-export all of them (config-inventory Finding 5).
+_MISSING_COG_WARNING_FRACTION = 0.5
+
 
 def _chunked(items: list[Observation], size: int) -> list[list[Observation]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _missing_cog_counts(
+    session: Session,
+    *,
+    observations: list[Observation],
+    raster_lineage_ids: list[int],
+) -> tuple[int, int]:
+    """(missing, cataloged) counts of the window's on-disk raster files.
+
+    Only rows the run could actually reuse are counted: this window's
+    observations under the run's raster lineages. Missing files are
+    re-exported per-row anyway (indices/change check per artifact); this
+    preflight exists to make a *wholesale* miss loud before EE quota is spent.
+    """
+    observation_ids = [observation.id for observation in observations]
+    if not observation_ids or not raster_lineage_ids:
+        return (0, 0)
+    paths: list[str] = []
+    for model in (IndexRaster, ChangeRaster):
+        paths.extend(
+            session.execute(
+                select(model.cog_path)
+                .where(model.observation_id.in_(observation_ids))
+                .where(model.raster_lineage_id.in_(raster_lineage_ids))
+            )
+            .scalars()
+            .all()
+        )
+    missing = sum(1 for path in paths if not Path(path).exists())
+    return (missing, len(paths))
 
 
 def _submit_event(
@@ -98,6 +149,12 @@ class PipelineSummary:
     export_failures: int = 0  # observations skipped because an EE export failed
     index_rasters_reused: int = 0  # persisted by an earlier run; no export submitted
     change_rasters_reused: int = 0
+    events_resolved: int = 0  # ongoing events auto-resolved this run (quiet + clear look)
+    confidence_assessments: int = 0  # appended this run (unchanged conclusions skipped)
+    radar_change_rasters: int = 0  # VV dB deltas produced (radar stage, when enabled)
+    radar_change_rasters_reused: int = 0
+    radar_candidates: int = 0
+    context_relations: int = 0  # event-context rows recorded (replaced per run)
 
 
 def run_pipeline(
@@ -113,6 +170,9 @@ def run_pipeline(
     min_area_m2: float | None = None,
     scale: int = indices.DEFAULT_SCALE_METERS,
     max_concurrent_exports: int = 1,
+    resolved_after_days: int = events.DEFAULT_RESOLVED_AFTER_DAYS,
+    radar_methodology: MethodologyVersion | None = None,
+    context_buffer_m: float = context.DEFAULT_CONTEXT_BUFFER_M,
     ee_module: Any = earthengine,
 ) -> PipelineSummary:
     """Run discover → indices → change → candidates → events for one AOI and window.
@@ -149,6 +209,9 @@ def run_pipeline(
                 min_area_m2=min_area_m2,
                 scale=scale,
                 max_concurrent_exports=max_concurrent_exports,
+                resolved_after_days=resolved_after_days,
+                radar_methodology=radar_methodology,
+                context_buffer_m=context_buffer_m,
                 ee_module=ee_module,
                 recorder=recorder,
             )
@@ -166,6 +229,156 @@ def run_pipeline(
         _release_aoi_run_lock(session, aoi.id)
 
 
+def _candidates_for_product(
+    session: Session,
+    *,
+    product: change.ChangeProduct,
+    methodology: MethodologyVersion,
+    aoi: Aoi,
+    storage: Storage,
+    fallback_region: Any,
+    scale: int,
+    threshold: float | None,
+    min_area_m2: float | None,
+    ee_module: Any,
+) -> int:
+    """Candidate count for one change product under the run's methodology.
+
+    A product with a live delta extracts directly. A frozen/reused product
+    (``delta_image is None``) usually already has this methodology's candidates
+    — count them. When it does not, the raster was minted under a different
+    detection layer of the same raster lineage (Finding 1) and is re-extracted
+    with **no new export**: preferably zero-EE from the stored COG (Finding 2),
+    else from a delta graph rebuilt out of recorded provenance.
+    """
+    raster = product.change_raster
+    delta_image = product.delta_image
+    region = product.region if product.region is not None else fallback_region
+    if delta_image is None:
+        if candidates.has_extraction(session, raster.id, methodology.id):
+            return candidates.count_candidates_for_change_raster(session, raster.id, methodology.id)
+        local = _extract_locally(
+            session,
+            raster=raster,
+            methodology=methodology,
+            aoi=aoi,
+            storage=storage,
+            scale=scale,
+            threshold=threshold,
+            min_area_m2=min_area_m2,
+            ee_module=ee_module,
+        )
+        if local is not None:
+            return local
+        delta_image, region, _, _ = reproduce.rebuild_change_delta(
+            session, raster=raster, ee_module=ee_module
+        )
+    return len(
+        candidates.extract_candidates_for_change_raster(
+            session,
+            change_raster=raster,
+            methodology=methodology,
+            delta_image=delta_image,
+            region=region,
+            scale=scale,
+            threshold=threshold,
+            min_area_m2=min_area_m2,
+            ee_module=ee_module,
+        )
+    )
+
+
+def _extract_locally(
+    session: Session,
+    *,
+    raster: ChangeRaster,
+    methodology: MethodologyVersion,
+    aoi: Aoi,
+    storage: Storage,
+    scale: int,
+    threshold: float | None,
+    min_area_m2: float | None,
+    ee_module: Any,
+) -> int | None:
+    """Finding 2: zero-EE re-extraction from the stored COG; ``None`` = fall back.
+
+    Requires the COG on disk and — when the methodology has a forest mask — a
+    local mask COG (exported once per AOI + mask config, then reused forever).
+    Any local failure logs and falls back to the EE rebuild path rather than
+    failing the observation.
+    """
+    if not Path(raster.cog_path).exists():
+        return None
+    if raster.change_type == CANDIDATE_CHANGE_TYPE:
+        resolved_threshold = candidates.resolve_threshold(methodology, threshold)
+    elif threshold is not None:
+        resolved_threshold = threshold
+    else:  # radar callers always resolve; refuse to guess a dB cutoff here
+        return None
+    mask_cog_path: str | None = None
+    mask_config = forestmask.resolve_config(methodology, None)
+    if mask_config.get("source") != forestmask.SOURCE_NONE:
+        mask_cog_path = _ensure_mask_cog(
+            aoi, mask_config, storage=storage, scale=scale, ee_module=ee_module
+        )
+        if mask_cog_path is None:
+            return None
+    try:
+        features = localextract.extract_features_from_cog(
+            raster.cog_path,
+            threshold=resolved_threshold,
+            min_area_m2=candidates.resolve_min_area(methodology, min_area_m2),
+            mask_cog_path=mask_cog_path,
+        )
+    except localextract.LocalExtractError as exc:
+        logger.warning("local extraction fell back to Earth Engine: %s", exc)
+        return None
+    return len(
+        candidates.persist_candidate_features(
+            session,
+            change_raster=raster,
+            methodology=methodology,
+            features=features,
+            scale=scale,
+            min_area_m2=min_area_m2,
+        )
+    )
+
+
+def _ensure_mask_cog(
+    aoi: Aoi,
+    mask_config: dict[str, Any],
+    *,
+    storage: Storage,
+    scale: int,
+    ee_module: Any,
+) -> str | None:
+    """The local forest-mask COG for (AOI, mask config), exporting it on first use.
+
+    Static reference data, so the CogKey date component is ``static`` — the
+    retention pruner only deletes files under parseable ISO date directories,
+    so the mask survives pruning and is exported exactly once.
+    """
+    key = CogKey(
+        aoi=f"{aoi.id}-{aoi.name}",
+        product="forest_mask",
+        date="static",
+        filename=localextract.mask_cog_key_filename(mask_config),
+    )
+    path = storage.path_for(key)
+    if path.exists():
+        return str(path)
+    try:
+        mask_image = forestmask.build_mask(mask_config, ee_module=ee_module)
+        if mask_image is None:
+            return None
+        region = mapping(to_shape(aoi.geometry))
+        return str(storage.export_image(mask_image, key, scale=scale, region=region))
+    except (StorageError, EarthEngineError) as exc:
+        logger.warning("forest-mask COG export failed; falling back to EE extraction: %s", exc)
+        return None
+
+
 def _run_pipeline_locked(
     session: Session,
     *,
@@ -179,6 +392,9 @@ def _run_pipeline_locked(
     min_area_m2: float | None,
     scale: int,
     max_concurrent_exports: int,
+    resolved_after_days: int,
+    radar_methodology: MethodologyVersion | None,
+    context_buffer_m: float,
     ee_module: Any,
     recorder: runlog.RunRecorder,
 ) -> PipelineSummary:
@@ -209,6 +425,24 @@ def _run_pipeline_locked(
         .scalars()
         .all()
     )
+
+    lineage_ids = [methodology.raster_lineage_id] + (
+        [radar_methodology.raster_lineage_id] if radar_methodology is not None else []
+    )
+    missing_cogs, cataloged_cogs = _missing_cog_counts(
+        session, observations=observations, raster_lineage_ids=lineage_ids
+    )
+    if cataloged_cogs and missing_cogs / cataloged_cogs >= _MISSING_COG_WARNING_FRACTION:
+        recorder.record(
+            "run",
+            "warning",
+            message=(
+                f"{missing_cogs} of {cataloged_cogs} cataloged COGs for this window are "
+                "missing on disk (moved FOREST_SENTINEL_COG_ROOT? database repointed? "
+                "over-aggressive prune?) — reuse will miss and they will be re-exported "
+                "from Earth Engine"
+            ),
+        )
 
     # One bad export must not starve the run: failing observations are skipped and
     # counted; already-persisted rows for them are consistent (upserts) and the next
@@ -285,27 +519,19 @@ def _run_pipeline_locked(
             for product in products:
                 if product.change_type != CANDIDATE_CHANGE_TYPE:
                     continue
-                if product.delta_image is None:
-                    # Frozen or reused: the candidate set already exists (it commits
-                    # in the same checkpoint as the raster) — count it, don't
-                    # re-extract it.
-                    observation_candidates += candidates.count_candidates_for_change_raster(
-                        session, product.change_raster.id
-                    )
-                    continue
-                observation_candidates += len(
-                    candidates.extract_candidates_for_change_raster(
-                        session,
-                        change_raster=product.change_raster,
-                        delta_image=product.delta_image,
-                        # Vectorize over the same scene ∩ AOI region the delta was
-                        # exported with (#78); whole-AOI is the defensive fallback.
-                        region=product.region if product.region is not None else region,
-                        scale=scale,
-                        threshold=threshold,
-                        min_area_m2=min_area_m2,
-                        ee_module=ee_module,
-                    )
+                # Vectorize over the same scene ∩ AOI region the delta was
+                # exported with (#78); whole-AOI is the defensive fallback.
+                observation_candidates += _candidates_for_product(
+                    session,
+                    product=product,
+                    methodology=methodology,
+                    aoi=aoi,
+                    storage=storage,
+                    fallback_region=region,
+                    scale=scale,
+                    threshold=threshold,
+                    min_area_m2=min_area_m2,
+                    ee_module=ee_module,
                 )
             change_count += len(products)
             observation_reused = sum(1 for product in products if product.reused)
@@ -346,14 +572,58 @@ def _run_pipeline_locked(
                 message=str(exc),
             )
 
+    radar_count = radar_reused = radar_candidates = 0
+    if radar_methodology is not None:
+        radar_count, radar_reused, radar_candidates, radar_failures = _run_radar_stage(
+            session,
+            aoi=aoi,
+            since=since,
+            until=until,
+            methodology=radar_methodology,
+            storage=storage,
+            baseline_window=baseline_window,
+            scale=scale,
+            ee_module=ee_module,
+            recorder=recorder,
+        )
+        export_failures += radar_failures
+
     tracking = events.track_events_for_aoi(session, aoi=aoi)
+    # Lifecycle after tracking: extension has already reopened any re-detected
+    # events, so what remains quiet-past-window (with a clear later look) resolves.
+    events_resolved = events.apply_resolved_lifecycle(
+        session, aoi=aoi, resolved_after_days=resolved_after_days
+    )
     recorder.record(
         "events",
         "info",
         message=(
             f"{tracking.events_created} events created, "
-            f"{tracking.observations_added} observations tracked"
+            f"{tracking.observations_added} observations tracked, "
+            f"{events_resolved} resolved"
         ),
+    )
+
+    # Confidence after lifecycle: assessments see final statuses and dates.
+    assessments = confidence.assess_events_for_aoi(
+        session, aoi=aoi, pipeline_run_id=recorder.run.id
+    )
+    recorder.record(
+        "confidence",
+        "info",
+        message=(
+            f"{assessments} assessment(s) appended "
+            f"(rule {confidence.RULE_VERSION}; unchanged conclusions skipped)"
+        ),
+    )
+
+    # Context relations last: a derived view over final event footprints,
+    # replaced wholesale each run from whatever layers exist right now.
+    context_relations = context.compute_event_context(session, aoi=aoi, buffer_m=context_buffer_m)
+    recorder.record(
+        "context",
+        "info",
+        message=f"{context_relations} context relation(s) recorded (replaced per run)",
     )
 
     return PipelineSummary(
@@ -368,4 +638,122 @@ def _run_pipeline_locked(
         export_failures=export_failures,
         index_rasters_reused=index_reused,
         change_rasters_reused=change_reused,
+        events_resolved=events_resolved,
+        confidence_assessments=assessments,
+        radar_change_rasters=radar_count,
+        radar_change_rasters_reused=radar_reused,
+        radar_candidates=radar_candidates,
+        context_relations=context_relations,
     )
+
+
+def _run_radar_stage(
+    session: Session,
+    *,
+    aoi: Aoi,
+    since: date,
+    until: date,
+    methodology: MethodologyVersion,
+    storage: Storage,
+    baseline_window: int,
+    scale: int,
+    ee_module: Any,
+    recorder: runlog.RunRecorder,
+) -> tuple[int, int, int, int]:
+    """Discovery → VV dB deltas → radar candidates, under the radar methodology.
+
+    Mirrors the optical change stage's shape: one batch per observation,
+    per-observation failure isolation with a rollback before the failure event
+    (so a committed change raster always implies extracted candidates), and
+    frozen/reused deltas counting their existing candidates. Radar candidates
+    land in the same ``disturbance_candidate`` table; event tracking downstream
+    is methodology-scoped, so they form their own lineages.
+    """
+    discovery = sentinel1.discover_radar_observations(
+        session, aoi, since=since, until=until, ee_module=ee_module
+    )
+    recorder.record(
+        "radar",
+        "info",
+        message=(
+            f"{discovery.discovered} scenes discovered, {discovery.recorded} recorded, "
+            f"{discovery.skipped} skipped"
+        ),
+    )
+    observations = list(
+        session.execute(
+            select(Observation)
+            .where(Observation.aoi_id == aoi.id)
+            .where(Observation.sensor == sentinel1.S1_SENSOR)
+            .where(Observation.acquired_at >= datetime.combine(since, time.min, tzinfo=UTC))
+            .where(Observation.acquired_at < datetime.combine(until, time.min, tzinfo=UTC))
+            .order_by(Observation.acquired_at)
+        )
+        .scalars()
+        .all()
+    )
+
+    threshold = radar.resolve_db_threshold(methodology)
+    min_area = candidates.resolve_min_area(methodology, None)
+    delta_count = reused_count = candidate_count = failures = 0
+    batches = len(observations)
+    recorder.record("radar", "info", message=f"{batches} batches (one per scene)")
+    for batch_index, observation in enumerate(observations, start=1):
+        try:
+            products = radar.compute_radar_change_for_observation(
+                session,
+                aoi=aoi,
+                observation=observation,
+                methodology=methodology,
+                storage=storage,
+                baseline_window=baseline_window,
+                scale=scale,
+                ee_module=ee_module,
+                on_export_submit=_submit_event(recorder, "radar", batch_index, batches),
+            )
+            observation_candidates = 0
+            for product in products:
+                observation_candidates += _candidates_for_product(
+                    session,
+                    product=product,
+                    methodology=methodology,
+                    aoi=aoi,
+                    storage=storage,
+                    fallback_region=mapping(to_shape(aoi.geometry)),
+                    scale=scale,
+                    threshold=threshold,
+                    min_area_m2=min_area,
+                    ee_module=ee_module,
+                )
+            delta_count += len(products)
+            reused_count += sum(1 for product in products if product.reused)
+            candidate_count += observation_candidates
+            exported = sum(1 for product in products if product.delta_image is not None)
+            recorder.record(
+                "radar",
+                "succeeded",
+                batch_index=batch_index,
+                batch_total=batches,
+                exports=exported,
+                message=(
+                    f"{exported} exported, "
+                    f"{sum(1 for p in products if p.reused)} reused, "
+                    f"{observation_candidates} candidates"
+                ),
+            )
+        except (StorageError, EarthEngineError) as exc:
+            failures += 1
+            logger.warning(
+                "skipping radar scene %s: change/candidate stage failed (%s)",
+                observation.source_scene_id,
+                exc,
+            )
+            session.rollback()
+            recorder.record(
+                "radar",
+                "failed",
+                batch_index=batch_index,
+                batch_total=batches,
+                message=str(exc),
+            )
+    return delta_count, reused_count, candidate_count, failures

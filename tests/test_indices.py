@@ -64,7 +64,7 @@ def test_computes_nbr_and_ndvi_for_landsat(db_session: Session, tmp_path: Path) 
     assert [r.index_type for r in rows] == ["NBR", "NDVI"]
     for row in rows:
         assert row.observation_id == obs.id
-        assert row.methodology_version_id == methodology.id
+        assert row.raster_lineage_id == methodology.raster_lineage_id
         assert row.valid_pixel_fraction == 0.9
         # The path carries the index type and the (sanitized) source scene id.
         assert row.cog_path.endswith(f"{row.index_type.lower()}-hls.scene.x.tif")

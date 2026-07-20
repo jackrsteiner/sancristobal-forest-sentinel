@@ -21,13 +21,17 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from forest_sentinel import (
+    context,
     earthengine,
+    events,
     forestmask,
     indices,
     pipeline,
     qa,
+    radar,
     reproduce,
     retention,
+    sentinel1,
     storage,
 )
 from forest_sentinel.aoi import (
@@ -50,6 +54,7 @@ from forest_sentinel.methodology import (
     resolve_methodology_version,
 )
 from forest_sentinel.models import (
+    CONTEXT_KINDS,
     Aoi,
     ChangeRaster,
     DisturbanceEvent,
@@ -60,7 +65,20 @@ from forest_sentinel.models import (
 from forest_sentinel.storage import StorageConfigurationError, StorageError
 
 # Pins what Google ran for this build, recorded in the methodology version for reproducibility.
+# Split per stage (config-inventory Finding 4): the RASTER pin invalidates raster
+# lineages (index/change COGs re-export when it bumps); the detection pin below
+# invalidates only the methodology (candidates re-extract, every COG reused).
+# The raster pins keep the pre-split values so lineages backfilled by migration
+# 0020 content-match the ones new runs derive — no re-export on upgrade.
 EE_SCRIPT_VERSION = "slice1-optical-change-v1"
+RASTER_SCRIPT_VERSION = "slice1-optical-change-v1"
+
+# The radar stage's own pins (Slice 5): radar runs under its own content-addressed
+# methodology (radar-change), so its code versions are pinned independently.
+RADAR_SCRIPT_VERSION = "slice5-radar-change-v1"
+RADAR_RASTER_SCRIPT_VERSION = "slice5-radar-change-v1"
+RADAR_ENV_VAR = "FOREST_SENTINEL_RADAR"
+RADAR_THRESHOLD_ENV_VAR = "FOREST_SENTINEL_RADAR_THRESHOLD"
 
 # How many Earth Engine batch exports the pipeline keeps in flight at once.
 MAX_CONCURRENT_EXPORTS_ENV_VAR = "FOREST_SENTINEL_MAX_CONCURRENT_EXPORTS"
@@ -89,6 +107,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_cogs_command(args)
     if args.command == "aoi":
         return _run_aoi_command(args)
+    if args.command == "context":
+        return _run_context_command(args)
     if (args.since is None) != (args.until is None):
         # A lone window flag used to fall through to the Slice 0 load silently.
         parser.error("--since and --until must be provided together")
@@ -149,6 +169,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "--yes",
         action="store_true",
         help="Actually delete. Without it, print what would be deleted and exit 1.",
+    )
+
+    context_parser = subparsers.add_parser(
+        "context", help="Manage contextual GeoJSON layers (concessions, roads, rivers, ...)."
+    )
+    context_subparsers = context_parser.add_subparsers(dest="context_command", required=True)
+    context_load_parser = context_subparsers.add_parser(
+        "load",
+        help=(
+            "Load (or replace) one context layer from a GeoJSON file. Re-loading "
+            "a name replaces its features wholesale."
+        ),
+    )
+    context_load_parser.add_argument("file", type=Path, help="GeoJSON Feature/FeatureCollection.")
+    context_load_parser.add_argument(
+        "--kind", required=True, choices=list(CONTEXT_KINDS), help="What the layer represents."
+    )
+    context_load_parser.add_argument(
+        "--name",
+        default=None,
+        help=(
+            "Layer name (default: derived from the filename — the part after "
+            "'--' for <kind>--<name>.geojson, else the whole stem)."
+        ),
     )
 
     cogs_parser = subparsers.add_parser("cogs", help="Manage the local COG store.")
@@ -258,7 +302,7 @@ def _run_cogs_reproduce(args: argparse.Namespace) -> int:
                         session,
                         raster=index_raster,
                         storage=cog_storage,
-                        current_script_version=EE_SCRIPT_VERSION,
+                        current_script_version=RASTER_SCRIPT_VERSION,
                         force_version=args.force_version,
                     )
                 else:
@@ -270,7 +314,7 @@ def _run_cogs_reproduce(args: argparse.Namespace) -> int:
                         session,
                         raster=change_raster,
                         storage=cog_storage,
-                        current_script_version=EE_SCRIPT_VERSION,
+                        current_script_version=RASTER_SCRIPT_VERSION,
                         force_version=args.force_version,
                     )
         except StorageConfigurationError as exc:
@@ -283,6 +327,33 @@ def _run_cogs_reproduce(args: argparse.Namespace) -> int:
             print(f"error: could not connect to the database ({exc})", file=sys.stderr)
             return 1
     print(f"Reproduced {args.kind}_raster {args.raster_id} -> {path}")
+    return 0
+
+
+def _run_context_command(args: argparse.Namespace) -> int:
+    """Dispatch `forest-sentinel context load` (E17, #125)."""
+    try:
+        document = context.load_context_file(args.file)
+    except context.ContextConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    parsed = context.parse_harvest_filename(args.file)
+    name = args.name or (parsed[1] if parsed else args.file.stem)
+    with _disposing_engine() as engine:
+        try:
+            with Session(engine) as session:
+                context.replace_layer(
+                    session,
+                    name=name,
+                    kind=args.kind,
+                    document=document,
+                    source_file=str(args.file),
+                )
+                session.commit()
+        except OperationalError as exc:
+            print(f"error: could not connect to the database ({exc})", file=sys.stderr)
+            return 1
+    print(f"Loaded context layer {name!r} ({args.kind}): {len(document.geometries)} feature(s)")
     return 0
 
 
@@ -318,7 +389,7 @@ def _aoi_list(session: Session) -> int:
         print("No AOIs configured.")
         return 0
     print(f"{'id':>4}  {'name':<32} {'observations':>12} {'events':>7}  last run")
-    for aoi_id, name, observations, events in rows:
+    for aoi_id, name, observations, event_count in rows:
         last_run = session.execute(
             select(PipelineRun.status, PipelineRun.started_at)
             .where(PipelineRun.aoi_id == aoi_id)
@@ -326,7 +397,7 @@ def _aoi_list(session: Session) -> int:
             .limit(1)
         ).first()
         run_label = f"{last_run.status} @ {last_run.started_at:%Y-%m-%d %H:%M}" if last_run else "—"
-        print(f"{aoi_id:>4}  {name:<32} {observations:>12} {events:>7}  {run_label}")
+        print(f"{aoi_id:>4}  {name:<32} {observations:>12} {event_count:>7}  {run_label}")
     return 0
 
 
@@ -433,6 +504,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
         return 1
     parameters = {
         "ee_script_version": EE_SCRIPT_VERSION,
+        "raster_script_version": RASTER_SCRIPT_VERSION,
         "collections": sorted(HLS_COLLECTIONS),
         "baseline_window": args.baseline_window,
         "delta_nbr_threshold": threshold,
@@ -460,6 +532,42 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                     parameters=parameters,
                     version=args.methodology_version,
                 )
+                # Radar augmentation (Slice 5) is opt-in and runs under its own
+                # content-addressed methodology — separate lineage, separate pin.
+                radar_methodology = None
+                if os.environ.get(RADAR_ENV_VAR, "0") == "1":
+                    radar_threshold_raw = os.environ.get(RADAR_THRESHOLD_ENV_VAR, "")
+                    try:
+                        radar_threshold = float(radar_threshold_raw)
+                    except ValueError:
+                        radar_threshold = radar.DEFAULT_DELTA_VV_DB_THRESHOLD
+                    radar_methodology = resolve_methodology_version(
+                        session,
+                        name="radar-change",
+                        parameters={
+                            "ee_script_version": RADAR_SCRIPT_VERSION,
+                            "raster_script_version": RADAR_RASTER_SCRIPT_VERSION,
+                            "collection": sentinel1.S1_COLLECTION,
+                            "metric": "vv_db",
+                            "delta_vv_db_threshold": radar_threshold,
+                            "baseline_window": args.baseline_window,
+                            "orbit_policy": "same_direction",
+                            "scale_m": indices.DEFAULT_SCALE_METERS,
+                            "min_area_m2": min_area,
+                            **forestmask.parameters_entry(forest_mask_config),
+                        },
+                    )
+                # Harvest config/context/*.geojson (E17): idempotent replace, so
+                # running per AOI file is safe; a bad file warns, never blocks.
+                harvest = context.harvest_context_dir(
+                    session,
+                    Path(os.environ.get(context.CONTEXT_DIR_ENV_VAR, context.DEFAULT_CONTEXT_DIR)),
+                )
+                if harvest.layers or harvest.skipped:
+                    print(
+                        f"Context layers: {harvest.layers} loaded "
+                        f"({harvest.features} features), {harvest.skipped} skipped"
+                    )
                 # Commit the AOI/methodology rows before the (hours-long) pipeline
                 # body so the dashboard lists the AOI as soon as a run starts,
                 # rather than only after the first full run commits — and even if
@@ -481,6 +589,18 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                     threshold=threshold,
                     min_area_m2=min_area,
                     max_concurrent_exports=_max_concurrent_exports(),
+                    # Lifecycle config, not a methodology input: changing it never
+                    # mints a new methodology version.
+                    resolved_after_days=_positive_int_env(
+                        "RESOLVED_AFTER_DAYS", events.DEFAULT_RESOLVED_AFTER_DAYS
+                    ),
+                    radar_methodology=radar_methodology,
+                    context_buffer_m=float(
+                        _positive_int_env(
+                            context.CONTEXT_BUFFER_ENV_VAR,
+                            int(context.DEFAULT_CONTEXT_BUFFER_M),
+                        )
+                    ),
                 )
                 session.commit()
         except StorageConfigurationError as exc:
@@ -516,7 +636,8 @@ def _run_pipeline(args: argparse.Namespace) -> int:
     print(f"Disturbance candidates: {summary.candidates}")
     print(
         f"Disturbance events: {summary.events_created} created, "
-        f"{summary.event_observations} observations tracked"
+        f"{summary.event_observations} observations tracked, "
+        f"{summary.events_resolved} resolved"
     )
     if summary.export_failures:
         # Partial results are committed; a nonzero exit alerts the scheduler.

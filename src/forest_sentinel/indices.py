@@ -185,7 +185,7 @@ def compute_indices_for_observations(
                 existing = _get_index_raster(
                     session,
                     observation_id=observation.id,
-                    methodology_version_id=methodology.id,
+                    raster_lineage_id=methodology.raster_lineage_id,
                     index_type=index_type,
                 )
                 if existing is not None and Path(existing.cog_path).exists():
@@ -243,7 +243,7 @@ def compute_indices_for_observations(
         raster = _upsert_index_raster(
             session,
             observation_id=observation.id,
-            methodology_version_id=methodology.id,
+            raster_lineage_id=methodology.raster_lineage_id,
             index_type=index_type,
             cog_path=str(result),
             valid_pixel_fraction=fraction,
@@ -259,14 +259,14 @@ def _get_index_raster(
     session: Session,
     *,
     observation_id: int,
-    methodology_version_id: int,
+    raster_lineage_id: int,
     index_type: str,
 ) -> IndexRaster | None:
     return session.execute(
         select(IndexRaster)
         .where(IndexRaster.observation_id == observation_id)
         .where(IndexRaster.index_type == index_type)
-        .where(IndexRaster.methodology_version_id == methodology_version_id)
+        .where(IndexRaster.raster_lineage_id == raster_lineage_id)
     ).scalar_one_or_none()
 
 
@@ -274,7 +274,7 @@ def _upsert_index_raster(
     session: Session,
     *,
     observation_id: int,
-    methodology_version_id: int,
+    raster_lineage_id: int,
     index_type: str,
     cog_path: str,
     valid_pixel_fraction: float,
@@ -283,7 +283,7 @@ def _upsert_index_raster(
         select(IndexRaster)
         .where(IndexRaster.observation_id == observation_id)
         .where(IndexRaster.index_type == index_type)
-        .where(IndexRaster.methodology_version_id == methodology_version_id)
+        .where(IndexRaster.raster_lineage_id == raster_lineage_id)
     ).scalar_one_or_none()
     if existing is not None:
         existing.cog_path = cog_path
@@ -291,7 +291,7 @@ def _upsert_index_raster(
         return existing
     created = IndexRaster(
         observation_id=observation_id,
-        methodology_version_id=methodology_version_id,
+        raster_lineage_id=raster_lineage_id,
         index_type=index_type,
         cog_path=cog_path,
         valid_pixel_fraction=valid_pixel_fraction,

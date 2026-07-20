@@ -76,7 +76,7 @@ def test_computes_delta_against_trailing_median(db_session: Session, tmp_path: P
     assert len(rows) == 2
     for row in rows:
         assert row.observation_id == current.id
-        assert row.methodology_version_id == methodology.id
+        assert row.raster_lineage_id == methodology.raster_lineage_id
         assert row.baseline_window == 5
         assert row.valid_pixel_fraction == 0.9
         # The path carries the change type and the (sanitized) source scene id.

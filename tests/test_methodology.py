@@ -8,7 +8,9 @@ from forest_sentinel.methodology import (
     MethodologyVersionMismatch,
     auto_version,
     get_or_create_methodology_version,
+    raster_parameters,
     resolve_methodology_version,
+    resolve_raster_lineage,
 )
 from forest_sentinel.models import MethodologyVersion
 
@@ -75,9 +77,14 @@ def test_parameters_carry_ee_provenance(db_session: Session) -> None:
 
 
 def test_db_level_unique_constraint(db_session: Session) -> None:
-    db_session.add(MethodologyVersion(name="m", version="1", parameters={}))
+    lineage = resolve_raster_lineage(db_session, name="m", parameters={})
+    db_session.add(
+        MethodologyVersion(name="m", version="1", parameters={}, raster_lineage_id=lineage.id)
+    )
     db_session.flush()
-    db_session.add(MethodologyVersion(name="m", version="1", parameters={}))
+    db_session.add(
+        MethodologyVersion(name="m", version="1", parameters={}, raster_lineage_id=lineage.id)
+    )
     with pytest.raises(IntegrityError):
         db_session.flush()
 
@@ -181,3 +188,60 @@ def test_reuse_keeps_the_existing_display_version(db_session: Session) -> None:
     again = resolve_methodology_version(db_session, name="m", parameters={"x": 1})
     assert again.id == first.id
     assert again.display_version == "1.0.0"
+
+
+def test_raster_parameters_subset_and_legacy_fallback() -> None:
+    """Only raster-shaping keys reach the lineage; pre-split rows' ee_script_version
+    doubles as the raster pin so their lineages content-match post-split ones."""
+    full = {
+        "ee_script_version": "detect-v1",
+        "raster_script_version": "raster-v1",
+        "collections": ["A", "B"],
+        "scale_m": 30,
+        "masked_categories": ["cloud"],
+        "baseline_window": 5,
+        "delta_nbr_threshold": -0.25,
+        "min_area_m2": 4500.0,
+        "forest_mask": {"source": "hansen"},
+    }
+    subset = raster_parameters(full)
+    assert subset == {
+        "raster_script_version": "raster-v1",
+        "collections": ["A", "B"],
+        "scale_m": 30,
+        "masked_categories": ["cloud"],
+        "baseline_window": 5,
+    }
+    legacy = {"ee_script_version": "slice1-optical-change-v1", "scale_m": 30}
+    assert raster_parameters(legacy) == {
+        "raster_script_version": "slice1-optical-change-v1",
+        "scale_m": 30,
+    }
+
+
+def test_detection_changes_share_a_raster_lineage(db_session: Session) -> None:
+    base = {"raster_script_version": "r1", "scale_m": 30, "baseline_window": 5}
+    strict = resolve_methodology_version(
+        db_session, name="optical-change", parameters={**base, "delta_nbr_threshold": -0.25}
+    )
+    loose = resolve_methodology_version(
+        db_session, name="optical-change", parameters={**base, "delta_nbr_threshold": -0.15}
+    )
+    assert strict.id != loose.id
+    assert strict.raster_lineage_id == loose.raster_lineage_id
+
+
+def test_raster_changes_mint_a_new_lineage(db_session: Session) -> None:
+    base = {"raster_script_version": "r1", "scale_m": 30, "delta_nbr_threshold": -0.25}
+    short = resolve_methodology_version(
+        db_session, name="optical-change", parameters={**base, "baseline_window": 3}
+    )
+    long = resolve_methodology_version(
+        db_session, name="optical-change", parameters={**base, "baseline_window": 7}
+    )
+    repinned = resolve_methodology_version(
+        db_session,
+        name="optical-change",
+        parameters={**base, "baseline_window": 3, "raster_script_version": "r2"},
+    )
+    assert len({short.raster_lineage_id, long.raster_lineage_id, repinned.raster_lineage_id}) == 3

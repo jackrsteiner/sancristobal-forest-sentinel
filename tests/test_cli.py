@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from forest_sentinel import earthengine, forestmask, indices, pipeline, qa, storage
 from forest_sentinel.candidates import DEFAULT_DELTA_NBR_THRESHOLD, DEFAULT_MIN_AREA_M2
 from forest_sentinel.cli import main
+from forest_sentinel.methodology import get_or_create_methodology_version
 from forest_sentinel.models import Aoi, MethodologyVersion
 from forest_sentinel.pipeline import PipelineSummary
 
@@ -246,8 +247,8 @@ def test_pipeline_mode_reports_methodology_mismatch_for_explicit_version(
     """Pinning a version that exists with different parameters is a user error and
     must print the 'bump the version' guidance, not a traceback (audit BUG-13)."""
     with Session(migrated_database) as session:
-        session.add(
-            MethodologyVersion(name="optical-change", version="1.0.0", parameters={"other": 1})
+        get_or_create_methodology_version(
+            session, name="optical-change", version="1.0.0", parameters={"other": 1}
         )
         session.commit()
 
@@ -279,8 +280,8 @@ def test_pipeline_mode_auto_mints_methodology_when_parameters_change(
     content-addressed version instead of erroring — the knobs in instance.env are
     usable on a live instance."""
     with Session(migrated_database) as session:
-        session.add(
-            MethodologyVersion(name="optical-change", version="1.0.0", parameters={"other": 1})
+        get_or_create_methodology_version(
+            session, name="optical-change", version="1.0.0", parameters={"other": 1}
         )
         session.commit()
 
@@ -295,8 +296,10 @@ def test_pipeline_mode_auto_mints_methodology_when_parameters_change(
         ["run", "--aoi", str(SAMPLE_AOI), "--since", "2026-01-01", "--until", "2026-02-01"]
     )
     assert exit_code == 0
-    # The at-a-glance semantic label leads; the content-addressed identity follows.
-    assert "Methodology: optical-change v1.0.0 (auto-" in capsys.readouterr().out
+    # The at-a-glance semantic label leads; the content-addressed identity
+    # follows. The seeded 1.0.0 row lacks an ee_script_version, so the freshly
+    # minted parameter set reads as a script change: minor bump to v1.1.0.
+    assert "Methodology: optical-change v1.1.0 (auto-" in capsys.readouterr().out
     with Session(migrated_database) as session:
         versions = session.execute(select(MethodologyVersion.version)).scalars().all()
     assert "1.0.0" in versions

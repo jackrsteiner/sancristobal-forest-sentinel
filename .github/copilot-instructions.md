@@ -29,7 +29,7 @@ Match the prototype stack described in the README. Do not swap components withou
 - **Raster storage:** local VM filesystem (e.g. `/data/cogs/`) for $0 cost. EE exports to a transient GCS staging area, which the storage layer copies to local disk and then clears. Isolate storage access, the export-task lifecycle, and the copy-to-disk step behind one interface.
 - **Database:** PostgreSQL + PostGIS on the same Compute Engine VM (prototype). The future path is Cloud SQL for PostgreSQL with PostGIS.
 - **Compute:** Google Compute Engine VM (orchestrates Earth Engine and ingests results).
-- **Scheduler:** GitHub Actions cron is the target (Slice 3 / E11); the shipped scheduler today is a systemd timer on the VM (see `DEPLOYMENT.md` §7).
+- **Scheduler:** a systemd timer on the VM (E11 closed; the Actions-cron path was retired — `workflow_dispatch` remains as a manual trigger; see `DEPLOYMENT.md` §7).
 - **Dashboard:** lightweight web application backed by PostGIS.
 - **Versioning / CI:** GitHub.
 

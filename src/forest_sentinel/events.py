@@ -18,6 +18,7 @@ a deliberate non-goal of this slice.
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from geoalchemy2.elements import WKBElement
 from geoalchemy2.shape import from_shape, to_shape
@@ -34,12 +35,21 @@ from forest_sentinel.models import (
     DisturbanceEvent,
     EventObservation,
     Observation,
+    QualityMask,
 )
 
 logger = logging.getLogger(__name__)
 
 EVENT_STATUS_NEW = "new"
 EVENT_STATUS_ONGOING = "ongoing"
+EVENT_STATUS_RESOLVED = "resolved"
+
+# Automatic-resolve defaults (docs/architecture.md §5.9/§7): an ongoing event
+# resolves after this many days without a new detection — but only when a later
+# observation was clear enough that "no detection" is evidence rather than a
+# cloud gap.
+DEFAULT_RESOLVED_AFTER_DAYS = 90
+CLEAR_FRACTION_FLOOR = 0.5
 
 
 def footprint_area_m2(session: Session, geometry: WKBElement) -> float:
@@ -105,6 +115,63 @@ def track_events_for_aoi(session: Session, *, aoi: Aoi) -> TrackingResult:
         events_extended=extended,
         observations_added=created + extended,
     )
+
+
+def apply_resolved_lifecycle(
+    session: Session,
+    *,
+    aoi: Aoi,
+    resolved_after_days: int = DEFAULT_RESOLVED_AFTER_DAYS,
+    clear_fraction_floor: float = CLEAR_FRACTION_FLOOR,
+    now: datetime | None = None,
+) -> int:
+    """Flip quiet ``ongoing`` events to ``resolved``; returns how many flipped.
+
+    An event resolves only when BOTH hold (docs/architecture.md §5.9/§7):
+
+    - its ``last_detected_at`` is older than ``resolved_after_days``, and
+    - a later observation of the AOI exists whose ``quality_mask``
+      valid-pixel fraction is at least ``clear_fraction_floor`` — a cloudy gap
+      alone is absence of evidence, not evidence of absence.
+
+    Only ``ongoing`` events participate: a single-look ``new`` event has no
+    established recurrence to resolve (reviewers can record an opinion
+    instead), and re-detection reopens a resolved event because candidate
+    extension unconditionally sets ``ongoing``. Never touched by manual
+    review — the status is machine-owned.
+    """
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=resolved_after_days)
+    clear_later_observation = (
+        select(Observation.id)
+        .join(QualityMask, QualityMask.observation_id == Observation.id)
+        .where(Observation.aoi_id == aoi.id)
+        .where(Observation.acquired_at > DisturbanceEvent.last_detected_at)
+        .where(QualityMask.valid_pixel_fraction >= clear_fraction_floor)
+        .exists()
+    )
+    stale = (
+        session.execute(
+            select(DisturbanceEvent)
+            .where(DisturbanceEvent.aoi_id == aoi.id)
+            .where(DisturbanceEvent.status == EVENT_STATUS_ONGOING)
+            .where(DisturbanceEvent.last_detected_at < cutoff)
+            .where(clear_later_observation)
+        )
+        .scalars()
+        .all()
+    )
+    for event in stale:
+        event.status = EVENT_STATUS_RESOLVED
+    session.flush()
+    if stale:
+        logger.info(
+            "resolved %d quiet event(s) for AOI %s (no detection in %d days, "
+            "clear later look available)",
+            len(stale),
+            aoi.name,
+            resolved_after_days,
+        )
+    return len(stale)
 
 
 def _find_overlapping_event(

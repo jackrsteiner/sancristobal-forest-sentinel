@@ -15,10 +15,12 @@ boundaries, or — for submit events — before the stage writes any rasters), s
 these commits are always valid checkpoints themselves.
 """
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
+from geoalchemy2.shape import to_shape
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
@@ -54,6 +56,12 @@ def start_run(
     is content-addressed), a warning event is recorded: the new lineage starts
     cold, so nothing from the previous methodology is reusable and the run will
     re-export the whole window.
+
+    The AOI's geometry hash is stamped on every run. AOI geometry is instance
+    data, not a methodology input, so editing a footprint changes discovery
+    scope silently — the stamp plus a warning event when it differs from the
+    previous run's makes the edit visible in run history (config-inventory
+    Finding 8). History recorded under the old footprint is untouched.
     """
     previous = session.execute(
         select(PipelineRun)
@@ -67,6 +75,7 @@ def start_run(
         .where(PipelineRun.status == STATUS_RUNNING)
         .values(status=STATUS_INTERRUPTED)
     )
+    geometry_hash = aoi_geometry_hash(aoi)
     run = PipelineRun(
         aoi_id=aoi.id,
         methodology_version_id=methodology.id if methodology is not None else None,
@@ -74,6 +83,7 @@ def start_run(
         status=STATUS_RUNNING,
         since=since,
         until=until,
+        aoi_geometry_hash=geometry_hash,
     )
     session.add(run)
     session.commit()
@@ -90,7 +100,27 @@ def start_run(
             "warning",
             message=_methodology_change_message(session, previous, methodology),
         )
+    if (
+        previous is not None
+        and previous.aoi_geometry_hash is not None
+        and previous.aoi_geometry_hash != geometry_hash
+    ):
+        recorder.record(
+            "run",
+            "warning",
+            message=(
+                f"AOI geometry changed since the previous run "
+                f"({previous.aoi_geometry_hash} → {geometry_hash}) — discovery scope and "
+                "export regions change from this run onward; observations, candidates, "
+                "and events recorded under the old footprint are unchanged"
+            ),
+        )
     return recorder
+
+
+def aoi_geometry_hash(aoi: Aoi) -> str:
+    """Deterministic short hash of the AOI footprint (WKB SHA-256)."""
+    return hashlib.sha256(to_shape(aoi.geometry).wkb).hexdigest()[:12]
 
 
 def _methodology_change_message(

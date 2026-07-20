@@ -26,9 +26,27 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from forest_sentinel.models import MethodologyVersion
+from forest_sentinel.models import MethodologyVersion, RasterLineage
 
 AUTO_VERSION_PREFIX = "auto-"
+
+# The methodology parameters that shape exported *raster content* — these hash
+# into the raster lineage the index/change rasters key on, so changing any
+# other parameter (threshold, min area, forest mask) reuses every COG
+# (config-inventory Finding 1). ``raster_script_version`` is the raster-stage
+# code pin (Finding 4): bumping the detection-stage ``ee_script_version`` for a
+# vectorization-only change leaves the lineage — and every raster — intact.
+RASTER_PARAM_KEYS = (
+    "raster_script_version",
+    "collections",
+    "collection",
+    "metric",
+    "orbit_policy",
+    "scale_m",
+    "masked_categories",
+    "baseline_window",
+)
+_RASTER_SCRIPT_KEY = "raster_script_version"
 
 
 class MethodologyVersionMismatch(ValueError):
@@ -76,10 +94,54 @@ def resolve_methodology_version(
     )
 
 
+def parameter_hash(parameters: dict[str, Any], *, length: int = 10) -> str:
+    """Deterministic content hash of a parameter dict (canonical-JSON SHA-256)."""
+    canonical = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:length]
+
+
 def auto_version(parameters: dict[str, Any]) -> str:
     """Deterministic content-derived version string for a parameter set."""
-    canonical = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
-    return AUTO_VERSION_PREFIX + hashlib.sha256(canonical.encode()).hexdigest()[:10]
+    return AUTO_VERSION_PREFIX + parameter_hash(parameters)
+
+
+def raster_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
+    """The raster-lineage subset of a full methodology parameter dict.
+
+    Rows minted before the raster/detection split carry only
+    ``ee_script_version``; it doubles as the raster pin so lineages derived
+    from pre-split parameters content-match the ones new runs derive — the
+    upgrade itself reuses every existing COG. (Migration 0020's backfill
+    freezes a copy of this mapping; keep them in sync.)
+    """
+    subset = {key: parameters[key] for key in RASTER_PARAM_KEYS if key in parameters}
+    if _RASTER_SCRIPT_KEY not in subset and "ee_script_version" in parameters:
+        subset[_RASTER_SCRIPT_KEY] = parameters["ee_script_version"]
+    return subset
+
+
+def resolve_raster_lineage(
+    session: Session, *, name: str, parameters: dict[str, Any]
+) -> RasterLineage:
+    """Content-addressed get-or-create of the raster lineage for a parameter set.
+
+    ``parameters`` is the FULL methodology dict; the lineage stores (and hashes)
+    only its raster subset. Same subset → same row, whatever the detection
+    parameters around it.
+    """
+    subset = raster_parameters(parameters)
+    version = auto_version(subset)
+    existing = session.execute(
+        select(RasterLineage)
+        .where(RasterLineage.name == name)
+        .where(RasterLineage.version == version)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    created = RasterLineage(name=name, version=version, parameters=subset)
+    session.add(created)
+    session.flush()
+    return created
 
 
 _SCRIPT_VERSION_PARAM = "ee_script_version"
@@ -141,6 +203,7 @@ def get_or_create_methodology_version(
         version=version,
         display_version=next_display_version(session, name=name, parameters=parameters),
         parameters=parameters,
+        raster_lineage_id=resolve_raster_lineage(session, name=name, parameters=parameters).id,
     )
     session.add(created)
     session.flush()

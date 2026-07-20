@@ -42,7 +42,7 @@ def _candidate(session: Session, aoi: Aoi, methodology: MethodologyVersion) -> D
     session.flush()
     change = ChangeRaster(
         observation_id=obs.id,
-        methodology_version_id=methodology.id,
+        raster_lineage_id=methodology.raster_lineage_id,
         change_type="delta_nbr",
         cog_path="/x.tif",
         baseline_window=5,

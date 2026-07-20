@@ -33,15 +33,21 @@ from forest_sentinel.models import (
     ChangeRaster,
     ChangeRasterSource,
     IndexRaster,
-    MethodologyVersion,
     Observation,
+    RasterLineage,
 )
+from forest_sentinel.sentinel1 import S1_COLLECTION
 from forest_sentinel.storage import CogKey, Storage
 
 logger = logging.getLogger(__name__)
 
-_SCRIPT_VERSION_PARAM = "ee_script_version"
+# Rasters key on the raster lineage (Finding 1); its pin is the raster-stage
+# script version (Finding 4). Lineages backfilled from pre-split rows carry the
+# old ee_script_version value under this key (migration 0020).
+_SCRIPT_VERSION_PARAM = "raster_script_version"
 _SCALE_PARAM = "scale_m"
+_RADAR_CHANGE_TYPE = "delta_vv_db"
+_VV_BAND = "VV"
 
 
 class ReproduceError(RuntimeError):
@@ -58,8 +64,8 @@ def reproduce_index_raster(
     ee_module: Any = earthengine,
 ) -> Path:
     """Rebuild one index raster's image in EE and re-export it to its ``cog_path``."""
-    methodology = _methodology(session, raster.methodology_version_id)
-    _check_script_version(methodology, current_script_version, force=force_version)
+    lineage = _lineage(session, raster.raster_lineage_id)
+    _check_script_version(lineage, current_script_version, force=force_version)
     observation, aoi = _observation_and_aoi(session, raster.observation_id)
 
     masked = indices.build_masked_image(observation, ee_module=ee_module)
@@ -73,7 +79,7 @@ def reproduce_index_raster(
         filename=f"{raster.index_type.lower()}-{observation.source_scene_id}.tif",
     )
     _check_destination(storage, key, raster.cog_path)
-    return storage.export_image(image, key, scale=_scale(methodology), region=region)
+    return storage.export_image(image, key, scale=_scale(lineage), region=region)
 
 
 def reproduce_change_raster(
@@ -92,9 +98,57 @@ def reproduce_change_raster(
     priors indexed now", so reproduction matches the recorded provenance even after
     later runs added newer index rasters.
     """
-    methodology = _methodology(session, raster.methodology_version_id)
-    _check_script_version(methodology, current_script_version, force=force_version)
+    lineage = _lineage(session, raster.raster_lineage_id)
+    _check_script_version(lineage, current_script_version, force=force_version)
+
+    delta, region, observation, aoi = rebuild_change_delta(
+        session, raster=raster, ee_module=ee_module
+    )
+    key = CogKey(
+        aoi=f"{aoi.id}-{aoi.name}",
+        product=raster.change_type,
+        date=observation.acquired_at.date().isoformat(),
+        filename=f"{raster.change_type}-{observation.source_scene_id}.tif",
+    )
+    _check_destination(storage, key, raster.cog_path)
+    return storage.export_image(delta, key, scale=_scale(lineage), region=region)
+
+
+def rebuild_change_delta(
+    session: Session,
+    *,
+    raster: ChangeRaster,
+    ee_module: Any = earthengine,
+) -> tuple[Any, Any, Observation, Aoi]:
+    """Rebuild a change raster's delta image from recorded provenance — no export.
+
+    Returns ``(delta_image, scene ∩ AOI region, observation, aoi)``. Optical
+    deltas reconstruct their baseline from ``change_raster_source``; radar
+    (``delta_vv_db``) from the recorded ``baseline_source_scene_ids``. This is
+    what candidate re-extraction under a new detection layer reduces over
+    (Finding 1): the raster lineage's math, replayed exactly, with no new COG.
+    """
     observation, aoi = _observation_and_aoi(session, raster.observation_id)
+
+    if raster.change_type == _RADAR_CHANGE_TYPE:
+        scene_ids = raster.baseline_source_scene_ids or []
+        if not scene_ids:
+            raise ReproduceError(
+                f"change_raster {raster.id} records no baseline scene ids; "
+                "its provenance cannot reproduce the trailing median"
+            )
+
+        def vv_image(scene_id: str) -> Any:
+            return ee_module.select_band(
+                ee_module.image_by_id(f"{S1_COLLECTION}/{scene_id}"), _VV_BAND
+            )
+
+        current = vv_image(observation.source_scene_id)
+        baseline = ee_module.median_of([vv_image(scene_id) for scene_id in scene_ids])
+        delta = ee_module.subtract(current, baseline)
+        scene = ee_module.image_by_id(f"{S1_COLLECTION}/{observation.source_scene_id}")
+        region = _rederived_region(scene, aoi, ee_module=ee_module)
+        return delta, region, observation, aoi
 
     index_type = CHANGE_TYPES.get(raster.change_type)
     if index_type is None:
@@ -127,37 +181,30 @@ def reproduce_change_raster(
         for prior in baseline_observations
     ]
     delta = ee_module.subtract(current_image, ee_module.median_of(baseline_images))
-
     region = _rederived_region(masked, aoi, ee_module=ee_module)
-    key = CogKey(
-        aoi=f"{aoi.id}-{aoi.name}",
-        product=raster.change_type,
-        date=observation.acquired_at.date().isoformat(),
-        filename=f"{raster.change_type}-{observation.source_scene_id}.tif",
-    )
-    _check_destination(storage, key, raster.cog_path)
-    return storage.export_image(delta, key, scale=_scale(methodology), region=region)
+    return delta, region, observation, aoi
 
 
-def _methodology(session: Session, methodology_version_id: int) -> MethodologyVersion:
-    methodology = session.get(MethodologyVersion, methodology_version_id)
-    if methodology is None:
-        raise ReproduceError(f"methodology version {methodology_version_id} not found")
-    return methodology
+def _lineage(session: Session, raster_lineage_id: int) -> RasterLineage:
+    lineage = session.get(RasterLineage, raster_lineage_id)
+    if lineage is None:
+        raise ReproduceError(f"raster lineage {raster_lineage_id} not found")
+    return lineage
 
 
-def _check_script_version(methodology: MethodologyVersion, current: str, *, force: bool) -> None:
-    """Refuse (or, forced, loudly warn) when the recorded EE script pin differs.
+def _check_script_version(lineage: RasterLineage, current: str, *, force: bool) -> None:
+    """Refuse (or, forced, loudly warn) when the recorded raster pin differs.
 
     "Same conclusions" reproducibility hinges on the recorded
-    ``ee_script_version`` — running today's band math against a row produced by
-    other code silently yields a different product under the recorded identity.
+    ``raster_script_version`` — running today's band math against a row produced
+    by other code silently yields a different product under the recorded
+    identity.
     """
-    recorded = methodology.parameters.get(_SCRIPT_VERSION_PARAM)
+    recorded = lineage.parameters.get(_SCRIPT_VERSION_PARAM)
     if recorded == current:
         return
     message = (
-        f"recorded ee_script_version {recorded!r} does not match the running "
+        f"recorded raster_script_version {recorded!r} does not match the running "
         f"code's {current!r}; the reproduced raster may not match the recorded "
         "provenance"
     )
@@ -183,8 +230,8 @@ def _rederived_region(masked_image: Any, aoi: Aoi, *, ee_module: Any) -> Any:
     )
 
 
-def _scale(methodology: MethodologyVersion) -> int:
-    value = methodology.parameters.get(_SCALE_PARAM)
+def _scale(lineage: RasterLineage) -> int:
+    value = lineage.parameters.get(_SCALE_PARAM)
     return int(value) if value is not None else indices.DEFAULT_SCALE_METERS
 
 

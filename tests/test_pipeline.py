@@ -10,9 +10,10 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from forest_sentinel.models import (
@@ -348,6 +349,210 @@ def test_missing_cog_triggers_exactly_one_reexport(db_session: Session, tmp_path
     assert second_storage.exports[0][1].product == "NBR"
 
 
+def test_detection_change_reuses_every_raster_and_reextracts(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Finding 1 payoff: a changed detection parameter (threshold) shares the
+    raster lineage, so a rerun reuses every COG with ZERO exports and only
+    re-extracts candidates from deltas rebuilt out of recorded provenance."""
+    from forest_sentinel.models import DisturbanceCandidate
+    from tests.fakes import make_methodology
+
+    aoi = make_aoi(db_session, name="Lineage AOI")
+    strict = make_methodology(
+        db_session, version="auto-strict", parameters={"delta_nbr_threshold": -0.25}
+    )
+    loose = make_methodology(
+        db_session, version="auto-loose", parameters={"delta_nbr_threshold": -0.15}
+    )
+    assert strict.raster_lineage_id == loose.raster_lineage_id  # detection-only diff
+    fake_ee = _fake_ee((1, 2, 3))
+
+    def run(methodology: Any, storage: FakeStorage) -> Any:
+        summary = run_pipeline(
+            db_session,
+            aoi=aoi,
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            methodology=methodology,
+            storage=storage,
+            ee_module=fake_ee,
+        )
+        db_session.commit()
+        return summary
+
+    first_storage = FakeStorage(tmp_path)
+    run(strict, first_storage)
+    assert len(first_storage.exports) > 0
+    raster_rows = db_session.execute(select(IndexRaster)).scalars().all()
+    change_rows = db_session.execute(select(ChangeRaster)).scalars().all()
+
+    second_storage = FakeStorage(tmp_path)
+    vectorize_calls_before = len(fake_ee.calls)
+    summary = run(loose, second_storage)
+
+    # Every raster reused or frozen — the whole point: zero exports for a
+    # threshold change. (The ΔNBR rasters are frozen — their strict-layer
+    # candidates are event history — and the ΔNDVI ones count as reused.)
+    assert second_storage.exports == []
+    assert summary.index_rasters == 0
+    assert summary.change_rasters_reused > 0
+    assert len(db_session.execute(select(IndexRaster)).scalars().all()) == len(raster_rows)
+    assert len(db_session.execute(select(ChangeRaster)).scalars().all()) == len(change_rows)
+    # ...but the new detection layer extracted its own candidate set.
+    assert len(fake_ee.calls) > vectorize_calls_before
+    by_methodology = {
+        methodology_id: count
+        for methodology_id, count in db_session.execute(
+            select(
+                DisturbanceCandidate.methodology_version_id,
+                func.count(DisturbanceCandidate.id),
+            ).group_by(DisturbanceCandidate.methodology_version_id)
+        ).all()
+    }
+    assert by_methodology.get(strict.id, 0) > 0
+    assert by_methodology.get(loose.id, 0) > 0
+
+    # A third run under the same methodology finds the extraction markers and
+    # does not rebuild or re-vectorize anything.
+    calls_after_second = len(fake_ee.calls)
+    run(loose, FakeStorage(tmp_path))
+    assert len(fake_ee.calls) == calls_after_second
+
+
+def test_detection_change_extracts_locally_from_real_cogs(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Finding 2: when the stored change COG is a readable raster, a new
+    detection layer re-extracts from it with ZERO Earth Engine calls — no
+    export, no delta rebuild, no vectorization."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from forest_sentinel.models import DisturbanceCandidate
+    from tests.fakes import make_methodology
+
+    aoi = make_aoi(db_session, name="Local AOI")
+    strict = make_methodology(
+        db_session, version="auto-strict", parameters={"delta_nbr_threshold": -0.25}
+    )
+    fake_ee = _fake_ee((1, 2, 3))
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=strict,
+        storage=FakeStorage(tmp_path),
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    # Replace the fake (empty) ΔNBR files with real rasters carrying one patch.
+    data = np.zeros((20, 20), dtype="float32")
+    data[5:10, 5:10] = -0.5
+    delta_rows = (
+        db_session.execute(select(ChangeRaster).where(ChangeRaster.change_type == "delta_nbr"))
+        .scalars()
+        .all()
+    )
+    for row in delta_rows:
+        with rasterio.open(
+            row.cog_path,
+            "w",
+            driver="GTiff",
+            height=20,
+            width=20,
+            count=1,
+            dtype="float32",
+            crs="EPSG:4326",
+            transform=from_origin(0.1, 0.9, 0.0003, 0.0003),
+            nodata=-9999.0,
+        ) as dst:
+            dst.write(data, 1)
+
+    loose = make_methodology(
+        db_session, version="auto-loose", parameters={"delta_nbr_threshold": -0.10}
+    )
+    storage = FakeStorage(tmp_path)
+    ee_calls_before = len(fake_ee.calls)
+    run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=loose,
+        storage=storage,
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    # Zero EE: no exports and no threshold_and_vectorize calls this run.
+    assert storage.exports == []
+    assert len(fake_ee.calls) == ee_calls_before
+    local_candidates = (
+        db_session.execute(
+            select(DisturbanceCandidate).where(
+                DisturbanceCandidate.methodology_version_id == loose.id
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(local_candidates) == len(delta_rows)
+    # Statistics came from the raster itself (#95 parity with the EE path).
+    assert all(c.delta_min == pytest.approx(-0.5) for c in local_candidates)
+    assert all((c.area_m2 or 0) > 4_500.0 for c in local_candidates)
+
+
+def test_wholesale_missing_cogs_record_a_preflight_warning(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Most of the window's cataloged COGs gone (moved COG root, repointed DB)
+    warns before EE quota is spent (Finding 5); routine single-file loss doesn't."""
+    from forest_sentinel.models import PipelineRunEvent
+
+    aoi = make_aoi(db_session, name="Preflight AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = _fake_ee((1, 2, 3))
+
+    def run() -> None:
+        run_pipeline(
+            db_session,
+            aoi=aoi,
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            methodology=methodology,
+            storage=FakeStorage(tmp_path),
+            ee_module=fake_ee,
+        )
+        db_session.commit()
+
+    def preflight_warnings() -> list[str]:
+        events = db_session.execute(
+            select(PipelineRunEvent).where(PipelineRunEvent.outcome == "warning")
+        ).scalars()
+        messages = [event.message or "" for event in events]
+        return [message for message in messages if "missing on disk" in message]
+
+    run()
+
+    # One lost file is routine self-healing (#77), below the warning fraction.
+    row = db_session.execute(select(IndexRaster).limit(1)).scalars().one()
+    Path(row.cog_path).unlink()
+    run()
+    assert preflight_warnings() == []
+
+    # The whole store vanishing is a footgun, not churn: warn loudly.
+    for path in tmp_path.rglob("*.tif"):
+        path.unlink()
+    run()
+    (message,) = preflight_warnings()
+    assert "FOREST_SENTINEL_COG_ROOT" in message
+    assert "re-exported" in message
+
+
 def test_interrupted_run_keeps_checkpointed_progress(db_session: Session, tmp_path: Path) -> None:
     """Progress commits per chunk (#77): a run killed partway (systemd timeout,
     SIGTERM) leaves the completed observations' artifacts in the catalog."""
@@ -536,6 +741,8 @@ def test_run_is_recorded_with_labelled_batch_events(
         "index",
         "change",
         "events",
+        "confidence",
+        "context",
     }
 
     # The journald-facing mirror carries the run-start datetime and batch position.
@@ -713,6 +920,58 @@ def test_methodology_change_records_a_warning_event(db_session: Session, tmp_pat
     assert warning_count == 1
 
 
+def test_aoi_geometry_change_is_stamped_and_warned(db_session: Session, tmp_path: Path) -> None:
+    """Editing an AOI's footprint is instance data with methodology-sized blast
+    radius: every run stamps the geometry hash, and a changed hash records a
+    warning (config-inventory Finding 8)."""
+    from geoalchemy2.shape import from_shape
+    from shapely.geometry import MultiPolygon, Polygon
+
+    from forest_sentinel.models import PipelineRun, PipelineRunEvent
+    from tests.fakes import make_methodology
+
+    aoi = make_aoi(db_session, name="Edited AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = _fake_ee((1,))
+
+    def run() -> None:
+        run_pipeline(
+            db_session,
+            aoi=aoi,
+            since=date(2026, 1, 1),
+            until=date(2026, 2, 1),
+            methodology=methodology,
+            storage=FakeStorage(tmp_path),
+            ee_module=fake_ee,
+        )
+        db_session.commit()
+
+    run()
+    run()  # unchanged geometry: stamped, but no warning
+
+    grown = MultiPolygon([Polygon([(0, 0), (2, 0), (2, 2), (0, 2), (0, 0)])])
+    aoi.geometry = from_shape(grown, srid=4326)
+    db_session.flush()
+    run()
+
+    runs = db_session.execute(select(PipelineRun).order_by(PipelineRun.id)).scalars().all()
+    hashes = [r.aoi_geometry_hash or "" for r in runs]
+    assert all(hashes)
+    assert hashes[0] == hashes[1] != hashes[2]
+
+    warnings = (
+        db_session.execute(select(PipelineRunEvent).where(PipelineRunEvent.outcome == "warning"))
+        .scalars()
+        .all()
+    )
+    assert len(warnings) == 1
+    assert warnings[0].run_id == runs[2].id
+    message = warnings[0].message or ""
+    assert "AOI geometry changed" in message
+    assert hashes[1] in message
+    assert hashes[2] in message
+
+
 def test_candidate_extraction_vectorizes_over_the_clipped_region(
     db_session: Session, tmp_path: Path
 ) -> None:
@@ -773,3 +1032,98 @@ def test_candidate_extraction_falls_back_to_the_aoi_region(
 
     assert len(fake_ee.calls) == 1
     assert shape(fake_ee.calls[0]["region"]).equals(to_shape(aoi.geometry))
+
+
+def _s1_scene(day: int) -> dict[str, Any]:
+    ms = int(datetime(2026, 1, day, tzinfo=UTC).timestamp() * 1000)
+    return {
+        "id": f"COPERNICUS/S1_GRD/S1A_{day}",
+        "properties": {
+            "system:index": f"S1A_{day}",
+            "system:time_start": ms,
+            "instrumentMode": "IW",
+            "transmitterReceiverPolarisation": ["VV", "VH"],
+            "orbitProperties_pass": "DESCENDING",
+            "relativeOrbitNumber_start": 18,
+        },
+    }
+
+
+def test_radar_stage_produces_separate_lineages(db_session: Session, tmp_path: Path) -> None:
+    """Radar enabled (#117): S1 deltas + candidates under the radar methodology,
+    tracked into their OWN events — optical lineages untouched."""
+    aoi = make_aoi(db_session, name="Radar AOI")
+    methodology = make_methodology(db_session)
+    radar_methodology = make_methodology(
+        db_session,
+        version="radar-auto",
+        parameters={"metric": "vv_db", "delta_vv_db_threshold": -3.0},
+    )
+    fake_ee = FakeEarthEngine(
+        scenes={
+            "NASA/HLS/HLSL30/v002": [_scene(day) for day in (1, 2, 3)],
+            "COPERNICUS/S1_GRD": [_s1_scene(day) for day in (5, 10, 15)],
+        },
+        features=[_CANDIDATE_FEATURE],
+        valid_fraction=0.95,
+    )
+
+    summary = run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=FakeStorage(tmp_path),
+        baseline_window=5,
+        radar_methodology=radar_methodology,
+        ee_module=fake_ee,
+    )
+    db_session.commit()
+
+    # 3 S1 scenes; the first has no same-orbit prior -> 2 radar deltas, one
+    # candidate each (the stubbed vectorizer returns one polygon per call).
+    assert summary.radar_change_rasters == 2
+    assert summary.radar_candidates == 2
+    radar_candidates = (
+        db_session.execute(
+            select(DisturbanceCandidate).where(
+                DisturbanceCandidate.methodology_version_id == radar_methodology.id
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(radar_candidates) == 2
+    # The overlapping optical and radar candidates form SEPARATE event lineages.
+    events = db_session.execute(select(DisturbanceEvent)).scalars().all()
+    lineages = {event.methodology_version_id for event in events}
+    assert lineages == {methodology.id, radar_methodology.id}
+    # The radar threshold came from the radar methodology, not the optical one.
+    assert any(call["threshold"] == -3.0 for call in fake_ee.calls)
+
+
+def test_radar_disabled_by_default_runs_no_radar_stage(db_session: Session, tmp_path: Path) -> None:
+    aoi = make_aoi(db_session, name="Optical only AOI")
+    methodology = make_methodology(db_session)
+    fake_ee = FakeEarthEngine(
+        scenes={
+            "NASA/HLS/HLSL30/v002": [_scene(1)],
+            "COPERNICUS/S1_GRD": [_s1_scene(5)],
+        },
+    )
+
+    summary = run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=FakeStorage(tmp_path),
+        ee_module=fake_ee,
+    )
+
+    assert summary.radar_change_rasters == 0
+    # No S1 observations were even discovered without the radar methodology.
+    sensors = set(db_session.execute(select(Observation.sensor)).scalars().all())
+    assert sensors == {"HLSL30"}

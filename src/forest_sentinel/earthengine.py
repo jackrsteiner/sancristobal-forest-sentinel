@@ -202,6 +202,12 @@ def update_mask(image: Any, mask: Any) -> Any:
     return image.updateMask(mask)
 
 
+def select_band(image: Any, band: str) -> Any:
+    """Select a single band (e.g. Sentinel-1 ``VV``, already log-scaled dB in
+    ``COPERNICUS/S1_GRD`` — no conversion needed)."""
+    return image.select(band)
+
+
 def normalized_difference(image: Any, bands: list[str]) -> Any:
     """``(bands[0] - bands[1]) / (bands[0] + bands[1])`` as an EE image."""
     return image.normalizedDifference(bands)

@@ -34,8 +34,8 @@ counterpart: how to configure, provision, secure, and automate it.
 - **Dashboard** — a read-only FastAPI + Leaflet web app over the PostGIS catalog.
 - **Scheduling** — run the pipeline unattended on the VM via a systemd timer (this guide).
 
-**Intended direction** (see [`docs/work-plan.md`](docs/work-plan.md)): a native
-GitHub Actions cron scheduler and manual review (Slice 3), QA/confidence hardening
+**Intended direction** (see [`docs/work-plan.md`](docs/work-plan.md)): manual
+review (Slice 3), QA/confidence hardening
 (Slice 4), Sentinel-1 radar augmentation (Slice 5), context layers (Slice 6), and a
 future move to Cloud SQL / GCS-as-canonical storage. Forward-looking pieces in this
 guide are labelled as such.
@@ -307,12 +307,13 @@ re-run `vm_setup.sh` to reinstall it. (Editing the repo copy alone does nothing:
 the unit is *copied* to `/etc/systemd/system` at install time, and `daemon-reload`
 only re-reads installed units.)
 
-### From GitHub Actions (intended direction — E11)
+### From GitHub Actions (manual trigger)
 
-[`.github/workflows/scheduled-run.yml`](.github/workflows/scheduled-run.yml) is the
-GitHub-Actions-cron path from the architecture. It SSHes to the VM and triggers the
-same systemd run, authenticating via Workload Identity Federation — no keys in CI.
-It ships **disabled** (guarded by `if: false` and a commented `schedule`). To enable it:
+[`.github/workflows/scheduled-run.yml`](.github/workflows/scheduled-run.yml) is a
+manual `workflow_dispatch` trigger: it SSHes to the VM and starts the same systemd
+run, authenticating via Workload Identity Federation — no keys in CI. (The
+Actions-**cron** path was retired when E11 closed: the on-VM systemd timer owns
+scheduling.) To use it:
 
 1. Run `scripts/setup_wif.sh` (once per instance) and add the repo **variables**
    `WIF_PROVIDER` and `PROVISIONER_SA` it prints (see
@@ -320,7 +321,8 @@ It ships **disabled** (guarded by `if: false` and a commented `schedule`). To en
    have these after their first deploy).
 2. Make sure `PROJECT_ID` (and, if not default, `INSTANCE_NAME`/`ZONE`) are set
    in `config/instance.env`.
-3. Remove the `if: ${{ false }}` guard and uncomment the `schedule:` trigger.
+3. Trigger it from the repo's *Actions* tab → **Run pipeline now (manual)** →
+   *Run workflow*.
 
 > The pipeline currently runs **synchronously** (it submits each Earth Engine export
 > and polls it to completion). A submit-and-return mode is future work; until then,

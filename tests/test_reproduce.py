@@ -53,7 +53,7 @@ def _index_row(
     )
     row = IndexRaster(
         observation_id=obs.id,
-        methodology_version_id=methodology.id,
+        raster_lineage_id=methodology.raster_lineage_id,
         index_type=index_type,
         cog_path=str(storage.path_for(key)),
     )
@@ -215,7 +215,7 @@ def test_destination_mismatch_is_refused(db_session: Session, tmp_path: Path) ->
     storage = FakeStorage(tmp_path)
     row = IndexRaster(
         observation_id=obs.id,
-        methodology_version_id=methodology.id,
+        raster_lineage_id=methodology.raster_lineage_id,
         index_type="NBR",
         cog_path="/data/cogs/old-layout/nbr.tif",
     )
