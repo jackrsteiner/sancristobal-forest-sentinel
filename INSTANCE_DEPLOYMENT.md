@@ -165,7 +165,7 @@ Retire one with `forest-sentinel aoi delete <name> --yes` on the VM
 ## Updating an instance later
 
 **Actions → Update instance → Run workflow.** One button does the whole
-rollout, with three toggles (all on by default):
+rollout, with four toggles (all on by default):
 
 - **sync_upstream** — merges the template's latest `main` into your repo and
   pushes (possible because the deploy graft gave your `main` the template's
@@ -173,8 +173,10 @@ rollout, with three toggles (all on by default):
   run summary lists the conflicting files plus the local-resolution commands.
 - **sync_aois** — copies dashboard-uploaded AOI GeoJSONs (`config/aois/` on
   the VM) back into this repo and commits them, making uploads durable — the
-  VM itself holds no GitHub credentials, so this workflow is what turns an
-  upload into a committed file.
+  VM itself holds no GitHub credentials for repo contents, so this workflow is
+  what turns an upload into a committed file.
+- **sync_settings** — same, for dashboard settings edits
+  (`config/overrides.env` on the VM).
 - **update_vm** — authenticates via Workload Identity Federation and SSHes to
   the VM (no keys, nothing to install locally) to `git pull` and re-run
   `vm_setup.sh`: migrations applied, `.env` regenerated, systemd units
@@ -183,6 +185,38 @@ rollout, with three toggles (all on by default):
 Untick `sync_upstream` to only refresh the VM (e.g. after committing a change
 to `config/instance.env`); untick `update_vm` to only bring the repo up to
 date.
+
+### Optional: near-real-time sync of dashboard changes
+
+By default, settings edits and uploads stay on the VM until you run the
+workflow above. To have the dashboard fire the sync automatically (changes
+committed to this repo within about a minute of saving):
+
+1. Create a **fine-grained personal access token** at
+   github.com → Settings → Developer settings → Fine-grained tokens:
+   - **Repository access**: *only this instance repo*.
+   - **Permissions**: Actions — *Read and write*. **Nothing else** — in
+     particular not Contents. (Actions-write can only trigger/re-run this
+     repo's workflows, all of which are version-controlled; it cannot read
+     secrets or push code. `repository_dispatch` is deliberately not used —
+     it would require a contents-write token on the VM.)
+2. Put the token on the VM, outside the repo tree:
+
+   ```
+   gcloud compute ssh forest-sentinel-vm -- \
+     "sudo install -d -m 700 -o ofs /etc/forest-sentinel &&
+      sudo -u ofs tee /etc/forest-sentinel/dispatch-token >/dev/null &&
+      sudo chmod 600 /etc/forest-sentinel/dispatch-token" < token.txt
+   ```
+
+3. In `config/instance.env`, set `GITHUB_REPO=<owner>/<this-repo>` and
+   `FOREST_SENTINEL_SYNC_TOKEN_FILE=/etc/forest-sentinel/dispatch-token`,
+   commit, and run **Update instance** once to roll the config out.
+
+Leaving either value blank keeps the manual-sync behavior. A dispatch failure
+(revoked token, network) never blocks the edit itself — the change stays on
+the VM and the next manual sync picks it up. Bursts of edits are debounced
+into one workflow run.
 
 **Optional: run from the published image.** Set `APP_IMAGE` in
 `config/instance.env` (e.g. `ghcr.io/jackrsteiner/open-forest-sentinel:latest`,

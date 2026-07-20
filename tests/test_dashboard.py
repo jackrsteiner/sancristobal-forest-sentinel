@@ -1036,3 +1036,48 @@ def test_retention_floor_cross_rule(
     at_floor = client.post("/api/settings", json={"key": "COG_RETENTION_DAYS", "value": "44"})
     assert keep_forever.status_code == 200
     assert at_floor.status_code == 200
+
+
+def test_writes_fire_the_sync_dispatch(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bead 7.3 (#136): settings edits and uploads request a repo sync — after
+    the local write, best-effort, never blocking the response."""
+    from forest_sentinel import dispatch
+    from forest_sentinel.settings import OVERRIDES_PATH_ENV_VAR
+
+    monkeypatch.setenv(OVERRIDES_PATH_ENV_VAR, str(tmp_path / "overrides.env"))
+    reasons: list[str] = []
+
+    def fake_sync(*, reason: str, **_kw: Any) -> bool:
+        reasons.append(reason)
+        return True
+
+    monkeypatch.setattr(dispatch, "request_sync", fake_sync)
+
+    saved = client.post("/api/settings", json={"key": "WINDOW_DAYS", "value": "45"})
+    assert saved.status_code == 200
+    assert saved.json()["sync_requested"] is True
+
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+    uploaded = client.post("/api/aois", json=_UPLOAD_SQUARE)
+    assert uploaded.status_code == 201
+    assert uploaded.json()["sync_requested"] is True
+
+    assert reasons == ["settings-edit", "aoi-upload"]
+
+
+def test_sync_dispatch_failure_never_blocks_the_write(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forest_sentinel import dispatch
+    from forest_sentinel.settings import OVERRIDES_PATH_ENV_VAR
+
+    overrides = tmp_path / "overrides.env"
+    monkeypatch.setenv(OVERRIDES_PATH_ENV_VAR, str(overrides))
+    monkeypatch.setattr(dispatch, "request_sync", lambda *, reason, **kw: False)
+
+    saved = client.post("/api/settings", json={"key": "WINDOW_DAYS", "value": "45"})
+    assert saved.status_code == 200
+    assert saved.json()["sync_requested"] is False
+    assert "WINDOW_DAYS=45" in overrides.read_text()

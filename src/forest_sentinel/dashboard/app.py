@@ -28,7 +28,7 @@ from sqlalchemy import Engine, cast, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from forest_sentinel import settings
+from forest_sentinel import dispatch, settings
 from forest_sentinel.aoi import (
     AOIS_DIR_ENV_VAR,
     DEFAULT_AOIS_DIR,
@@ -217,7 +217,8 @@ def create_app() -> FastAPI:
                     "pinned to the name — upload under a new name to monitor a new footprint"
                 ),
             ) from None
-        return {"id": aoi.id, "name": aoi.name, "file": str(target)}
+        synced = dispatch.request_sync(reason="aoi-upload")
+        return {"id": aoi.id, "name": aoi.name, "file": str(target), "sync_requested": synced}
 
     @app.post("/api/pipeline/run", status_code=202)
     def trigger_pipeline_run(_payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
@@ -483,8 +484,12 @@ def create_app() -> FastAPI:
         except settings.SettingsError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         session.commit()
+        # Best-effort, after the local write committed (bead 7.3): a dispatch
+        # failure never un-succeeds the edit.
+        synced = dispatch.request_sync(reason="settings-edit")
         return {
             **change,
+            "sync_requested": synced,
             "detail": "applied; takes effect on the next pipeline run",
         }
 
@@ -578,10 +583,12 @@ def create_app() -> FastAPI:
             session, name=name, kind=kind, document=document, source_file=str(target)
         )
         session.commit()
+        synced = dispatch.request_sync(reason="context-upload")
         return {
             "id": layer.id,
             "name": layer.name,
             "kind": layer.kind,
+            "sync_requested": synced,
             "feature_count": len(document.geometries),
             "file": str(target),
         }

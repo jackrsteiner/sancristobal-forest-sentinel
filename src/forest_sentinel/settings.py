@@ -48,6 +48,7 @@ EDITABLE = "editable"
 GUARDED = "guarded"  # editable, but only with an explicit consequence confirmation
 DISPLAY_ONLY = "display-only"
 
+
 class SettingsError(ValueError):
     """A rejected settings write (unknown key, bad value, missing confirmation)."""
 

@@ -5,13 +5,20 @@
 #                  (the automated form of `git pull --no-rebase upstream main && git push`)
 #   sync_aois      copy dashboard-uploaded AOI GeoJSONs (config/aois/ on the VM) back
 #                  into this repo and commit them — the VM holds no GitHub credentials
-#                  (keyless posture), so this job is what makes uploads durable
+#                  for repo contents (keyless posture), so this job is what makes
+#                  uploads durable
+#   sync_settings  copy dashboard settings edits (config/overrides.env on the VM)
+#                  back into this repo and commit them (Slice 7 bead 7.3)
 #   update_vm      SSH to the VM via Workload Identity Federation and re-run
 #                  scripts/vm_setup.sh (idempotent: pulls the repo, regenerates .env,
 #                  applies migrations, re-renders systemd units, restarts the dashboard)
 #
-# Ordering: sync_aois pushes before update_vm pulls, so the VM's untracked upload
+# Ordering: the sync jobs push before update_vm pulls, so the VM's untracked upload
 # becomes a tracked file (git allows the checkout because the content is identical).
+#
+# Near-real-time syncs (bead 7.3, #136): the dashboard fires this workflow via
+# workflow_dispatch after a settings edit or upload, using a fine-grained PAT
+# scoped to Actions only — the VM still never holds a contents-write credential.
 # Untick sync_upstream to only refresh the VM (e.g. after editing config/instance.env);
 # untick update_vm to only bring the repo up to date with the template.
 #
@@ -31,6 +38,10 @@ on:
         default: true
       sync_aois:
         description: "Commit dashboard-uploaded AOIs from the VM to this repo"
+        type: boolean
+        default: true
+      sync_settings:
+        description: "Commit dashboard settings edits (config/overrides.env) from the VM"
         type: boolean
         default: true
       update_vm:
@@ -162,10 +173,69 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  sync-settings:
+    name: Commit settings edits from the VM
+    runs-on: ubuntu-latest
+    # Chained after sync-aois (not parallel): both jobs push to main, and
+    # concurrent pushes would race to a non-fast-forward failure.
+    needs: [sync, sync-aois]
+    if: ${{ !cancelled() && !failure() && inputs.sync_settings }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # overrides.env is not a workflow file, so the default token can push
+          # it; the PAT fallback just keeps the checkout pattern uniform.
+          token: ${{ secrets.OFS_ADMIN_TOKEN || github.token }}
+
+      - name: Load instance config
+        run: |
+          grep -E '^[A-Za-z_][A-Za-z0-9_]*=' config/instance.env >> "$GITHUB_ENV"
+          # shellcheck disable=SC1091
+          . config/instance.env
+          if [ -z "${PROJECT_ID:-}" ]; then
+            echo "::error::Set PROJECT_ID in config/instance.env and commit it."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PROVISIONER_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Harvest, commit, and push settings edits
+        run: |
+          # No overrides file yet is a clean no-op — scp's failure is expected
+          # then, and `git diff --cached` decides whether to commit.
+          gcloud compute scp \
+            --zone "${ZONE:-us-west1-a}" \
+            "${INSTANCE_NAME:-forest-sentinel-vm}:/home/ofs/open-forest-sentinel/config/overrides.env" \
+            config/overrides.env 2>/dev/null || true
+          git add config/overrides.env
+          if git diff --cached --quiet; then
+            echo "No settings edits to commit." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Commit dashboard settings edits from the VM"
+          git push origin main
+          {
+            echo "## Settings edits committed"
+            echo ""
+            echo '```'
+            git show --format= HEAD -- config/overrides.env | head -40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   update-vm:
     name: Update the VM
     runs-on: ubuntu-latest
-    needs: [sync, sync-aois]
+    needs: [sync, sync-aois, sync-settings]
     # Run when the earlier jobs succeeded OR were skipped (toggle off), but not
     # when one failed — never roll a half-merged repo onto the VM.
     if: ${{ !cancelled() && !failure() && inputs.update_vm }}
