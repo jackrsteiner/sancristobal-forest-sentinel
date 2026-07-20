@@ -268,7 +268,7 @@
           }),
         },
         satellite: {
-          label: "Satellite",
+          label: "High-res satellite",
           layer: L.tileLayer(
             "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
             {
@@ -339,8 +339,34 @@
       // Esri World Imagery is a static best-available mosaic, so the backdrop's
       // age matters when eyeballing a detection. The service's citation layers
       // expose per-source capture date/provider/resolution; `identify` with the
-      // live map extent + pixel size picks the citation matching the imagery
-      // actually rendered at this zoom (metadata is scale-dependent).
+      // live map extent + pixel size (and layers=visible) picks the citation
+      // matching the imagery actually rendered at this zoom (metadata is
+      // scale-dependent).
+      //
+      // Identify responses key `attributes` by field ALIAS, and the aliases
+      // differ per citation tier ("SRC_DATE2", "DATE", "DATE (YYYYMMDD)",
+      // "RESOLUTION (M)", ...) — so keys are matched loosely, never exactly.
+      function pickAttribute(attrs, pattern) {
+        for (const [key, value] of Object.entries(attrs)) {
+          if (pattern.test(key.toUpperCase())) return value;
+        }
+        return undefined;
+      }
+
+      function formatCaptureDate(raw) {
+        if (raw == null) return null;
+        const text = String(raw).trim();
+        // 99999 is the service's "not recorded" sentinel.
+        if (!text || text === "99999" || text.toLowerCase() === "null") return null;
+        if (/^\d{8}$/.test(text)) return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6)}`;
+        const num = Number(text);
+        // esriFieldTypeDate can arrive as epoch milliseconds.
+        if (Number.isFinite(num) && num > 1e11) return new Date(num).toISOString().slice(0, 10);
+        const parsed = new Date(text);
+        if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+        return null;
+      }
+
       async function esriCaptureInfo(latlng) {
         const size = map.getSize();
         const bounds = map.getBounds();
@@ -351,28 +377,30 @@
           sr: "4326",
           tolerance: "1",
           returnGeometry: "false",
-          layers: "all",
+          layers: "visible", // only the tier rendered at this scale, not every tier
           mapExtent: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(","),
           imageDisplay: `${size.x},${size.y},96`,
         });
         const response = await fetch(
           "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/identify?" + params,
         );
-        const attrs = ((await response.json()).results || [])
-          .map((result) => result.attributes)
-          .find((a) => a && (a.SRC_DATE2 || a.SRC_DATE));
-        if (!attrs) return null;
-        const parts = [];
-        const provider = attrs.NICE_DESC || attrs.SRC_DESC;
-        if (provider && provider !== "99999") parts.push(provider);
-        const date = String(attrs.SRC_DATE2 || attrs.SRC_DATE);
-        if (/^\d{8}$/.test(date)) {
-          // SRC_DATE2 is yyyymmdd; 99999 (in any field) means "not recorded".
-          parts.push(`captured ${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`);
+        const results = (await response.json()).results || [];
+        for (const result of results) {
+          const attrs = result.attributes || {};
+          // "DATE", "DATE (YYYYMMDD)", "SRC_DATE2" — but not e.g. "UPDATED".
+          const date = formatCaptureDate(pickAttribute(attrs, /(^|[^A-Z])DATE/));
+          if (!date) continue;
+          const parts = [];
+          const provider =
+            pickAttribute(attrs, /DESCRIPTION|NICE_DESC/) ??
+            pickAttribute(attrs, /SOURCE|SRC_DESC/);
+          if (provider && String(provider) !== "99999") parts.push(provider);
+          parts.push(`captured ${date}`);
+          const res = Number(pickAttribute(attrs, /RESOLUTION|SRC_RES/));
+          if (Number.isFinite(res) && res > 0 && res !== 99999) parts.push(`${res} m`);
+          return parts.join(" · ");
         }
-        const res = Number(attrs.SRC_RES);
-        if (res && res !== 99999) parts.push(`${res} m`);
-        return parts.length ? parts.join(" · ") : null;
+        return null;
       }
 
       map.on("click", async (e) => {
