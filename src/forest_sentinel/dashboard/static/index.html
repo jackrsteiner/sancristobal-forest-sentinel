@@ -113,7 +113,7 @@
         z-index: 1100; /* above Leaflet panes and controls */
         background: rgba(0, 0, 0, 0.75); color: #fff; font-size: 12px;
         padding: 5px 10px; border-radius: 4px; pointer-events: none;
-        opacity: 0; transition: opacity 0.3s; white-space: nowrap;
+        opacity: 0; transition: opacity 0.3s; white-space: pre-line; text-align: center;
       }
       .coord-toast.visible { opacity: 1; }
     </style>
@@ -260,18 +260,70 @@
         coordToast.textContent = text;
         coordToast.classList.add("visible");
         clearTimeout(coordToastTimer);
-        coordToastTimer = setTimeout(() => coordToast.classList.remove("visible"), 2500);
+        coordToastTimer = setTimeout(() => coordToast.classList.remove("visible"), 4000);
       }
+
+      // Esri World Imagery is a static best-available mosaic, so the backdrop's
+      // age matters when eyeballing a detection. The service's citation layers
+      // expose per-source capture date/provider/resolution; `identify` with the
+      // live map extent + pixel size picks the citation matching the imagery
+      // actually rendered at this zoom (metadata is scale-dependent).
+      async function esriCaptureInfo(latlng) {
+        const size = map.getSize();
+        const bounds = map.getBounds();
+        const params = new URLSearchParams({
+          f: "json",
+          geometry: JSON.stringify({ x: latlng.lng, y: latlng.lat, spatialReference: { wkid: 4326 } }),
+          geometryType: "esriGeometryPoint",
+          sr: "4326",
+          tolerance: "1",
+          returnGeometry: "false",
+          layers: "all",
+          mapExtent: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(","),
+          imageDisplay: `${size.x},${size.y},96`,
+        });
+        const response = await fetch(
+          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/identify?" + params,
+        );
+        const attrs = ((await response.json()).results || [])
+          .map((result) => result.attributes)
+          .find((a) => a && (a.SRC_DATE2 || a.SRC_DATE));
+        if (!attrs) return null;
+        const parts = [];
+        const provider = attrs.NICE_DESC || attrs.SRC_DESC;
+        if (provider && provider !== "99999") parts.push(provider);
+        const date = String(attrs.SRC_DATE2 || attrs.SRC_DATE);
+        if (/^\d{8}$/.test(date)) {
+          // SRC_DATE2 is yyyymmdd; 99999 (in any field) means "not recorded".
+          parts.push(`captured ${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`);
+        }
+        const res = Number(attrs.SRC_RES);
+        if (res && res !== 99999) parts.push(`${res} m`);
+        return parts.length ? parts.join(" · ") : null;
+      }
+
       map.on("click", async (e) => {
         const point = e.latlng.wrap(); // longitude in [-180, 180] after panning
         const coords = `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
+        let message;
         try {
           // Secure contexts only (https or the localhost SSH tunnel).
           await navigator.clipboard.writeText(coords);
-          showCoordToast(`Copied ${coords}`);
+          message = `Copied ${coords}`;
         } catch {
           // No clipboard (e.g. world-open plain-http): still show the value.
-          showCoordToast(coords);
+          message = coords;
+        }
+        showCoordToast(message);
+        if (activeBase !== "satellite") return;
+        try {
+          const info = await esriCaptureInfo(e.latlng);
+          // Only append while this click's toast is still the one showing.
+          if (info && coordToast.textContent === message) {
+            showCoordToast(`${message}\nImagery: ${info}`);
+          }
+        } catch {
+          // Metadata is best-effort garnish; the copy already succeeded.
         }
       });
 
