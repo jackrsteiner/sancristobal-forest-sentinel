@@ -174,11 +174,17 @@ def test_feature_with_area_sets_area_property() -> None:
     assert result is feature.set.return_value
 
 
-def _vectorize_result(delta: MagicMock) -> MagicMock:
+def _filtered_vectors(delta: MagicMock) -> MagicMock:
     """The MagicMock node returned by the threshold/vectorize chain's ``.filter(...)``."""
     vectors = delta.lt.return_value.selfMask.return_value.reduceToVectors.return_value
     filtered: MagicMock = vectors.map.return_value.filter.return_value
     return filtered
+
+
+def _vectorize_result(delta: MagicMock) -> MagicMock:
+    """The node whose ``getInfo`` yields the features: the ``reduceRegions`` output."""
+    result: MagicMock = delta.reduceRegions.return_value
+    return result
 
 
 def test_threshold_and_vectorize_returns_features(fake_ee: MagicMock) -> None:
@@ -192,6 +198,22 @@ def test_threshold_and_vectorize_returns_features(fake_ee: MagicMock) -> None:
     )
     assert features == [{"geometry": {}, "properties": {"area_m2": 5}}]
     delta.lt.assert_called_once_with(-0.25)
+
+
+def test_threshold_and_vectorize_requests_per_polygon_statistics(fake_ee: MagicMock) -> None:
+    """ΔNBR statistics (#95) are reduced per polygon from the delta at extraction time."""
+    delta = MagicMock(name="delta")
+    _vectorize_result(delta).getInfo.return_value = {"features": []}
+
+    earthengine.threshold_and_vectorize(
+        delta, threshold=-0.25, scale=30, region={"type": "Polygon"}, min_area_m2=4500
+    )
+
+    reducer = fake_ee.Reducer.mean.return_value.combine.return_value.combine.return_value.setOutputs
+    reducer.assert_called_once_with(["delta_mean", "delta_min", "valid_pixels"])
+    delta.reduceRegions.assert_called_once_with(
+        collection=_filtered_vectors(delta), reducer=reducer.return_value, scale=30
+    )
 
 
 def test_threshold_and_vectorize_handles_empty(fake_ee: MagicMock) -> None:

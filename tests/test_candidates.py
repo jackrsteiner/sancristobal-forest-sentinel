@@ -1,5 +1,6 @@
 from typing import Any
 
+import pytest
 from geoalchemy2.shape import to_shape
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -92,6 +93,7 @@ def test_extracts_candidates_with_provenance(db_session: Session) -> None:
     candidates = extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
+        methodology=methodology,
         delta_image="delta-ee-image",
         region=_REGION,
         ee_module=fake,
@@ -121,11 +123,64 @@ def test_extracts_candidates_with_provenance(db_session: Session) -> None:
     ]
 
 
+def test_persists_per_candidate_delta_statistics(db_session: Session) -> None:
+    """ΔNBR statistics from the extraction call (#95) land on the candidate row."""
+    with_stats = _poly_feature(0.1, 9_000)
+    with_stats["properties"].update({"delta_mean": -0.31, "delta_min": -0.52, "valid_pixels": 8})
+    overshoot = _poly_feature(0.3, 9_000)
+    # Pixel counting at scale is approximate: an overshooting count must clamp to 1.0.
+    overshoot["properties"].update({"delta_mean": -0.4, "delta_min": -0.6, "valid_pixels": 11})
+    fake = FakeEarthEngine(features=[with_stats, overshoot])
+
+    change, methodology, _ = _setup(db_session)
+    extract_candidates_for_change_raster(
+        db_session,
+        change_raster=change,
+        methodology=methodology,
+        delta_image="img",
+        region=_REGION,
+        ee_module=fake,
+    )
+
+    rows = (
+        db_session.execute(select(DisturbanceCandidate).order_by(DisturbanceCandidate.id))
+        .scalars()
+        .all()
+    )
+    assert [row.delta_mean for row in rows] == [-0.31, -0.4]
+    assert [row.delta_min for row in rows] == [-0.52, -0.6]
+    # 8 valid pixels × 30 m² pixels = 7 200 m² of 9 000 m² → 0.8; 11 pixels clamps.
+    assert rows[0].valid_pixel_fraction == pytest.approx(0.8)
+    assert rows[1].valid_pixel_fraction == 1.0
+
+
+def test_features_without_statistics_read_null(db_session: Session) -> None:
+    # Features from an older extraction shape (no #95 properties) must not crash —
+    # the row simply records no statistics, matching pre-migration rows.
+    fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
+
+    change, methodology, _ = _setup(db_session)
+    extract_candidates_for_change_raster(
+        db_session,
+        change_raster=change,
+        methodology=methodology,
+        delta_image="img",
+        region=_REGION,
+        ee_module=fake,
+    )
+
+    row = db_session.execute(select(DisturbanceCandidate)).scalar_one()
+    assert row.delta_mean is None
+    assert row.delta_min is None
+    assert row.valid_pixel_fraction is None
+
+
 def test_no_features_yields_no_candidates(db_session: Session) -> None:
-    change, _, _ = _setup(db_session)
+    change, methodology, _ = _setup(db_session)
     candidates = extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
+        methodology=methodology,
         delta_image="img",
         region=_REGION,
         ee_module=FakeEarthEngine(features=[]),
@@ -135,11 +190,12 @@ def test_no_features_yields_no_candidates(db_session: Session) -> None:
 
 
 def test_sub_minimum_area_polygons_are_dropped(db_session: Session) -> None:
-    change, _, _ = _setup(db_session)
+    change, methodology, _ = _setup(db_session)
     fake = FakeEarthEngine(features=[_poly_feature(0.1, 100.0), _poly_feature(0.3, 50_000.0)])
     candidates = extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
+        methodology=methodology,
         delta_image="img",
         region=_REGION,
         ee_module=fake,
@@ -149,25 +205,31 @@ def test_sub_minimum_area_polygons_are_dropped(db_session: Session) -> None:
 
 
 def test_methodology_parameters_drive_extraction(db_session: Session) -> None:
-    change, _, _ = _setup(
-        db_session, parameters={"delta_nbr_threshold": -0.4, "min_area_m2": 9_000}
-    )
-    fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
-    extract_candidates_for_change_raster(
-        db_session, change_raster=change, delta_image="img", region=_REGION, ee_module=fake
-    )
-    assert fake.calls[0]["threshold"] == -0.4
-    assert fake.calls[0]["min_area_m2"] == 9_000
-
-
-def test_explicit_overrides_win(db_session: Session) -> None:
-    change, _, _ = _setup(
+    change, methodology, _ = _setup(
         db_session, parameters={"delta_nbr_threshold": -0.4, "min_area_m2": 9_000}
     )
     fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
     extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
+        methodology=methodology,
+        delta_image="img",
+        region=_REGION,
+        ee_module=fake,
+    )
+    assert fake.calls[0]["threshold"] == -0.4
+    assert fake.calls[0]["min_area_m2"] == 9_000
+
+
+def test_explicit_overrides_win(db_session: Session) -> None:
+    change, methodology, _ = _setup(
+        db_session, parameters={"delta_nbr_threshold": -0.4, "min_area_m2": 9_000}
+    )
+    fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
+    extract_candidates_for_change_raster(
+        db_session,
+        change_raster=change,
+        methodology=methodology,
         delta_image="img",
         region=_REGION,
         threshold=-0.6,
@@ -179,11 +241,12 @@ def test_explicit_overrides_win(db_session: Session) -> None:
 
 
 def test_rerun_replaces_candidates(db_session: Session) -> None:
-    change, _, _ = _setup(db_session)
+    change, methodology, _ = _setup(db_session)
     for _ in range(2):
         extract_candidates_for_change_raster(
             db_session,
             change_raster=change,
+            methodology=methodology,
             delta_image="img",
             region=_REGION,
             ee_module=FakeEarthEngine(features=[_poly_feature(0.1, 10_000)]),
@@ -195,10 +258,11 @@ def test_rerun_replaces_candidates(db_session: Session) -> None:
 def test_tracked_candidates_are_frozen_on_rerun(db_session: Session) -> None:
     """Once a candidate is tracked into an event, re-extraction must not touch the
     set (audit BUG-2): no FK violation, no duplicates, no Earth Engine call."""
-    change, _, _ = _setup(db_session)
+    change, methodology, _ = _setup(db_session)
     first = extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
+        methodology=methodology,
         delta_image="img",
         region=_REGION,
         ee_module=FakeEarthEngine(features=[_poly_feature(0.1, 10_000)]),
@@ -212,6 +276,7 @@ def test_tracked_candidates_are_frozen_on_rerun(db_session: Session) -> None:
     rerun = extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
+        methodology=methodology,
         delta_image="img",
         region=_REGION,
         ee_module=fake,
@@ -231,12 +296,13 @@ def test_methodology_forest_mask_is_applied_to_the_delta(db_session: Session) ->
         "asset": "UMD/hansen/global_forest_change_2023_v1_11",
         "canopy_threshold_pct": 30.0,
     }
-    change, _, _ = _setup(db_session, parameters={"forest_mask": mask_config})
+    change, methodology, _ = _setup(db_session, parameters={"forest_mask": mask_config})
     fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
 
     candidates = extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
+        methodology=methodology,
         delta_image="delta-ee-image",
         region=_REGION,
         ee_module=fake,
@@ -256,11 +322,16 @@ def test_methodology_forest_mask_is_applied_to_the_delta(db_session: Session) ->
 
 def test_worldcover_forest_mask_is_applied(db_session: Session) -> None:
     mask_config = {"source": "worldcover", "asset": "ESA/WorldCover/v200", "tree_class": 10}
-    change, _, _ = _setup(db_session, parameters={"forest_mask": mask_config})
+    change, methodology, _ = _setup(db_session, parameters={"forest_mask": mask_config})
     fake = FakeEarthEngine(features=[])
 
     extract_candidates_for_change_raster(
-        db_session, change_raster=change, delta_image="img", region=_REGION, ee_module=fake
+        db_session,
+        change_raster=change,
+        methodology=methodology,
+        delta_image="img",
+        region=_REGION,
+        ee_module=fake,
     )
 
     assert fake.forest_mask_calls == [mask_config]
@@ -270,11 +341,16 @@ def test_worldcover_forest_mask_is_applied(db_session: Session) -> None:
 def test_no_forest_mask_key_means_unmasked_extraction(db_session: Session) -> None:
     """Methodologies minted before #82 (no forest_mask key) must extract exactly as
     before: no mask built, the raw delta thresholded."""
-    change, _, _ = _setup(db_session)  # default parameters: no forest_mask key
+    change, methodology, _ = _setup(db_session)  # default parameters: no forest_mask key
     fake = FakeEarthEngine(features=[_poly_feature(0.1, 10_000)])
 
     extract_candidates_for_change_raster(
-        db_session, change_raster=change, delta_image="raw-delta", region=_REGION, ee_module=fake
+        db_session,
+        change_raster=change,
+        methodology=methodology,
+        delta_image="raw-delta",
+        region=_REGION,
+        ee_module=fake,
     )
 
     assert fake.forest_mask_calls == []
@@ -287,12 +363,13 @@ def test_explicit_forest_mask_override_wins(db_session: Session) -> None:
     threshold/min-area override semantics."""
     stored = {"source": "worldcover", "asset": "ESA/WorldCover/v200", "tree_class": 10}
     override = {"source": "hansen", "asset": "custom/asset", "canopy_threshold_pct": 50.0}
-    change, _, _ = _setup(db_session, parameters={"forest_mask": stored})
+    change, methodology, _ = _setup(db_session, parameters={"forest_mask": stored})
     fake = FakeEarthEngine(features=[])
 
     extract_candidates_for_change_raster(
         db_session,
         change_raster=change,
+        methodology=methodology,
         delta_image="img",
         region=_REGION,
         forest_mask=override,

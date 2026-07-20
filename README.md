@@ -114,7 +114,7 @@ Additional weak signals, such as night-time lights anomalies or mill / port / ex
 
 ```mermaid
 flowchart TD
-    cron["GitHub Actions cron"] --> orch["GCE e2-micro VM<br/>Python orchestrator"]
+    cron["systemd timer (daily, on the VM)"] --> orch["GCE e2-micro VM<br/>Python orchestrator"]
     orch --> aoi["Load configured AOI"]
     aoi --> submit["Submit Earth Engine work"]
 
@@ -156,7 +156,7 @@ flowchart TD
 
 ## Prototype Technology Stack
 
-- **Scheduler / trigger:** GitHub Actions cron (target; today a systemd timer on the VM — see `DEPLOYMENT.md` §7)
+- **Scheduler / trigger:** systemd timer on the VM (daily; see `DEPLOYMENT.md` §7), with a manual GitHub Actions `workflow_dispatch` trigger as the remote kick
 - **Compute:** Google Compute Engine VM
 - **Prototype database:** PostgreSQL + PostGIS running on the same Compute Engine VM
 - **Future managed database option:** Cloud SQL for PostgreSQL with PostGIS

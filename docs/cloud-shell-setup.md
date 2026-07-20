@@ -17,7 +17,7 @@ this one is a linear checklist of the *how*.
   attachment) and the transient GCS staging bucket.
 - An always-free `e2-micro` VM running PostgreSQL + PostGIS, the dashboard, and a
   systemd timer that runs the pipeline daily at 03:00 UTC.
-- (Optional) the GitHub Actions scheduled-run workflow wired up.
+- (Optional) the GitHub Actions manual run-trigger workflow wired up.
 
 > Deploying a **per-instance repo created from the template**? The GitHub-Action
 > path in [`INSTANCE_DEPLOYMENT.md`](../INSTANCE_DEPLOYMENT.md) automates §3–§7
@@ -215,13 +215,14 @@ tunnel when done.
 
 ---
 
-## 9. Optional: schedule runs from GitHub Actions
+## 9. Optional: trigger runs from GitHub Actions
 
-The VM's systemd timer already runs the pipeline daily, so this section is optional —
+The VM's systemd timer runs the pipeline daily (it owns scheduling — the
+GitHub-side cron path was retired when E11 closed), so this section is optional —
 it wires up the repo's [`scheduled-run.yml`](../.github/workflows/scheduled-run.yml)
-workflow (`DEPLOYMENT.md` §7), which SSHes to the VM on a GitHub-side cron and triggers
-the same systemd run. Authentication uses **Workload Identity Federation** — no
-key JSON ever touches GitHub.
+workflow (`DEPLOYMENT.md` §7), a **manual** `workflow_dispatch` trigger that SSHes
+to the VM and starts the same systemd run from the GitHub UI. Authentication uses
+**Workload Identity Federation** — no key JSON ever touches GitHub.
 
 **a. Set up WIF** (skip if you already ran this for the repo). From Cloud Shell,
 in your fork/instance of the repo:
@@ -247,10 +248,10 @@ Secrets and variables → Actions → Variables*:
 Also make sure `PROJECT_ID` is set in the committed `config/instance.env` (the
 workflow reads the VM name/zone from there too).
 
-**c. Enable the workflow.** Edit `.github/workflows/scheduled-run.yml` — doable
-entirely in the GitHub web editor: delete the `if: ${{ false }}` guard line and
-uncomment the `schedule:` block. Test it from the repo's *Actions* tab with
-**Run workflow** (the `workflow_dispatch` trigger).
+**c. Use the workflow.** `.github/workflows/scheduled-run.yml` is a manual
+trigger (the Actions-cron path was retired — the on-VM systemd timer owns
+scheduling): run it from the repo's *Actions* tab with **Run workflow**
+(the `workflow_dispatch` trigger).
 
 ---
 

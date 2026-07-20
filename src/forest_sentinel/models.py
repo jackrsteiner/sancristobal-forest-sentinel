@@ -11,6 +11,7 @@ from typing import Any
 from geoalchemy2 import Geometry
 from geoalchemy2.elements import WKBElement
 from sqlalchemy import (
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -62,14 +63,42 @@ class Aoi(Base):
     )
 
 
+class SensorSource(Base):
+    """Registry of source datasets (README ``sensor_source``).
+
+    Maps each ``observation.sensor`` string to the dataset behind it: kind
+    (optical/radar), the Earth Engine collection id, and free-form details.
+    Seeded by migration ``0015`` with HLSL30 / HLSS30 / S1GRD.
+    """
+
+    __tablename__ = "sensor_source"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_sensor_source_name"),
+        # Rendered ck_sensor_source_kind by the metadata naming convention.
+        CheckConstraint("kind IN ('optical', 'radar')", name="kind"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    collection: Mapped[str] = mapped_column(String, nullable=False)
+    # "details" not "metadata": the latter is reserved by SQLAlchemy's Base.
+    details: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class Observation(Base):
-    """One HLS imagery acquisition over an AOI: the source record every derived
+    """One imagery acquisition over an AOI: the source record every derived
     artifact traces back to. Source data, so it carries no ``methodology_version``.
     """
 
     __tablename__ = "observation"
     __table_args__ = (
-        # HLS discovery is idempotent per AOI: the same scene is recorded once.
+        # Discovery is idempotent per AOI: the same scene is recorded once.
         UniqueConstraint("aoi_id", "source_scene_id", name="uq_observation_aoi_id_source_scene_id"),
         Index("ix_observation_aoi_id_acquired_at", "aoi_id", "acquired_at"),
     )
@@ -80,6 +109,11 @@ class Observation(Base):
     acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     source_scene_id: Mapped[str] = mapped_column(String, nullable=False)
     cloud_cover_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Radar-only (Sentinel-1, #115): backscatter baselines must be built from
+    # same-orbit-direction scenes, so the geometry is recorded at discovery.
+    # Null for optical observations.
+    orbit_direction: Mapped[str | None] = mapped_column(String, nullable=True)
+    relative_orbit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -87,18 +121,21 @@ class Observation(Base):
     )
 
 
-class MethodologyVersion(Base):
-    """Provenance for a processing/detection method.
+class RasterLineage(Base):
+    """Content-addressed provenance for the *raster* half of a methodology.
 
-    ``parameters`` captures the detection/processing parameters plus the Earth
-    Engine script version and input collection/asset IDs, so a run is
-    reproducible against Google's compute.
+    The parameters that shape exported raster content (script pin, source
+    collections, scale, masked categories, baseline window) hash separately
+    from the detection parameters (threshold, min area, forest mask), and
+    index/change rasters key on this lineage instead of the full methodology —
+    so a detection-parameter change reuses every COG and only re-runs candidate
+    extraction (config-inventory Finding 1). Like ``methodology_version``,
+    ``version`` is ``auto-<hash>`` of the canonical parameters and rows are
+    append-only.
     """
 
-    __tablename__ = "methodology_version"
-    __table_args__ = (
-        UniqueConstraint("name", "version", name="uq_methodology_version_name_version"),
-    )
+    __tablename__ = "raster_lineage"
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_raster_lineage_name_version"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
@@ -111,24 +148,61 @@ class MethodologyVersion(Base):
     )
 
 
+class MethodologyVersion(Base):
+    """Provenance for a processing/detection method.
+
+    ``parameters`` captures the detection/processing parameters plus the Earth
+    Engine script version and input collection/asset IDs, so a run is
+    reproducible against Google's compute. ``raster_lineage_id`` references the
+    content-addressed raster half of those parameters (see ``RasterLineage``);
+    it is derived from ``parameters``, never independently chosen.
+    """
+
+    __tablename__ = "methodology_version"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_methodology_version_name_version"),
+        UniqueConstraint("name", "display_version", name="uq_methodology_version_name_display"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    version: Mapped[str] = mapped_column(String, nullable=False)
+    # Human-facing semantic label minted alongside the content-addressed
+    # ``version`` (which stays the identity): X.Y.Z per name, minor-bumped when
+    # the EE script version changes, patch-bumped for parameter tweaks.
+    display_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    raster_lineage_id: Mapped[int] = mapped_column(
+        ForeignKey("raster_lineage.id", name="fk_methodology_version_raster_lineage"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class IndexRaster(Base):
-    """A derived NBR or NDVI raster for one observation, stored as a COG."""
+    """A derived NBR or NDVI raster for one observation, stored as a COG.
+
+    Keyed on the raster lineage, not the full methodology: detection-parameter
+    changes (threshold, min area, forest mask) share these rows and files.
+    """
 
     __tablename__ = "index_raster"
     __table_args__ = (
         UniqueConstraint(
             "observation_id",
             "index_type",
-            "methodology_version_id",
+            "raster_lineage_id",
             name="uq_index_raster_identity",
         ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     observation_id: Mapped[int] = mapped_column(ForeignKey("observation.id"), nullable=False)
-    methodology_version_id: Mapped[int] = mapped_column(
-        ForeignKey("methodology_version.id"), nullable=False
-    )
+    raster_lineage_id: Mapped[int] = mapped_column(ForeignKey("raster_lineage.id"), nullable=False)
     index_type: Mapped[str] = mapped_column(String, nullable=False)
     cog_path: Mapped[str] = mapped_column(String, nullable=False)
     valid_pixel_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -140,27 +214,35 @@ class IndexRaster(Base):
 
 
 class ChangeRaster(Base):
-    """A ΔNBR/ΔNDVI change product: current index minus the trailing-median baseline."""
+    """A ΔNBR/ΔNDVI change product: current index minus the trailing-median baseline.
+
+    Keyed on the raster lineage, not the full methodology: detection-parameter
+    changes (threshold, min area, forest mask) share these rows and files, and
+    each detection layer extracts its own candidate set from them.
+    """
 
     __tablename__ = "change_raster"
     __table_args__ = (
         UniqueConstraint(
             "observation_id",
             "change_type",
-            "methodology_version_id",
+            "raster_lineage_id",
             name="uq_change_raster_identity",
         ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     observation_id: Mapped[int] = mapped_column(ForeignKey("observation.id"), nullable=False)
-    methodology_version_id: Mapped[int] = mapped_column(
-        ForeignKey("methodology_version.id"), nullable=False
-    )
+    raster_lineage_id: Mapped[int] = mapped_column(ForeignKey("raster_lineage.id"), nullable=False)
     change_type: Mapped[str] = mapped_column(String, nullable=False)
     cog_path: Mapped[str] = mapped_column(String, nullable=False)
     baseline_window: Mapped[int] = mapped_column(Integer, nullable=False)
     valid_pixel_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Radar baseline provenance (#116): the ordered source scene ids the trailing
+    # median was built from. Optical deltas record their baseline through
+    # change_raster_source (index-raster FKs) instead; radar has no per-scene
+    # index rasters, so the recipe is recorded here. Null for optical rows.
+    baseline_source_scene_ids: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -199,7 +281,68 @@ class DisturbanceCandidate(Base):
     )
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     area_m2: Mapped[float] = mapped_column(Float, nullable=False)
+    # ΔNBR statistics computed in Earth Engine at extraction time and persisted
+    # here so they survive COG pruning — never re-derived from stored rasters
+    # (docs/architecture.md §7). Null on rows extracted before these columns.
+    delta_mean: Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    valid_pixel_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class SettingsChange(Base):
+    """Append-only audit of dashboard settings edits (Slice 7 bead 7.2).
+
+    Tunnel-as-auth records no "who" — the row is the what/when, and the
+    repo-synced overrides file gives the same history as git commits.
+    """
+
+    __tablename__ = "settings_change"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String, nullable=False)
+    category: Mapped[str] = mapped_column(String, nullable=False)
+    old_value: Mapped[str | None] = mapped_column(String, nullable=True)
+    new_value: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class CandidateExtraction(Base):
+    """Marker: this methodology has extracted candidates from this raster.
+
+    Change rasters are shared across detection layers (Finding 1), so "does the
+    current methodology have candidates here?" cannot be answered by counting
+    ``disturbance_candidate`` rows — an extraction can legitimately yield zero.
+    One row per ``(change_raster, methodology)`` extraction; the pipeline
+    rebuilds and re-extracts only when the marker is absent.
+    """
+
+    __tablename__ = "candidate_extraction"
+    __table_args__ = (
+        UniqueConstraint(
+            "change_raster_id",
+            "methodology_version_id",
+            name="uq_candidate_extraction_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    change_raster_id: Mapped[int] = mapped_column(
+        ForeignKey("change_raster.id", ondelete="CASCADE"), nullable=False
+    )
+    methodology_version_id: Mapped[int] = mapped_column(
+        ForeignKey("methodology_version.id", name="fk_candidate_extraction_methodology"),
+        nullable=False,
+    )
+    extracted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
@@ -255,6 +398,45 @@ class DisturbanceEvent(Base):
     )
 
 
+# The opinions a manual review may record — a human judgment held ALONGSIDE the
+# automatic event status, never a mutation of it (docs/architecture.md §5.9/§7).
+REVIEW_OPINIONS = ("confirmed", "false_positive", "uncertain", "resolved")
+
+
+class ManualReview(Base):
+    """An append-only human opinion about a disturbance event.
+
+    Reviews record what a person concluded (`confirmed`/`false_positive`/
+    `uncertain`/`resolved`, with optional notes and a free-text reviewer name —
+    tunnel-as-auth has no identity to bind). The latest row per event is the
+    current opinion; rows are never updated or deleted individually, so the
+    review history is inspectable like every other provenance record.
+    """
+
+    __tablename__ = "manual_review"
+    __table_args__ = (
+        # Rendered ck_manual_review_opinion by the metadata naming convention.
+        CheckConstraint(
+            "opinion IN ('confirmed', 'false_positive', 'uncertain', 'resolved')",
+            name="opinion",
+        ),
+        Index("ix_manual_review_event_id", "event_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("disturbance_event.id", ondelete="CASCADE"), nullable=False
+    )
+    opinion: Mapped[str] = mapped_column(String, nullable=False)
+    notes: Mapped[str | None] = mapped_column(String, nullable=True)
+    reviewer: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class EventObservation(Base):
     """One per-date measurement of an event, produced by a single candidate."""
 
@@ -277,6 +459,150 @@ class EventObservation(Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     area_m2: Mapped[float] = mapped_column(Float, nullable=False)
     growth_m2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+CONFIDENCE_LEVELS = ("low", "medium", "high")
+
+
+class ConfidenceAssessment(Base):
+    """One explained confidence evaluation of an event (E15) — append-only.
+
+    ``inputs`` records every factor value, subscore, and weight the rule used,
+    plus which factors were unavailable, so the level is fully explainable from
+    the row alone — no recomputation, no reading rasters back. ``rule_version``
+    pins the rule that produced it; assessments under different rule versions
+    are not comparable and the dashboard shows the version alongside the level.
+    """
+
+    __tablename__ = "confidence_assessment"
+    __table_args__ = (
+        # Rendered ck_confidence_assessment_level by the metadata naming convention.
+        CheckConstraint("level IN ('low', 'medium', 'high')", name="level"),
+        Index("ix_confidence_assessment_event_id", "event_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("disturbance_event.id", ondelete="CASCADE"), nullable=False
+    )
+    pipeline_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("pipeline_run.id", name="fk_confidence_assessment_run"), nullable=True
+    )
+    level: Mapped[str] = mapped_column(String, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    inputs: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    rule_version: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+# The context-layer kinds the README's "Contextual Evidence Layers" enumerate.
+# Free-form sources land under "other" rather than growing this list ad hoc.
+CONTEXT_KINDS = (
+    "concession",
+    "protected_area",
+    "road",
+    "river",
+    "settlement",
+    "mill",
+    "port",
+    "other",
+)
+
+
+class ContextLayer(Base):
+    """A named contextual dataset (E17): one operator-loaded GeoJSON file.
+
+    The registry row: features live in ``context_feature``. Re-loading a layer
+    under the same name replaces its features (layers are reference data, not
+    provenance — the current file is the truth).
+    """
+
+    __tablename__ = "context_layer"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_context_layer_name"),
+        # Rendered ck_context_layer_kind by the metadata naming convention.
+        CheckConstraint(
+            "kind IN ('concession', 'protected_area', 'road', 'river', "
+            "'settlement', 'mill', 'port', 'other')",
+            name="kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    source_file: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class ContextFeature(Base):
+    """One geometry from a context layer, with its GeoJSON properties.
+
+    Mixed geometry types by design: concessions are polygons, roads and rivers
+    are lines, mills/ports/settlements are points.
+    """
+
+    __tablename__ = "context_feature"
+    __table_args__ = (Index("ix_context_feature_context_layer_id", "context_layer_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    context_layer_id: Mapped[int] = mapped_column(
+        ForeignKey("context_layer.id", ondelete="CASCADE"), nullable=False
+    )
+    geometry: Mapped[WKBElement] = mapped_column(
+        Geometry(geometry_type="GEOMETRY", srid=AOI_SRID),
+        nullable=False,
+    )
+    properties: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+# How an event relates to a context feature: the feature contains the event,
+# overlaps it, or is the nearest feature of its layer's kind within the buffer.
+CONTEXT_RELATIONS = ("contains", "intersects", "nearby")
+
+
+class EventContext(Base):
+    """One relationship between a disturbance event and a context feature (E17).
+
+    A derived view, not provenance: rows are replaced per event per run from
+    whatever layers exist at that moment (layers are reference data and change
+    between runs). ``distance_m`` is set only for ``nearby`` rows.
+    """
+
+    __tablename__ = "event_context"
+    __table_args__ = (
+        # Rendered ck_event_context_relation by the metadata naming convention.
+        CheckConstraint("relation IN ('contains', 'intersects', 'nearby')", name="relation"),
+        Index("ix_event_context_event_id", "event_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("disturbance_event.id", ondelete="CASCADE"), nullable=False
+    )
+    context_feature_id: Mapped[int] = mapped_column(
+        ForeignKey("context_feature.id", ondelete="CASCADE"), nullable=False
+    )
+    relation: Mapped[str] = mapped_column(String, nullable=False)
+    distance_m: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -314,6 +640,11 @@ class PipelineRun(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)
     since: Mapped[date] = mapped_column(Date, nullable=False)
     until: Mapped[date] = mapped_column(Date, nullable=False)
+    # Hash of the AOI geometry the run scanned with (nullable: rows predating the
+    # column). AOI geometry is instance data, not a methodology input — this is
+    # the audit trail that makes a silent footprint edit visible in run history
+    # (config-inventory Finding 8).
+    aoi_geometry_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     # Final PipelineSummary counts (asdict), stamped when the run finishes.
     summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

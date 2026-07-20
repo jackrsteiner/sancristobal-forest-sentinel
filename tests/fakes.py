@@ -22,6 +22,8 @@ from forest_sentinel.models import (
     Aoi,
     ChangeRaster,
     DisturbanceCandidate,
+    DisturbanceEvent,
+    ManualReview,
     MethodologyVersion,
     Observation,
 )
@@ -86,6 +88,9 @@ class FakeEarthEngine:
         if self._footprint is None:
             raise EarthEngineError("footprint unavailable")
         return self._footprint
+
+    def select_band(self, image: Any, band: str) -> dict[str, Any]:
+        return {"band": (band, image)}
 
     def normalized_difference(self, image: Any, bands: list[str]) -> dict[str, Any]:
         self.nd_bands.append(list(bands))
@@ -192,6 +197,15 @@ def make_methodology(
     )
 
 
+def make_radar_methodology(
+    session: Session, *, version: str = "1.0.0", parameters: dict[str, Any] | None = None
+) -> MethodologyVersion:
+    """Get or create the radar-change methodology version (a separate lineage)."""
+    return get_or_create_methodology_version(
+        session, name="radar-change", version=version, parameters=parameters or {}
+    )
+
+
 def make_observation(
     session: Session,
     aoi: Aoi,
@@ -225,7 +239,7 @@ def make_change_raster(
     """Insert a ChangeRaster row for the given observation."""
     change = ChangeRaster(
         observation_id=observation.id,
-        methodology_version_id=methodology.id,
+        raster_lineage_id=methodology.raster_lineage_id,
         change_type=change_type,
         cog_path=cog_path,
         baseline_window=baseline_window,
@@ -243,10 +257,22 @@ def make_candidate(
     day: int,
     ring: list[tuple[float, float]],
     area_m2: float,
+    delta_mean: float | None = None,
+    delta_min: float | None = None,
+    valid_pixel_fraction: float | None = None,
+    sensor: str = "HLSL30",
 ) -> DisturbanceCandidate:
-    """Seed one detection: Observation -> ChangeRaster -> DisturbanceCandidate."""
+    """Seed one detection: Observation -> ChangeRaster -> DisturbanceCandidate.
+
+    The extraction-time ΔNBR statistics (#95) default to null, matching
+    pre-statistics rows; pass them explicitly to seed quality metadata. Pass
+    ``sensor="S1GRD"`` (with a radar methodology) to seed a radar-lineage
+    detection — the scene id is sensor-qualified so optical and radar
+    observations on the same day never collide.
+    """
     detected = datetime(2026, 1, day, tzinfo=UTC)
-    obs = make_observation(session, aoi, day=day)
+    scene_id = f"scene-{day}" if sensor == "HLSL30" else f"{sensor}-scene-{day}"
+    obs = make_observation(session, aoi, day=day, sensor=sensor, source_scene_id=scene_id)
     change = make_change_raster(session, obs, methodology, cog_path=f"/cogs/{day}.tif")
     candidate = DisturbanceCandidate(
         change_raster_id=change.id,
@@ -254,7 +280,25 @@ def make_candidate(
         geometry=from_shape(Polygon(ring), srid=4326),
         detected_at=detected,
         area_m2=area_m2,
+        delta_mean=delta_mean,
+        delta_min=delta_min,
+        valid_pixel_fraction=valid_pixel_fraction,
     )
     session.add(candidate)
     session.flush()
     return candidate
+
+
+def make_review(
+    session: Session,
+    event: DisturbanceEvent,
+    *,
+    opinion: str = "confirmed",
+    notes: str | None = None,
+    reviewer: str | None = None,
+) -> ManualReview:
+    """Append one manual-review opinion to an event."""
+    review = ManualReview(event_id=event.id, opinion=opinion, notes=notes, reviewer=reviewer)
+    session.add(review)
+    session.flush()
+    return review

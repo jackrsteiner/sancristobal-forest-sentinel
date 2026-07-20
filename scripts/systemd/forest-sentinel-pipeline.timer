@@ -2,8 +2,10 @@
 Description=Run the Open Forest Sentinel pipeline on a schedule
 
 [Timer]
-# Daily at 03:00 UTC. Adjust to your AOI's revisit cadence and processing budget.
-OnCalendar=*-*-* 03:00:00
+# Rendered by vm_setup.sh from PIPELINE_SCHEDULE (default 03:00:00 UTC daily —
+# a time of day or a systemd shorthand like hourly/daily). Adjust to your AOI's
+# revisit cadence and processing budget; editable from the dashboard (bead 7.5).
+OnCalendar=@PIPELINE_SCHEDULE@
 Persistent=true
 
 [Install]

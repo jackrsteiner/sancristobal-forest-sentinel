@@ -45,9 +45,12 @@ class ChangeProduct:
     The pipeline (#42) reuses ``delta_image`` for candidate extraction (#41) without
     rebuilding it. For a **frozen** raster (its candidates are tracked into events)
     or a **reused** one (row + COG already persisted by an earlier run, #77)
-    ``delta_image`` is ``None``: nothing was recomputed, and candidate extraction
-    is skipped — a reused raster's candidates were committed in the same
-    checkpoint as the raster itself.
+    ``delta_image`` is ``None``: nothing was recomputed. The pipeline skips
+    extraction when the current methodology already has candidates for the
+    raster; a raster reused under a *new* detection layer (same raster lineage,
+    different threshold/min-area/mask — Finding 1) has none yet, and the
+    pipeline rebuilds the delta from recorded provenance to extract them
+    without re-exporting.
 
     ``region`` is the scene ∩ AOI GeoJSON the delta was exported over (#78);
     candidate extraction vectorizes over the same region. ``None`` for
@@ -107,7 +110,7 @@ def compute_change_products_for_observation(
                     .where(Observation.aoi_id == aoi.id)
                     .where(Observation.acquired_at < observation.acquired_at)
                     .where(IndexRaster.index_type == index_type)
-                    .where(IndexRaster.methodology_version_id == methodology.id)
+                    .where(IndexRaster.raster_lineage_id == methodology.raster_lineage_id)
                     .order_by(Observation.acquired_at.desc())
                     .limit(baseline_window)
                 )
@@ -136,16 +139,17 @@ def compute_change_products_for_observation(
             session,
             observation_id=observation.id,
             change_type=change_type,
-            methodology_version_id=methodology.id,
+            raster_lineage_id=methodology.raster_lineage_id,
         )
         if existing is not None and change_raster_is_frozen(session, existing.id):
             results.append(
                 ChangeProduct(change_type=change_type, change_raster=existing, delta_image=None)
             )
             continue
-        # Reused (#77): row + COG already persisted by an earlier run. The recorded
-        # baseline (change_raster_source) stands — it is not recomputed as new prior
-        # observations arrive; candidates were committed alongside the raster.
+        # Reused (#77): row + COG already persisted by an earlier run — possibly
+        # under a different detection layer of the same raster lineage (Finding 1).
+        # The recorded baseline (change_raster_source) stands — it is not
+        # recomputed as new prior observations arrive.
         if existing is not None and Path(existing.cog_path).exists():
             results.append(
                 ChangeProduct(
@@ -211,7 +215,7 @@ def compute_change_products_for_observation(
                     select(IndexRaster)
                     .where(IndexRaster.observation_id.in_(source_obs_ids))
                     .where(IndexRaster.index_type == index_type)
-                    .where(IndexRaster.methodology_version_id == methodology.id)
+                    .where(IndexRaster.raster_lineage_id == methodology.raster_lineage_id)
                 )
                 .scalars()
                 .all()
@@ -224,7 +228,7 @@ def compute_change_products_for_observation(
             change = _upsert_change_raster(
                 session,
                 observation_id=observation.id,
-                methodology_version_id=methodology.id,
+                raster_lineage_id=methodology.raster_lineage_id,
                 change_type=change_type,
                 cog_path=str(export_result),
                 baseline_window=baseline_window,
@@ -252,13 +256,13 @@ def _get_change_raster(
     *,
     observation_id: int,
     change_type: str,
-    methodology_version_id: int,
+    raster_lineage_id: int,
 ) -> ChangeRaster | None:
     return session.execute(
         select(ChangeRaster)
         .where(ChangeRaster.observation_id == observation_id)
         .where(ChangeRaster.change_type == change_type)
-        .where(ChangeRaster.methodology_version_id == methodology_version_id)
+        .where(ChangeRaster.raster_lineage_id == raster_lineage_id)
     ).scalar_one_or_none()
 
 
@@ -266,7 +270,7 @@ def _upsert_change_raster(
     session: Session,
     *,
     observation_id: int,
-    methodology_version_id: int,
+    raster_lineage_id: int,
     change_type: str,
     cog_path: str,
     baseline_window: int,
@@ -276,7 +280,7 @@ def _upsert_change_raster(
         session,
         observation_id=observation_id,
         change_type=change_type,
-        methodology_version_id=methodology_version_id,
+        raster_lineage_id=raster_lineage_id,
     )
     if existing is not None:
         existing.cog_path = cog_path
@@ -285,7 +289,7 @@ def _upsert_change_raster(
         return existing
     created = ChangeRaster(
         observation_id=observation_id,
-        methodology_version_id=methodology_version_id,
+        raster_lineage_id=raster_lineage_id,
         change_type=change_type,
         cog_path=cog_path,
         baseline_window=baseline_window,

@@ -76,6 +76,9 @@ def test_prune_service_unit_is_a_templated_oneshot_running_the_wrapper() -> None
 
 
 def test_prune_timer_fires_daily_and_catches_up() -> None:
+    # The schedule is a vm_setup.sh-rendered token since bead 7.5 (#139); the
+    # 02:30 default lives in vm_setup.sh and is contract-tested in
+    # tests/test_settings.py.
     timer = (SCRIPTS / "systemd" / "forest-sentinel-prune.timer").read_text()
-    assert "OnCalendar=*-*-* 02:30:00" in timer
+    assert "OnCalendar=@PRUNE_SCHEDULE@" in timer
     assert "Persistent=true" in timer

@@ -62,12 +62,28 @@ if [ -f "${INSTANCE_ENV}" ]; then
     # shellcheck disable=SC1090
     . "${INSTANCE_ENV}"
 fi
+# Dashboard settings edits override instance.env for the values rendered below
+# (schedules, timeout). Safe to source: the write path only emits space-free,
+# shell-inert values (bead 7.5).
+OVERRIDES_ENV="${APP_DIR}/config/overrides.env"
+if [ -f "${OVERRIDES_ENV}" ]; then
+    # shellcheck disable=SC1090
+    . "${OVERRIDES_ENV}"
+fi
 if [ -z "${PROJECT_ID:-}" ]; then
     PROJECT_ID="$(curl -sf -H 'Metadata-Flavor: Google' \
         http://metadata.google.internal/computeMetadata/v1/project/project-id 2>/dev/null || true)"
 fi
 DASHBOARD_PORT="${DASHBOARD_PORT:-8000}"
 PIPELINE_TIMEOUT="${PIPELINE_TIMEOUT:-20h}"
+# Timer schedules (bead 7.5): a time of day (renders as daily) or a systemd
+# shorthand (hourly/daily/weekly). Space-free by construction — see above.
+PIPELINE_SCHEDULE="${PIPELINE_SCHEDULE:-03:00:00}"
+PRUNE_SCHEDULE="${PRUNE_SCHEDULE:-02:30:00}"
+# Image mode (#96): blank (the default) builds from source with uv; a
+# published image reference (e.g. ghcr.io/<owner>/open-forest-sentinel:<sha>)
+# runs the pipeline/dashboard/prune from that container instead.
+APP_IMAGE="${APP_IMAGE:-}"
 
 echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/instance.env)"
 {
@@ -81,6 +97,14 @@ echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/i
         echo "# --- from config/instance.env ---"
         cat "${INSTANCE_ENV}"
     fi
+    # Dashboard settings edits (Slice 7): appended AFTER instance.env so the
+    # latest edit wins, but BEFORE the computed + world-open lines below, which
+    # must always win over anything this file could carry.
+    if [ -f "${APP_DIR}/config/overrides.env" ]; then
+        echo ""
+        echo "# --- from config/overrides.env (dashboard settings edits) ---"
+        cat "${APP_DIR}/config/overrides.env"
+    fi
     echo ""
     echo "# --- computed by vm_setup.sh (last assignment wins) ---"
     echo "FOREST_SENTINEL_COG_ROOT=/data/cogs"
@@ -91,11 +115,15 @@ echo "==> Writing ${APP_DIR}/.env (generated — persistent edits go in config/i
     if [ -f "${APP_DIR}/config/aoi.geojson" ]; then
         echo "AOI_PATH=config/aoi.geojson"
     fi
-    # A world-open dashboard must stay read-only: disable the AOI-upload and
-    # run-now endpoints whenever the firewall exposes the port publicly.
+    # A world-open dashboard must stay read-only: disable the AOI-upload,
+    # run-now/stop, review, context-upload, and settings-edit endpoints
+    # whenever the firewall exposes the port publicly.
     if [ "${OPEN_DASHBOARD:-0}" = "1" ]; then
         echo "FOREST_SENTINEL_AOI_UPLOADS=0"
         echo "FOREST_SENTINEL_PIPELINE_TRIGGER=0"
+        echo "FOREST_SENTINEL_REVIEWS=0"
+        echo "FOREST_SENTINEL_CONTEXT_UPLOADS=0"
+        echo "FOREST_SENTINEL_SETTINGS_EDIT=0"
     fi
 } >"${APP_DIR}/.env"
 
@@ -108,7 +136,9 @@ if [ -z "${PROJECT_ID:-}" ]; then
 fi
 
 echo "==> Starting PostgreSQL + PostGIS and applying migrations"
-uv sync
+if [ -z "${APP_IMAGE}" ]; then
+    uv sync
+fi
 # sudo: the docker-group membership granted above does not apply to the current
 # login session, so plain `docker` would fail on the first (fresh-VM) run.
 sudo docker compose up -d
@@ -117,22 +147,31 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 set -a; . "${APP_DIR}/.env"; set +a
-uv run alembic upgrade head
+if [ -n "${APP_IMAGE}" ]; then
+    echo "==> Image mode: pulling ${APP_IMAGE} (no source build on the VM)"
+    sudo docker pull "${APP_IMAGE}"
+    sudo docker run --rm --network host --env-file "${APP_DIR}/.env" \
+        "${APP_IMAGE}" alembic upgrade head
+else
+    uv run alembic upgrade head
+fi
 
 echo "==> Installing systemd units"
-sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g; s#@DASHBOARD_PORT@#${DASHBOARD_PORT}#g" \
+sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g" \
     scripts/systemd/forest-sentinel-dashboard.service \
     | sudo tee /etc/systemd/system/forest-sentinel-dashboard.service >/dev/null
 sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g; s#@PIPELINE_TIMEOUT@#${PIPELINE_TIMEOUT}#g" \
     scripts/systemd/forest-sentinel-pipeline.service \
     | sudo tee /etc/systemd/system/forest-sentinel-pipeline.service >/dev/null
-sudo cp scripts/systemd/forest-sentinel-pipeline.timer \
-    /etc/systemd/system/forest-sentinel-pipeline.timer
+sed "s#@PIPELINE_SCHEDULE@#${PIPELINE_SCHEDULE}#g" \
+    scripts/systemd/forest-sentinel-pipeline.timer \
+    | sudo tee /etc/systemd/system/forest-sentinel-pipeline.timer >/dev/null
 sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g" \
     scripts/systemd/forest-sentinel-prune.service \
     | sudo tee /etc/systemd/system/forest-sentinel-prune.service >/dev/null
-sudo cp scripts/systemd/forest-sentinel-prune.timer \
-    /etc/systemd/system/forest-sentinel-prune.timer
+sed "s#@PRUNE_SCHEDULE@#${PRUNE_SCHEDULE}#g" \
+    scripts/systemd/forest-sentinel-prune.timer \
+    | sudo tee /etc/systemd/system/forest-sentinel-prune.timer >/dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now forest-sentinel-dashboard.service
 sudo systemctl enable --now forest-sentinel-pipeline.timer

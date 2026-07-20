@@ -202,6 +202,12 @@ def update_mask(image: Any, mask: Any) -> Any:
     return image.updateMask(mask)
 
 
+def select_band(image: Any, band: str) -> Any:
+    """Select a single band (e.g. Sentinel-1 ``VV``, already log-scaled dB in
+    ``COPERNICUS/S1_GRD`` — no conversion needed)."""
+    return image.select(band)
+
+
 def normalized_difference(image: Any, bands: list[str]) -> Any:
     """``(bands[0] - bands[1]) / (bands[0] + bands[1])`` as an EE image."""
     return image.normalizedDifference(bands)
@@ -234,8 +240,13 @@ def threshold_and_vectorize(
 
     Disturbance is a drop beyond ``threshold`` (``delta < threshold``). The mask is
     polygonized with ``reduceToVectors``; each polygon is tagged with its area and the
-    collection is filtered to ``area_m2 >= min_area_m2``. Returns the GeoJSON features
-    (WGS 84 geometry + ``area_m2`` property) — plain Python the caller persists.
+    collection is filtered to ``area_m2 >= min_area_m2``. Each surviving polygon is
+    then tagged with per-polygon ΔNBR statistics (#95) — ``delta_mean``, ``delta_min``
+    (deepest drop), and ``valid_pixels`` (unmasked delta pixels at ``scale``) — reduced
+    from ``delta_image`` itself, so a forest-masked delta yields masked statistics.
+    Returns the GeoJSON features (WGS 84 geometry + properties) — plain Python the
+    caller persists; the statistics must be captured here, at extraction time, because
+    the source COG is prunable and is never read back (docs/architecture.md §7).
     """
     mask = delta_image.lt(threshold).selfMask()
     vectors = mask.reduceToVectors(
@@ -247,8 +258,15 @@ def threshold_and_vectorize(
     )
     with_area = vectors.map(_feature_with_area)
     filtered = with_area.filter(ee.Filter.gte("area_m2", min_area_m2))
+    stats_reducer = (
+        ee.Reducer.mean()
+        .combine(ee.Reducer.min(), sharedInputs=True)
+        .combine(ee.Reducer.count(), sharedInputs=True)
+        .setOutputs(["delta_mean", "delta_min", "valid_pixels"])
+    )
+    with_stats = delta_image.reduceRegions(collection=filtered, reducer=stats_reducer, scale=scale)
     try:
-        info = filtered.getInfo() or {}
+        info = with_stats.getInfo() or {}
     except ee.EEException as exc:
         raise EarthEngineError(f"candidate vectorization failed: {exc}") from exc
     features: list[dict[str, Any]] = info.get("features", [])

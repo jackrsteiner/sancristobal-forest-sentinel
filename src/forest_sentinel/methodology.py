@@ -26,9 +26,27 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from forest_sentinel.models import MethodologyVersion
+from forest_sentinel.models import MethodologyVersion, RasterLineage
 
 AUTO_VERSION_PREFIX = "auto-"
+
+# The methodology parameters that shape exported *raster content* — these hash
+# into the raster lineage the index/change rasters key on, so changing any
+# other parameter (threshold, min area, forest mask) reuses every COG
+# (config-inventory Finding 1). ``raster_script_version`` is the raster-stage
+# code pin (Finding 4): bumping the detection-stage ``ee_script_version`` for a
+# vectorization-only change leaves the lineage — and every raster — intact.
+RASTER_PARAM_KEYS = (
+    "raster_script_version",
+    "collections",
+    "collection",
+    "metric",
+    "orbit_policy",
+    "scale_m",
+    "masked_categories",
+    "baseline_window",
+)
+_RASTER_SCRIPT_KEY = "raster_script_version"
 
 
 class MethodologyVersionMismatch(ValueError):
@@ -76,10 +94,79 @@ def resolve_methodology_version(
     )
 
 
+def parameter_hash(parameters: dict[str, Any], *, length: int = 10) -> str:
+    """Deterministic content hash of a parameter dict (canonical-JSON SHA-256)."""
+    canonical = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:length]
+
+
 def auto_version(parameters: dict[str, Any]) -> str:
     """Deterministic content-derived version string for a parameter set."""
-    canonical = json.dumps(parameters, sort_keys=True, separators=(",", ":"))
-    return AUTO_VERSION_PREFIX + hashlib.sha256(canonical.encode()).hexdigest()[:10]
+    return AUTO_VERSION_PREFIX + parameter_hash(parameters)
+
+
+def raster_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
+    """The raster-lineage subset of a full methodology parameter dict.
+
+    Parameter dicts that carry only ``ee_script_version`` (minted before the
+    raster/detection split, or minimal test methodologies) let it double as the
+    raster pin, so their lineages content-match the ones fully-specified
+    parameter sets derive.
+    """
+    subset = {key: parameters[key] for key in RASTER_PARAM_KEYS if key in parameters}
+    if _RASTER_SCRIPT_KEY not in subset and "ee_script_version" in parameters:
+        subset[_RASTER_SCRIPT_KEY] = parameters["ee_script_version"]
+    return subset
+
+
+def resolve_raster_lineage(
+    session: Session, *, name: str, parameters: dict[str, Any]
+) -> RasterLineage:
+    """Content-addressed get-or-create of the raster lineage for a parameter set.
+
+    ``parameters`` is the FULL methodology dict; the lineage stores (and hashes)
+    only its raster subset. Same subset → same row, whatever the detection
+    parameters around it.
+    """
+    subset = raster_parameters(parameters)
+    version = auto_version(subset)
+    existing = session.execute(
+        select(RasterLineage)
+        .where(RasterLineage.name == name)
+        .where(RasterLineage.version == version)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    created = RasterLineage(name=name, version=version, parameters=subset)
+    session.add(created)
+    session.flush()
+    return created
+
+
+_SCRIPT_VERSION_PARAM = "ee_script_version"
+
+
+def next_display_version(session: Session, *, name: str, parameters: dict[str, Any]) -> str:
+    """The next human-facing X.Y.Z label for a new version of ``name``.
+
+    The content-addressed ``version`` remains the identity; this is an at-a-glance
+    label attached to it at mint time. Per name, in mint order: the first version
+    is ``1.0.0``; a changed ``ee_script_version`` (new band math / EE code) bumps
+    the minor version; any other parameter change bumps the patch version.
+    """
+    latest = session.execute(
+        select(MethodologyVersion)
+        .where(MethodologyVersion.name == name)
+        .where(MethodologyVersion.display_version.is_not(None))
+        .order_by(MethodologyVersion.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest is None or latest.display_version is None:
+        return "1.0.0"
+    major, minor, patch = (int(part) for part in latest.display_version.split("."))
+    if latest.parameters.get(_SCRIPT_VERSION_PARAM) != parameters.get(_SCRIPT_VERSION_PARAM):
+        return f"{major}.{minor + 1}.0"
+    return f"{major}.{minor}.{patch + 1}"
 
 
 def get_or_create_methodology_version(
@@ -110,7 +197,13 @@ def get_or_create_methodology_version(
             )
         return existing
 
-    created = MethodologyVersion(name=name, version=version, parameters=parameters)
+    created = MethodologyVersion(
+        name=name,
+        version=version,
+        display_version=next_display_version(session, name=name, parameters=parameters),
+        parameters=parameters,
+        raster_lineage_id=resolve_raster_lineage(session, name=name, parameters=parameters).id,
+    )
     session.add(created)
     session.flush()
     return created

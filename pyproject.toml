@@ -14,6 +14,8 @@ dependencies = [
     "google-cloud-storage>=2.16",
     "fastapi>=0.110",
     "uvicorn>=0.29",
+    "rasterio>=1.5.0",
+    "pyproj>=3.7.2",
 ]
 
 [project.scripts]
@@ -59,5 +61,5 @@ mypy_path = "src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["geoalchemy2.*", "shapely.*", "ee.*", "google.cloud.*"]
+module = ["geoalchemy2.*", "shapely.*", "ee.*", "google.cloud.*", "rasterio.*"]
 ignore_missing_imports = true

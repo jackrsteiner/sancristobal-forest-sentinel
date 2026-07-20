@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from forest_sentinel.events import (
     EVENT_STATUS_NEW,
     EVENT_STATUS_ONGOING,
+    EVENT_STATUS_RESOLVED,
+    apply_resolved_lifecycle,
     footprint_area_m2,
     track_events_for_aoi,
 )
@@ -17,7 +19,8 @@ from forest_sentinel.models import (
     EventObservation,
     MethodologyVersion,
 )
-from tests.fakes import make_aoi, make_candidate, make_methodology
+from forest_sentinel.qa import record_quality_mask
+from tests.fakes import make_aoi, make_candidate, make_methodology, make_observation
 
 
 def _aoi_and_methodology(session: Session) -> tuple[Aoi, MethodologyVersion]:
@@ -195,3 +198,87 @@ def test_event_geometry_unions_extending_candidates(db_session: Session) -> None
     minx, _, maxx, _ = footprint.bounds
     assert minx == 0.1
     assert maxx == 0.3
+
+
+def _seed_ongoing_event(session: Session) -> tuple[Aoi, MethodologyVersion, DisturbanceEvent]:
+    """An event observed twice (days 1 and 8), hence status ongoing."""
+    aoi, methodology = _aoi_and_methodology(session)
+    make_candidate(session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    make_candidate(session, aoi, methodology, day=8, ring=_PATCH_A_GROWN, area_m2=15_000.0)
+    track_events_for_aoi(session, aoi=aoi)
+    event = session.execute(select(DisturbanceEvent)).scalar_one()
+    assert event.status == EVENT_STATUS_ONGOING
+    return aoi, methodology, event
+
+
+def _clear_observation(session: Session, aoi: Aoi, *, day: int, fraction: float) -> None:
+    observation = make_observation(session, aoi, day=day)
+    record_quality_mask(session, observation_id=observation.id, valid_pixel_fraction=fraction)
+
+
+def test_quiet_event_with_clear_later_look_resolves(db_session: Session) -> None:
+    aoi, _, event = _seed_ongoing_event(db_session)
+    _clear_observation(db_session, aoi, day=20, fraction=0.9)
+
+    resolved = apply_resolved_lifecycle(db_session, aoi=aoi, now=datetime(2026, 5, 1, tzinfo=UTC))
+
+    assert resolved == 1
+    assert event.status == EVENT_STATUS_RESOLVED
+
+
+def test_cloudy_gap_alone_does_not_resolve(db_session: Session) -> None:
+    # A later look exists but is mostly cloud: absence of detection is not
+    # evidence of absence, so the event stays ongoing.
+    aoi, _, event = _seed_ongoing_event(db_session)
+    _clear_observation(db_session, aoi, day=20, fraction=0.2)
+
+    resolved = apply_resolved_lifecycle(db_session, aoi=aoi, now=datetime(2026, 5, 1, tzinfo=UTC))
+
+    assert resolved == 0
+    assert event.status == EVENT_STATUS_ONGOING
+
+
+def test_no_later_observation_does_not_resolve(db_session: Session) -> None:
+    aoi, _, event = _seed_ongoing_event(db_session)
+
+    resolved = apply_resolved_lifecycle(db_session, aoi=aoi, now=datetime(2026, 5, 1, tzinfo=UTC))
+
+    assert resolved == 0
+    assert event.status == EVENT_STATUS_ONGOING
+
+
+def test_recent_event_is_not_resolved(db_session: Session) -> None:
+    aoi, _, event = _seed_ongoing_event(db_session)
+    _clear_observation(db_session, aoi, day=20, fraction=0.9)
+
+    # Only ~13 days after the last detection: well inside the window.
+    resolved = apply_resolved_lifecycle(db_session, aoi=aoi, now=datetime(2026, 1, 21, tzinfo=UTC))
+
+    assert resolved == 0
+    assert event.status == EVENT_STATUS_ONGOING
+
+
+def test_single_look_new_events_never_auto_resolve(db_session: Session) -> None:
+    aoi, methodology = _aoi_and_methodology(db_session)
+    make_candidate(db_session, aoi, methodology, day=1, ring=_PATCH_A, area_m2=10_000.0)
+    track_events_for_aoi(db_session, aoi=aoi)
+    _clear_observation(db_session, aoi, day=20, fraction=0.9)
+
+    resolved = apply_resolved_lifecycle(db_session, aoi=aoi, now=datetime(2026, 5, 1, tzinfo=UTC))
+
+    assert resolved == 0
+    event = db_session.execute(select(DisturbanceEvent)).scalar_one()
+    assert event.status == EVENT_STATUS_NEW
+
+
+def test_redetection_reopens_a_resolved_event(db_session: Session) -> None:
+    aoi, methodology, event = _seed_ongoing_event(db_session)
+    _clear_observation(db_session, aoi, day=20, fraction=0.9)
+    apply_resolved_lifecycle(db_session, aoi=aoi, now=datetime(2026, 5, 1, tzinfo=UTC))
+    assert event.status == EVENT_STATUS_RESOLVED
+
+    # A new overlapping candidate extends the event, which flips it back.
+    make_candidate(db_session, aoi, methodology, day=25, ring=_PATCH_A, area_m2=9_000.0)
+    track_events_for_aoi(db_session, aoi=aoi)
+
+    assert event.status == EVENT_STATUS_ONGOING

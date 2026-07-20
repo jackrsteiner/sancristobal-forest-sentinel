@@ -26,6 +26,53 @@
       .event.selected { border-color: #c0392b; }
       .status-new { color: #2980b9; }
       .status-ongoing { color: #c0392b; }
+      .status-resolved { color: #7f8c8d; }
+      /* Manual-review opinions: outlined badges, visually distinct from the
+         filled-text automatic status so machine truth and human judgment never
+         blend. */
+      .opinion {
+        border: 1px solid currentColor; border-radius: 3px; padding: 0 4px;
+        font-size: 11px; margin-left: 4px;
+      }
+      .opinion-confirmed { color: #27ae60; }
+      .opinion-false_positive { color: #c0392b; }
+      .opinion-uncertain { color: #e67e22; }
+      .opinion-resolved { color: #7f8c8d; }
+      /* Confidence level: filled pill, third visual axis beside status + opinion. */
+      .conf {
+        border-radius: 3px; padding: 0 5px; font-size: 11px; margin-left: 4px; color: #fff;
+      }
+      .conf-high { background: #27ae60; }
+      .conf-medium { background: #e67e22; }
+      .conf-low { background: #95a5a6; }
+      /* Detection basis (E16/#119): which sensor kind(s) saw it — fourth
+         visual axis, filled like confidence but in sensor hues. */
+      .basis {
+        border-radius: 3px; padding: 0 5px; font-size: 11px; margin-left: 4px; color: #fff;
+      }
+      .basis-optical-only { background: #3498db; }
+      .basis-radar-only { background: #8e44ad; }
+      .basis-both { background: #16a085; }
+      /* Context layers (E17/#127): overlay toggles + guarded upload. */
+      .context-item { display: block; font-size: 12px; margin: 3px 0; cursor: pointer; }
+      .context-swatch {
+        display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+        margin: 0 4px 0 2px; vertical-align: baseline;
+      }
+      #add-context input, #add-context select { margin: 2px 0; font-size: 12px; }
+      body.context-uploads-disabled #add-context { display: none; }
+      .conf-explain { font-size: 12px; color: #555; margin: 2px 0 2px 12px; }
+      .conf-history { font-size: 12px; color: #888; margin: 2px 0 2px 12px; }
+      #event-filters { margin: 8px 0 2px; font-size: 12px; }
+      #event-filters select { font-size: 12px; padding: 2px; }
+      .review-form { margin-top: 6px; }
+      .review-form button { font-size: 11px; padding: 2px 6px; margin: 2px 4px 2px 0; }
+      .review-form input { font-size: 12px; width: 100%; margin-top: 4px; padding: 3px; }
+      .review-entry { font-size: 12px; color: #555; margin: 2px 0; }
+      body.reviews-disabled .review-form { display: none; }
+      body.settings-edit-disabled .setting-edit { display: none; }
+      .setting { margin: 6px 0; }
+      .setting-edit input, .setting-edit select { width: 110px; }
       .timeline { font-size: 13px; margin: 6px 0; }
       .evidence { font-size: 12px; color: #555; }
       .muted { color: #888; }
@@ -64,10 +111,76 @@
       <div id="summary" class="muted"></div>
       <div id="pipeline-controls">
         <button id="run-now">Run pipeline now</button>
+        <button id="stop-run">Stop run</button>
         <span id="run-now-status" class="muted"></span>
       </div>
       <div id="runs"></div>
+      <div id="event-filters" class="muted">
+        status
+        <select id="filter-status">
+          <option value="">all</option>
+          <option value="new">new</option>
+          <option value="ongoing">ongoing</option>
+          <option value="resolved">resolved</option>
+        </select>
+        opinion
+        <select id="filter-opinion">
+          <option value="">all</option>
+          <option value="unreviewed">unreviewed</option>
+          <option value="confirmed">confirmed</option>
+          <option value="false_positive">false positive</option>
+          <option value="uncertain">uncertain</option>
+          <option value="resolved">resolved</option>
+        </select>
+        confidence
+        <select id="filter-confidence">
+          <option value="">all</option>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+          <option value="unassessed">unassessed</option>
+        </select>
+        basis
+        <select id="filter-basis">
+          <option value="">all</option>
+          <option value="optical-only">optical</option>
+          <option value="radar-only">radar</option>
+          <option value="both">optical+radar</option>
+        </select>
+      </div>
       <div id="events"></div>
+      <div id="context-layers">
+        <h2>Context layers</h2>
+        <div id="context-layer-list" class="muted"></div>
+        <div id="add-context">
+          <select id="context-kind">
+            <option value="concession">concession</option>
+            <option value="protected_area">protected area</option>
+            <option value="road">road</option>
+            <option value="river">river</option>
+            <option value="settlement">settlement</option>
+            <option value="mill">mill</option>
+            <option value="port">port</option>
+            <option value="other">other</option>
+          </select>
+          <input type="text" id="context-name" placeholder="layer name" />
+          <input type="file" id="context-file" accept=".geojson,.json" />
+          <button id="context-upload">Upload layer</button>
+          <div id="context-upload-status" class="muted"></div>
+        </div>
+      </div>
+      <div id="methodologies">
+        <h2>Methodologies</h2>
+        <div id="methodology-list"></div>
+      </div>
+      <div id="settings-panel">
+        <h2>Settings</h2>
+        <div class="muted">
+          Live values as the next run will resolve them. Changes are recorded without a
+          user identity (tunnel-as-auth).
+        </div>
+        <div id="settings-list" class="muted">Loading…</div>
+      </div>
       <div id="add-aoi">
         <h2>Add AOI</h2>
         <input type="file" id="aoi-file" accept=".geojson,.json" />
@@ -92,6 +205,7 @@
       const layersById = {};
       const aoiBboxById = {};
       let currentAoiId = null;
+      let currentCollection = null;
       // A "running" run whose last progress event is older than this is likely dead
       // (SIGKILL / systemd timeout before the next run flips it to "interrupted").
       const STALE_RUN_MS = 2 * 60 * 60 * 1000;
@@ -132,27 +246,68 @@
         currentAoiId = aoiId;
         zoomToAoi(aoiId);
         loadRuns(aoiId);
-        const collection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
-        if (eventsLayer) map.removeLayer(eventsLayer);
-        // Drop layer references from the previous AOI so clicks can't zoom to
-        // layers that are no longer on the map.
-        Object.keys(layersById).forEach((id) => delete layersById[id]);
-        eventsLayer = L.geoJSON(collection, {
-          style: (f) => ({
-            color: f.properties.status === "ongoing" ? "#c0392b" : "#2980b9",
-            weight: 2,
-          }),
-          onEachFeature: (feature, layer) => {
-            layersById[feature.properties.id] = layer;
-            layer.on("click", () => showEvent(feature.properties.id));
-          },
-        }).addTo(map);
-
-        const features = collection.features;
-        document.getElementById("summary").textContent = `${features.length} disturbance events`;
-        renderEventList(features);
+        currentCollection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
+        renderEvents();
         // The map frames the whole AOI (zoomToAoi above); clicking an event in
         // the list or on the map still zooms to that event.
+      }
+
+      // The automatic status and the manual opinion are independent axes; both
+      // filters apply together (AND) so either or both can narrow the view.
+      function featurePassesFilters(p) {
+        const status = document.getElementById("filter-status").value;
+        const opinion = document.getElementById("filter-opinion").value;
+        const confidence = document.getElementById("filter-confidence").value;
+        if (status && p.status !== status) return false;
+        if (opinion === "unreviewed") {
+          if (p.latest_opinion != null) return false;
+        } else if (opinion && p.latest_opinion !== opinion) {
+          return false;
+        }
+        if (confidence === "unassessed") {
+          if (p.confidence_level != null) return false;
+        } else if (confidence && p.confidence_level !== confidence) {
+          return false;
+        }
+        const basis = document.getElementById("filter-basis").value;
+        if (basis && p.basis !== basis) return false;
+        return true;
+      }
+
+      const STATUS_COLORS = { ongoing: "#c0392b", new: "#2980b9", resolved: "#7f8c8d" };
+
+      function renderEvents() {
+        const all = currentCollection ? currentCollection.features : [];
+        const features = all.filter((f) => featurePassesFilters(f.properties));
+        if (eventsLayer) map.removeLayer(eventsLayer);
+        // Drop layer references from the previous render so clicks can't zoom
+        // to layers that are no longer on the map.
+        Object.keys(layersById).forEach((id) => delete layersById[id]);
+        // Stroke encodes the automatic status; fill opacity encodes confidence
+        // (stronger evidence reads more solid on the map).
+        const CONF_OPACITY = { high: 0.45, medium: 0.25, low: 0.1 };
+        eventsLayer = L.geoJSON(
+          { type: "FeatureCollection", features },
+          {
+            style: (f) => ({
+              color: STATUS_COLORS[f.properties.status] || "#2980b9",
+              weight: 2,
+              fillOpacity: CONF_OPACITY[f.properties.confidence_level] ?? 0.2,
+            }),
+            onEachFeature: (feature, layer) => {
+              layersById[feature.properties.id] = layer;
+              // Attribution at a glance (#119): the popup carries the same
+              // status / basis badges as the card. Server-enumerated values
+              // only — no free text — so innerHTML is safe here.
+              layer.bindPopup(popupHtml(feature.properties));
+              layer.on("click", () => showEvent(feature.properties.id));
+            },
+          },
+        ).addTo(map);
+        const filtered = features.length !== all.length ? ` (of ${all.length})` : "";
+        document.getElementById("summary").textContent =
+          `${features.length}${filtered} disturbance events`;
+        renderEventList(features);
       }
 
       function runStatusLabel(run) {
@@ -216,6 +371,28 @@
 
       // The run's non-data inputs: methodology identity, expandable to the full
       // parameter set (threshold, min area, baseline window, EE script version…).
+      // At a glance only the semantic label shows (name vX.Y.Z); the expanded
+      // block carries the content-addressed version hash — the real identity —
+      // and the full parameter set.
+      function methodologyLabel(m) {
+        return m.display_version ? `${m.name} v${m.display_version}` : `${m.name} @ ${m.version}`;
+      }
+
+      function methodologyBody(container, m) {
+        if (m.display_version) {
+          const identity = document.createElement("div");
+          identity.className = "param muted";
+          identity.textContent = `version: ${m.version}`;
+          container.appendChild(identity);
+        }
+        Object.entries(m.parameters || {}).forEach(([key, value]) => {
+          const line = document.createElement("div");
+          line.className = "param";
+          line.textContent = `${key}: ${JSON.stringify(value)}`;
+          container.appendChild(line);
+        });
+      }
+
       function methodologySection(runId, m) {
         const meth = document.createElement("details");
         meth.className = "methodology";
@@ -224,15 +401,34 @@
           methodologyOpen[runId] = meth.open;
         });
         const summary = document.createElement("summary");
-        summary.textContent = `methodology ${m.name} @ ${m.version}`;
+        summary.textContent = `methodology ${methodologyLabel(m)}`;
         meth.appendChild(summary);
-        Object.entries(m.parameters || {}).forEach(([key, value]) => {
-          const line = document.createElement("div");
-          line.className = "param";
-          line.textContent = `${key}: ${JSON.stringify(value)}`;
-          meth.appendChild(line);
-        });
+        methodologyBody(meth, m);
         return meth;
+      }
+
+      // The provenance review list: every methodology version ever minted, its
+      // full inputs, and how much work ran under it.
+      async function loadMethodologies() {
+        const versions = await (await fetch("/api/methodologies")).json();
+        const container = document.getElementById("methodology-list");
+        container.innerHTML = "";
+        versions.forEach((m) => {
+          const entry = document.createElement("details");
+          entry.className = "methodology";
+          const summary = document.createElement("summary");
+          summary.textContent =
+            `${methodologyLabel(m)} · ${m.run_count} run${m.run_count === 1 ? "" : "s"}`;
+          entry.appendChild(summary);
+          const dates = document.createElement("div");
+          dates.className = "param muted";
+          dates.textContent =
+            `created ${fmtDate(m.created_at)}` +
+            (m.last_run_at ? ` · last run ${fmtDate(m.last_run_at)}` : "");
+          entry.appendChild(dates);
+          methodologyBody(entry, m);
+          container.appendChild(entry);
+        });
       }
 
       function progressSection(progress) {
@@ -339,6 +535,47 @@
           container.appendChild(line);
         });
         runsRenderKey = renderKey;
+        // A new run may have minted a new methodology version — keep the review
+        // list's entries and run counts in step with the runs panel.
+        loadMethodologies();
+      }
+
+      function opinionLabel(opinion) {
+        return opinion === "false_positive" ? "false positive" : opinion;
+      }
+
+      function basisLabel(basis) {
+        return (
+          { "optical-only": "optical", "radar-only": "radar", both: "optical+radar" }[basis] ||
+          basis
+        );
+      }
+
+      function basisBadge(basis) {
+        const badge = document.createElement("span");
+        badge.className = `basis basis-${basis}`;
+        badge.textContent = basisLabel(basis);
+        return badge;
+      }
+
+      function popupHtml(p) {
+        const conf = p.confidence_level
+          ? ` <span class="conf conf-${p.confidence_level}">${p.confidence_level}</span>`
+          : "";
+        const basis = p.basis
+          ? ` <span class="basis basis-${p.basis}">${basisLabel(p.basis)}</span>`
+          : "";
+        return (
+          `<strong>Event #${p.id}</strong> ` +
+          `<span class="status-${p.status}">${p.status}</span>${conf}${basis}`
+        );
+      }
+
+      function opinionBadge(opinion) {
+        const badge = document.createElement("span");
+        badge.className = `opinion opinion-${opinion}`;
+        badge.textContent = opinionLabel(opinion);
+        return badge;
       }
 
       function renderEventList(features) {
@@ -349,14 +586,327 @@
           const div = document.createElement("div");
           div.className = "event";
           div.id = `event-${p.id}`;
+          const coverage =
+            p.latest_valid_fraction != null
+              ? ` · latest ${fmtPct(p.latest_valid_fraction)} clear`
+              : "";
           div.innerHTML =
             `<strong>Event #${p.id}</strong> ` +
             `<span class="status-${p.status}">${p.status}</span>` +
             `<div class="muted">first detected ${fmtDate(p.first_detected_at)} · ` +
-            `footprint ${fmtArea(p.footprint_area_m2)} · ${p.observation_count} obs</div>`;
+            `footprint ${fmtArea(p.footprint_area_m2)} · ${p.observation_count} obs${coverage}</div>`;
+          // The human opinion sits beside — never replaces — the automatic status.
+          if (p.latest_opinion) {
+            div.querySelector("strong").after(document.createTextNode(" "));
+            div.children[1].after(opinionBadge(p.latest_opinion));
+          }
+          if (p.confidence_level) {
+            const conf = document.createElement("span");
+            conf.className = `conf conf-${p.confidence_level}`;
+            conf.textContent = p.confidence_level;
+            conf.title = p.confidence_score != null ? `score ${p.confidence_score}` : "";
+            div.querySelector(".muted").before(conf);
+          }
+          // Detection basis (#119): optical / radar / optical+radar, from the
+          // agreement classification. Absent until the first fused assessment.
+          if (p.basis) div.querySelector(".muted").before(basisBadge(p.basis));
           div.onclick = () => showEvent(p.id);
           container.appendChild(div);
         });
+      }
+
+      // Context layers (E17/#127): muted overlays per kind, off by default.
+      const KIND_COLORS = {
+        concession: "#b8860b",
+        protected_area: "#2e8b57",
+        road: "#8b4513",
+        river: "#4682b4",
+        settlement: "#708090",
+        mill: "#a0522d",
+        port: "#5f9ea0",
+        other: "#7f8c8d",
+      };
+      const contextOverlays = {}; // layer id -> Leaflet layer while toggled on
+
+      async function loadContextLayers() {
+        let layers;
+        try {
+          layers = await (await fetch("/api/context/layers")).json();
+        } catch (e) {
+          return;
+        }
+        const container = document.getElementById("context-layer-list");
+        container.innerHTML = "";
+        if (!layers.length) {
+          container.textContent = "none loaded";
+          return;
+        }
+        layers.forEach((layer) => {
+          const label = document.createElement("label");
+          label.className = "context-item";
+          const box = document.createElement("input");
+          box.type = "checkbox";
+          box.checked = Boolean(contextOverlays[layer.id]);
+          box.onchange = () => toggleContextLayer(layer, box.checked);
+          label.appendChild(box);
+          const swatch = document.createElement("span");
+          swatch.className = "context-swatch";
+          swatch.style.background = KIND_COLORS[layer.kind] || KIND_COLORS.other;
+          label.appendChild(swatch);
+          // Names are operator data — text nodes only, never HTML.
+          label.appendChild(
+            document.createTextNode(
+              `${layer.name} (${layer.kind.replace("_", " ")}, ${layer.feature_count})`,
+            ),
+          );
+          container.appendChild(label);
+        });
+      }
+
+      async function toggleContextLayer(layer, on) {
+        if (!on) {
+          if (contextOverlays[layer.id]) {
+            map.removeLayer(contextOverlays[layer.id]);
+            delete contextOverlays[layer.id];
+          }
+          return;
+        }
+        const collection = await (
+          await fetch(`/api/context/layers/${layer.id}/features`)
+        ).json();
+        const color = KIND_COLORS[layer.kind] || KIND_COLORS.other;
+        contextOverlays[layer.id] = L.geoJSON(collection, {
+          style: () => ({ color, weight: 1.5, dashArray: "4 3", fillOpacity: 0.06 }),
+          pointToLayer: (f, latlng) =>
+            L.circleMarker(latlng, { radius: 4, color, fillOpacity: 0.6 }),
+        }).addTo(map);
+      }
+
+      async function uploadContextLayer() {
+        const status = document.getElementById("context-upload-status");
+        status.className = "muted";
+        const file = document.getElementById("context-file").files[0];
+        const name = document.getElementById("context-name").value.trim();
+        if (!file || !name) {
+          status.textContent = "Choose a .geojson file and a layer name first.";
+          return;
+        }
+        let document_;
+        try {
+          document_ = JSON.parse(await file.text());
+        } catch (e) {
+          status.className = "muted upload-error";
+          status.textContent = "Not valid JSON.";
+          return;
+        }
+        status.textContent = "Uploading…";
+        const response = await fetch("/api/context/layers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name,
+            kind: document.getElementById("context-kind").value,
+            document: document_,
+          }),
+        });
+        const body = await response.json();
+        if (!response.ok) {
+          status.className = "muted upload-error";
+          status.textContent = body.detail || `Upload failed (${response.status}).`;
+          return;
+        }
+        status.textContent =
+          `Loaded "${body.name}" (${body.feature_count} features) — event relations ` +
+          `refresh on the next pipeline run; commit ${body.file} to keep it.`;
+        document.getElementById("context-file").value = "";
+        document.getElementById("context-name").value = "";
+        await loadContextLayers();
+      }
+
+      // How the event relates to the loaded layers — recomputed per run, so
+      // this is display only. Feature names are operator data: text nodes only.
+      function contextSection(detail) {
+        const wrap = document.createElement("div");
+        const heading = document.createElement("div");
+        heading.className = "timeline";
+        heading.innerHTML = "<em>Context:</em>";
+        wrap.appendChild(heading);
+        if (!detail.context.length) {
+          const none = document.createElement("div");
+          none.className = "conf-explain muted";
+          none.textContent = "no context relations (load layers, then run the pipeline)";
+          wrap.appendChild(none);
+          return wrap;
+        }
+        detail.context.forEach((rel) => {
+          const line = document.createElement("div");
+          line.className = "conf-explain";
+          const target = `${rel.kind.replace("_", " ")} ${rel.name || rel.layer}`;
+          line.textContent =
+            rel.relation === "contains"
+              ? `inside ${target}`
+              : rel.relation === "intersects"
+                ? `overlaps ${target}`
+                : `${fmtDistance(rel.distance_m)} from ${target}`;
+          wrap.appendChild(line);
+        });
+        return wrap;
+      }
+
+      // Sensor attribution (#119, README questions 7-8): which method produced
+      // the detection and whether the other lineage agrees — display only,
+      // read from the lineage's methodology and the recorded assessment inputs.
+      function detectionSection(detail) {
+        const wrap = document.createElement("div");
+        const heading = document.createElement("div");
+        heading.className = "timeline";
+        heading.innerHTML = "<em>Detection:</em>";
+        wrap.appendChild(heading);
+        const line = document.createElement("div");
+        line.className = "conf-explain";
+        if (detail.basis) {
+          line.appendChild(basisBadge(detail.basis));
+          line.appendChild(document.createTextNode(" "));
+        }
+        const method = detail.methodology
+          ? `method ${detail.methodology.name} v${detail.methodology.display_version}`
+          : "method unknown";
+        line.appendChild(
+          document.createTextNode(detail.basis ? method : `basis not yet assessed · ${method}`),
+        );
+        wrap.appendChild(line);
+        const factors = detail.confidence.length
+          ? detail.confidence[0].inputs.factors || {}
+          : {};
+        const agreement = factors.agreement || {};
+        if (detail.basis === "both" && (agreement.matching_candidate_ids || []).length) {
+          const ids = agreement.matching_candidate_ids.map((id) => `#${id}`).join(", ");
+          const agree = document.createElement("div");
+          agree.className = "conf-explain";
+          agree.textContent =
+            `agreeing ${agreement.other_kind || "other-lineage"} candidates: ${ids} ` +
+            `(within ±${agreement.window_days} days)`;
+          wrap.appendChild(agree);
+        }
+        return wrap;
+      }
+
+      // The explained "why" of the latest assessment: rendered entirely from
+      // the recorded inputs — nothing is recomputed client-side.
+      function confidenceSection(detail) {
+        const wrap = document.createElement("div");
+        const heading = document.createElement("div");
+        heading.className = "timeline";
+        heading.innerHTML = "<em>Confidence:</em>";
+        wrap.appendChild(heading);
+        if (!detail.confidence.length) {
+          const none = document.createElement("div");
+          none.className = "conf-explain muted";
+          none.textContent = "not yet assessed (runs after the next pipeline run)";
+          wrap.appendChild(none);
+          return wrap;
+        }
+        const latest = detail.confidence[0];
+        const summary = document.createElement("div");
+        summary.className = "conf-explain";
+        const badge = document.createElement("span");
+        badge.className = `conf conf-${latest.level}`;
+        badge.textContent = latest.level;
+        summary.appendChild(badge);
+        summary.appendChild(
+          document.createTextNode(
+            ` score ${latest.score} · rule ${latest.rule_version} · ${fmtDate(latest.created_at)}`,
+          ),
+        );
+        wrap.appendChild(summary);
+        const weights = latest.inputs.weights || {};
+        const subscores = latest.inputs.subscores || {};
+        const factors = latest.inputs.factors || {};
+        Object.keys(weights).forEach((name) => {
+          const line = document.createElement("div");
+          line.className = "conf-explain";
+          const subscore = subscores[name];
+          const raw = Object.entries(factors[name] || {})
+            .filter(([, value]) => value != null)
+            .map(([key, value]) => `${key} ${value}`)
+            .join(", ");
+          line.textContent =
+            subscore == null
+              ? `${name}: unavailable (weight redistributed)`
+              : `${name}: ${subscore.toFixed(2)} × weight ${weights[name]}` +
+                (raw ? ` (${raw})` : "");
+          wrap.appendChild(line);
+        });
+        detail.confidence.slice(1).forEach((entry) => {
+          const line = document.createElement("div");
+          line.className = "conf-history";
+          line.textContent =
+            `${fmtDate(entry.created_at)}: ${entry.level} (${entry.score}, ${entry.rule_version})`;
+          wrap.appendChild(line);
+        });
+        return wrap;
+      }
+
+      // Review section built with DOM APIs: notes/reviewer are free text from
+      // humans and must never be injected as HTML.
+      function reviewSection(detail) {
+        const wrap = document.createElement("div");
+        // Buttons and inputs live inside the card, whose click handler reloads
+        // the detail — don't let form interaction re-trigger it.
+        wrap.addEventListener("click", (e) => e.stopPropagation());
+        const heading = document.createElement("div");
+        heading.className = "timeline";
+        heading.innerHTML = "<em>Review:</em>";
+        wrap.appendChild(heading);
+
+        detail.reviews.forEach((review) => {
+          const entry = document.createElement("div");
+          entry.className = "review-entry";
+          entry.appendChild(document.createTextNode(`${fmtDate(review.created_at)} `));
+          entry.appendChild(opinionBadge(review.opinion));
+          const tail = [review.reviewer, review.notes].filter(Boolean).join(" — ");
+          if (tail) entry.appendChild(document.createTextNode(` ${tail}`));
+          wrap.appendChild(entry);
+        });
+        if (!detail.reviews.length) {
+          const none = document.createElement("div");
+          none.className = "review-entry muted";
+          none.textContent = "not yet reviewed";
+          wrap.appendChild(none);
+        }
+
+        const form = document.createElement("div");
+        form.className = "review-form";
+        const notes = document.createElement("input");
+        notes.placeholder = "notes (optional)";
+        const reviewer = document.createElement("input");
+        reviewer.placeholder = "your name (optional)";
+        ["confirmed", "false_positive", "uncertain", "resolved"].forEach((opinion) => {
+          const button = document.createElement("button");
+          button.textContent = opinionLabel(opinion);
+          button.onclick = () => postReview(detail.id, opinion, notes.value, reviewer.value);
+          form.appendChild(button);
+        });
+        form.appendChild(notes);
+        form.appendChild(reviewer);
+        wrap.appendChild(form);
+        return wrap;
+      }
+
+      async function postReview(eventId, opinion, notes, reviewer) {
+        const response = await fetch(`/api/events/${eventId}/reviews`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ opinion, notes: notes || null, reviewer: reviewer || null }),
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          window.alert(body.detail || `Review failed (${response.status}).`);
+          return;
+        }
+        // Refresh the list (badge + filters see the new opinion), then reopen.
+        await loadEvents(currentAoiId);
+        showEvent(eventId);
       }
 
       async function showEvent(eventId) {
@@ -373,11 +923,19 @@
             (m) =>
               `<div class="timeline">${fmtDate(m.observed_at)}: detected ${fmtArea(m.area_m2)}` +
               (m.growth_m2 != null ? ` (footprint +${fmtArea(m.growth_m2)})` : "") +
+              // Quality metadata (#95/E14): how clear the look was and how deep
+              // the drop — distinguishes strong evidence from obscured scenes.
+              `<span class="muted">${qualityNote(m)}</span>` +
               `</div>`,
           )
           .join("");
         const evidence = detail.evidence
-          .map((e) => `<div class="evidence">${e.change_type}: ${e.cog_path}</div>`)
+          .map(
+            (e) =>
+              `<div class="evidence">${e.change_type}` +
+              (e.valid_pixel_fraction != null ? ` (${fmtPct(e.valid_pixel_fraction)} clear)` : "") +
+              `: ${e.cog_path}</div>`,
+          )
           .join("");
         const card2 = document.getElementById(`event-${eventId}`);
         if (card2) {
@@ -387,6 +945,10 @@
           detailDiv.innerHTML =
             `<div class="timeline"><em>Timeline (expansion):</em></div>${rows}` +
             `<div class="timeline"><em>Evidence:</em></div>${evidence}`;
+          detailDiv.prepend(detectionSection(detail));
+          detailDiv.appendChild(contextSection(detail));
+          detailDiv.appendChild(confidenceSection(detail));
+          detailDiv.appendChild(reviewSection(detail));
           card2.appendChild(detailDiv);
         }
       }
@@ -399,6 +961,20 @@
       }
       function fmtTime(iso) {
         return iso ? iso.slice(11, 16) : "—";
+      }
+      function fmtPct(fraction) {
+        return `${Math.round(fraction * 100)}%`;
+      }
+      function fmtDistance(meters) {
+        if (meters == null) return "—";
+        return meters >= 1000 ? `${(meters / 1000).toFixed(1)} km` : `${Math.round(meters)} m`;
+      }
+      function qualityNote(m) {
+        const parts = [];
+        if (m.valid_pixel_fraction != null) parts.push(`${fmtPct(m.valid_pixel_fraction)} clear`);
+        if (m.delta_min != null) parts.push(`ΔNBR min ${m.delta_min.toFixed(2)}`);
+        if (m.delta_mean != null) parts.push(`mean ${m.delta_mean.toFixed(2)}`);
+        return parts.length ? ` · ${parts.join(" · ")}` : "";
       }
       function fmtArea(m2) {
         return m2 == null ? "—" : `${(m2 / 10000).toFixed(2)} ha`;
@@ -470,8 +1046,195 @@
         }
       }
 
+      async function stopPipelineRun() {
+        // A stop, not an undo: committed checkpoints are kept and reused, and
+        // the daily timer still fires the next scheduled run.
+        const confirmed = window.confirm(
+          "Stop the current pipeline run?\n\n" +
+            "Completed batches are kept and reused by the next run; " +
+            "the daily schedule still runs as normal.",
+        );
+        if (!confirmed) return;
+        const button = document.getElementById("stop-run");
+        const status = document.getElementById("run-now-status");
+        status.className = "muted";
+        status.textContent = "Stopping…";
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/pipeline/stop", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const body = await response.json();
+          if (!response.ok) {
+            status.className = "muted upload-error";
+            status.textContent = body.detail || `Failed (${response.status}).`;
+            return;
+          }
+          status.textContent =
+            body.stopped_runs > 0
+              ? `Stopped — ${body.stopped_runs} run${body.stopped_runs === 1 ? "" : "s"} marked interrupted.`
+              : "Stopped — no run was executing.";
+          // The interrupted stamp is synchronous; refresh sooner than the poll.
+          setTimeout(() => currentAoiId != null && loadRuns(currentAoiId), 1000);
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      // The live settings catalogue (Slice 7 bead 7.1): the four config-inventory
+      // categories, each value's resolved state, and the implications of changing
+      // it. Values are operator data — built with DOM APIs, never innerHTML.
+      const SETTINGS_CATEGORY_LABELS = {
+        instance: "Instance",
+        "pipeline-tuning": "Pipeline tuning",
+        methodology: "Methodology",
+        lifecycle: "Lifecycle & interpretation",
+      };
+      async function loadSettings() {
+        const container = document.getElementById("settings-list");
+        let data;
+        try {
+          data = await (await fetch("/api/settings")).json();
+        } catch (e) {
+          container.textContent = "Settings unavailable.";
+          return;
+        }
+        container.innerHTML = "";
+        container.className = "";
+        data.categories.forEach((category) => {
+          const entries = data.settings.filter((s) => s.category === category);
+          if (!entries.length) return;
+          const section = document.createElement("details");
+          section.className = "settings-category";
+          const summary = document.createElement("summary");
+          summary.textContent = SETTINGS_CATEGORY_LABELS[category] || category;
+          section.appendChild(summary);
+          entries.forEach((setting) => section.appendChild(settingRow(setting)));
+          container.appendChild(section);
+        });
+      }
+
+      function settingRow(setting) {
+        const row = document.createElement("div");
+        row.className = "setting";
+        const head = document.createElement("div");
+        const name = document.createElement("code");
+        name.textContent = setting.key;
+        head.appendChild(name);
+        const value = document.createElement("span");
+        value.className = "setting-value";
+        value.textContent =
+          setting.resolved == null ? "(unset)" : ` ${setting.resolved}`;
+        head.appendChild(value);
+        const source = document.createElement("span");
+        source.className = "muted";
+        source.textContent =
+          ` · ${setting.source}` +
+          (setting.editability === "display-only" ? " · read-only" : "");
+        head.appendChild(source);
+        row.appendChild(head);
+        const purpose = document.createElement("div");
+        purpose.className = "param muted";
+        purpose.textContent = setting.purpose;
+        row.appendChild(purpose);
+        const implications = document.createElement("div");
+        implications.className = "param muted";
+        implications.textContent = setting.implications;
+        row.appendChild(implications);
+        if (setting.recorded !== undefined && setting.recorded !== null) {
+          const recorded = document.createElement("div");
+          recorded.className = "param muted";
+          recorded.textContent = `current methodology recorded: ${setting.recorded}`;
+          row.appendChild(recorded);
+        }
+        if (setting.editability !== "display-only") {
+          row.appendChild(settingEditor(setting));
+        }
+        return row;
+      }
+
+      // Bead 7.2: the edit affordance — hidden entirely when the settings-edit
+      // capability is off (world-open dashboard); the API guard is the backstop.
+      function settingEditor(setting) {
+        const form = document.createElement("div");
+        form.className = "setting-edit";
+        let input;
+        if (setting.choices && setting.choices.length) {
+          input = document.createElement("select");
+          setting.choices.forEach((choice) => {
+            const option = document.createElement("option");
+            option.value = choice;
+            option.textContent = choice;
+            if (choice === setting.resolved) option.selected = true;
+            input.appendChild(option);
+          });
+        } else {
+          input = document.createElement("input");
+          input.type = "text";
+          input.value = setting.resolved == null ? "" : setting.resolved;
+        }
+        const save = document.createElement("button");
+        save.textContent = "Save";
+        const status = document.createElement("span");
+        status.className = "muted";
+        save.addEventListener("click", async () => {
+          const payload = { key: setting.key, value: input.value };
+          if (setting.editability === "guarded") {
+            // The consequence copy is the contract: agreeing here sends the
+            // explicit confirmation flag the API requires.
+            if (!window.confirm(`${setting.key}: ${setting.implications}\n\nProceed?`)) {
+              return;
+            }
+            payload.confirm_methodology_change = true;
+          }
+          save.disabled = true;
+          status.textContent = "Saving…";
+          try {
+            const response = await fetch("/api/settings", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              status.textContent = body.detail || `Failed (${response.status}).`;
+              return;
+            }
+            status.textContent = `Saved (was ${body.old ?? "unset"}) — ${body.detail}`;
+          } catch (e) {
+            status.textContent = "Failed to save.";
+          } finally {
+            save.disabled = false;
+          }
+        });
+        form.appendChild(input);
+        form.appendChild(save);
+        form.appendChild(status);
+        return form;
+      }
+
+      // Reviews are disabled on a world-open dashboard; hide the form entirely.
+      async function loadCapabilities() {
+        try {
+          const caps = await (await fetch("/api/capabilities")).json();
+          document.body.classList.toggle("reviews-disabled", !caps.reviews);
+          document.body.classList.toggle("context-uploads-disabled", !caps.context_uploads);
+          document.body.classList.toggle("settings-edit-disabled", !caps.settings_edit);
+        } catch (e) {
+          /* leave the default (enabled) — the API guard is the backstop */
+        }
+      }
+
       document.getElementById("run-now").addEventListener("click", runPipelineNow);
+      document.getElementById("stop-run").addEventListener("click", stopPipelineRun);
+      document.getElementById("filter-status").addEventListener("change", renderEvents);
+      document.getElementById("filter-opinion").addEventListener("change", renderEvents);
+      document.getElementById("filter-confidence").addEventListener("change", renderEvents);
+      document.getElementById("filter-basis").addEventListener("change", renderEvents);
       document.getElementById("aoi-upload").addEventListener("click", uploadAoi);
+      document.getElementById("context-upload").addEventListener("click", uploadContextLayer);
       document.getElementById("aoi-select").addEventListener("change", (e) =>
         loadEvents(e.target.value),
       );
@@ -481,6 +1244,10 @@
         if (currentAoiId != null) loadRuns(currentAoiId);
       }, 15000);
       loadAois();
+      loadMethodologies();
+      loadContextLayers();
+      loadSettings();
+      loadCapabilities();
     </script>
   </body>
 </html>

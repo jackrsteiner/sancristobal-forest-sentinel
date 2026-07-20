@@ -24,10 +24,11 @@ from fastapi.responses import HTMLResponse
 from geoalchemy2 import Geography
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
-from sqlalchemy import Engine, cast, func, select
+from sqlalchemy import Engine, cast, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from forest_sentinel import dispatch, settings
 from forest_sentinel.aoi import (
     AOIS_DIR_ENV_VAR,
     DEFAULT_AOIS_DIR,
@@ -35,18 +36,33 @@ from forest_sentinel.aoi import (
     load_aoi_config_document,
     persist_aoi,
 )
+from forest_sentinel.context import (
+    CONTEXT_DIR_ENV_VAR,
+    DEFAULT_CONTEXT_DIR,
+    ContextConfigError,
+    load_context_document,
+    replace_layer,
+)
 from forest_sentinel.db import get_engine
 from forest_sentinel.events import footprint_area_m2
 from forest_sentinel.models import (
+    CONTEXT_KINDS,
+    REVIEW_OPINIONS,
     Aoi,
     ChangeRaster,
+    ConfidenceAssessment,
+    ContextFeature,
+    ContextLayer,
     DisturbanceCandidate,
     DisturbanceEvent,
+    EventContext,
     EventObservation,
+    ManualReview,
     MethodologyVersion,
     PipelineRun,
     PipelineRunEvent,
 )
+from forest_sentinel.runlog import STATUS_INTERRUPTED, STATUS_RUNNING
 from forest_sentinel.storage import StorageError, sanitize_path_component
 
 # How many runs / progress events the runs endpoints return.
@@ -60,6 +76,19 @@ AOI_UPLOADS_ENV_VAR = "FOREST_SENTINEL_AOI_UPLOADS"
 # Set to "0" to disable the run-now trigger (vm_setup.sh does this when the
 # dashboard port is opened to the world, same as uploads).
 PIPELINE_TRIGGER_ENV_VAR = "FOREST_SENTINEL_PIPELINE_TRIGGER"
+
+# Set to "0" to disable recording manual reviews (vm_setup.sh does this when
+# the dashboard port is opened to the world — tunnel-as-auth means whoever can
+# reach the dashboard can review, which must not include the open internet).
+REVIEWS_ENV_VAR = "FOREST_SENTINEL_REVIEWS"
+
+# Set to "0" to disable context-layer uploads (vm_setup.sh does this when the
+# dashboard port is opened to the world, same as AOI uploads).
+CONTEXT_UPLOADS_ENV_VAR = "FOREST_SENTINEL_CONTEXT_UPLOADS"
+
+# Set to "0" to disable settings edits (vm_setup.sh does this when the
+# dashboard port is opened to the world — the fifth write guard, Slice 7).
+SETTINGS_EDIT_ENV_VAR = "FOREST_SENTINEL_SETTINGS_EDIT"
 # The same systemd unit the daily timer fires; --no-block returns immediately
 # and systemd merges a start into an already-running job, so repeated clicks
 # are harmless (the per-AOI advisory lock backstops everything else). The `ofs`
@@ -70,6 +99,17 @@ PIPELINE_START_COMMAND = (
     "start",
     "forest-sentinel-pipeline.service",
     "--no-block",
+)
+# Stop is synchronous (no --no-block): SIGTERM is fast, and a blocking result
+# lets the endpoint report failures instead of guessing. The pipeline is
+# checkpoint-committed and resume-safe, so a deliberate stop is exactly the
+# kill it already tolerates (timeouts, SIGKILL) — committed work is kept and
+# the next run (daily timer or Run now) resumes from the last checkpoint.
+PIPELINE_STOP_COMMAND = (
+    "sudo",
+    "systemctl",
+    "stop",
+    "forest-sentinel-pipeline.service",
 )
 
 
@@ -96,6 +136,17 @@ def create_app() -> FastAPI:
     def index() -> str:
         """The Leaflet map page that consumes the JSON/GeoJSON API."""
         return _INDEX_HTML.read_text()
+
+    @app.get("/api/capabilities")
+    def capabilities() -> dict[str, bool]:
+        """Which write features this instance has enabled (all off = world-open)."""
+        return {
+            "aoi_uploads": os.environ.get(AOI_UPLOADS_ENV_VAR, "1") != "0",
+            "pipeline_trigger": os.environ.get(PIPELINE_TRIGGER_ENV_VAR, "1") != "0",
+            "reviews": os.environ.get(REVIEWS_ENV_VAR, "1") != "0",
+            "context_uploads": os.environ.get(CONTEXT_UPLOADS_ENV_VAR, "1") != "0",
+            "settings_edit": os.environ.get(SETTINGS_EDIT_ENV_VAR, "1") != "0",
+        }
 
     @app.get("/api/aois")
     def list_aois(session: SessionDep) -> list[dict[str, Any]]:
@@ -166,7 +217,8 @@ def create_app() -> FastAPI:
                     "pinned to the name — upload under a new name to monitor a new footprint"
                 ),
             ) from None
-        return {"id": aoi.id, "name": aoi.name, "file": str(target)}
+        synced = dispatch.request_sync(reason="aoi-upload")
+        return {"id": aoi.id, "name": aoi.name, "file": str(target), "sync_requested": synced}
 
     @app.post("/api/pipeline/run", status_code=202)
     def trigger_pipeline_run(_payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
@@ -201,6 +253,48 @@ def create_app() -> FastAPI:
             )
         return {"detail": "pipeline run requested; progress appears in the runs panel"}
 
+    @app.post("/api/pipeline/stop", status_code=202)
+    def stop_pipeline_run(
+        session: SessionDep, _payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Stop the executing pipeline run (all AOIs run inside one systemd unit).
+
+        Guarded by the same knob as the run trigger — a world-open dashboard must
+        expose neither. This is a stop, not a pause: committed checkpoints are
+        kept and reused, and the daily timer still fires the next run. After a
+        successful stop, rows still marked ``running`` are stamped
+        ``interrupted`` so the runs panel tells the truth immediately instead of
+        waiting for the next run start (or the stale-heartbeat threshold).
+        """
+        if os.environ.get(PIPELINE_TRIGGER_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="pipeline triggering is disabled on this dashboard"
+            )
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed command, no user input
+                PIPELINE_STOP_COMMAND, capture_output=True, text=True, check=False, timeout=30
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(
+                status_code=502, detail=f"could not stop the pipeline service: {exc}"
+            ) from exc
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "could not stop the pipeline service: "
+                    f"{result.stderr.strip() or f'exit code {result.returncode}'}"
+                ),
+            )
+        stopped = session.execute(
+            update(PipelineRun)
+            .where(PipelineRun.status == STATUS_RUNNING)
+            .values(status=STATUS_INTERRUPTED)
+            .returning(PipelineRun.id)
+        ).all()
+        session.commit()
+        return {"stopped_runs": len(stopped)}
+
     @app.get("/api/aois/{aoi_id}/events")
     def aoi_events(aoi_id: int, session: SessionDep) -> dict[str, Any]:
         """Events for an AOI as a GeoJSON FeatureCollection.
@@ -215,6 +309,7 @@ def create_app() -> FastAPI:
             select(
                 EventObservation.event_id,
                 EventObservation.area_m2,
+                DisturbanceCandidate.valid_pixel_fraction,
                 func.count().over(partition_by=EventObservation.event_id).label("count"),
                 func.row_number()
                 .over(
@@ -222,10 +317,18 @@ def create_app() -> FastAPI:
                     order_by=(EventObservation.observed_at.desc(), EventObservation.id.desc()),
                 )
                 .label("recency"),
+            ).join(
+                DisturbanceCandidate,
+                DisturbanceCandidate.id == EventObservation.disturbance_candidate_id,
             )
         ).subquery()
         latest = (
-            select(measurements.c.event_id, measurements.c.area_m2, measurements.c.count)
+            select(
+                measurements.c.event_id,
+                measurements.c.area_m2,
+                measurements.c.valid_pixel_fraction,
+                measurements.c.count,
+            )
             .where(measurements.c.recency == 1)
             .subquery()
         )
@@ -235,6 +338,13 @@ def create_app() -> FastAPI:
                 func.ST_Area(cast(DisturbanceEvent.geometry, Geography)),
                 func.coalesce(latest.c.count, 0),
                 latest.c.area_m2,
+                latest.c.valid_pixel_fraction,
+                _latest_opinion_subquery(),
+                _latest_assessment_subquery(ConfidenceAssessment.level),
+                _latest_assessment_subquery(ConfidenceAssessment.score),
+                _latest_assessment_subquery(
+                    ConfidenceAssessment.inputs["factors"]["agreement"]["basis"].astext
+                ),
             )
             .outerjoin(latest, latest.c.event_id == DisturbanceEvent.id)
             .where(DisturbanceEvent.aoi_id == aoi_id)
@@ -242,10 +352,7 @@ def create_app() -> FastAPI:
         ).all()
         return {
             "type": "FeatureCollection",
-            "features": [
-                _event_feature(event, footprint_area, count, latest_area)
-                for event, footprint_area, count, latest_area in rows
-            ],
+            "features": [_event_feature(*row) for row in rows],
         }
 
     @app.get("/api/aois/{aoi_id}/runs")
@@ -301,26 +408,304 @@ def create_app() -> FastAPI:
         detail["events"] = _run_events(session, run_id)
         return detail
 
+    @app.get("/api/methodologies")
+    def list_methodologies(session: SessionDep) -> list[dict[str, Any]]:
+        """Every methodology version with its full inputs, newest first.
+
+        The review surface for provenance: each row is one content-addressed
+        parameter set (the ``version`` hash is the identity, ``display_version``
+        the at-a-glance label) plus how many runs used it and when it last ran.
+        """
+        rows = session.execute(
+            select(
+                MethodologyVersion,
+                func.count(PipelineRun.id),
+                func.max(PipelineRun.started_at),
+            )
+            .outerjoin(PipelineRun, PipelineRun.methodology_version_id == MethodologyVersion.id)
+            .group_by(MethodologyVersion.id)
+            .order_by(MethodologyVersion.id.desc())
+        ).all()
+        return [
+            {
+                "id": methodology.id,
+                "name": methodology.name,
+                "version": methodology.version,
+                "display_version": methodology.display_version,
+                "parameters": methodology.parameters,
+                "created_at": methodology.created_at,
+                "run_count": run_count,
+                "last_run_at": last_run_at,
+            }
+            for methodology, run_count, last_run_at in rows
+        ]
+
+    @app.get("/api/settings")
+    def settings_catalogue(session: SessionDep) -> dict[str, Any]:
+        """The live config catalogue (Slice 7 bead 7.1, #134).
+
+        Every runtime configuration value in the four config-inventory
+        categories, with its purpose, layered resolved value (overrides file →
+        environment → default), editability class, and the implications of
+        changing it. Read-only; secrets are redacted before they reach the
+        response.
+        """
+        return settings.catalogue(session)
+
+    @app.post("/api/settings")
+    def change_setting(
+        session: SessionDep, payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Apply one allowlisted settings change (Slice 7 bead 7.2, #135).
+
+        The body is ``{"key", "value", "confirm_methodology_change"?}`` —
+        mandatory JSON, like every write endpoint (structural CSRF defense).
+        The allowlist lives server-side in ``settings.apply_change``; guarded
+        (methodology) keys are rejected with the consequence copy until the
+        confirmation flag is sent. The change lands in ``config/overrides.env``
+        (picked up by the next pipeline run and synced to the instance repo)
+        and appends a ``settings_change`` audit row.
+        """
+        if os.environ.get(SETTINGS_EDIT_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="settings edits are disabled on this dashboard"
+            )
+        key = payload.get("key")
+        value = payload.get("value")
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise HTTPException(status_code=422, detail="body must carry string key and value")
+        try:
+            change = settings.apply_change(
+                session,
+                key=key,
+                value=value,
+                confirm_methodology_change=bool(payload.get("confirm_methodology_change")),
+            )
+        except settings.SettingsError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        session.commit()
+        # Best-effort, after the local write committed (bead 7.3): a dispatch
+        # failure never un-succeeds the edit. Unit-rendered settings (bead 7.5)
+        # escalate to a VM rollout so the change actually lands.
+        rollout = change.get("applies") == settings.APPLIES_UPDATE_INSTANCE
+        synced = dispatch.request_sync(reason="settings-edit", update_vm=rollout)
+        detail = (
+            "applied; rolls out on the next Update-instance run"
+            + (" (requested)" if synced else "")
+            if rollout
+            else "applied; takes effect on the next pipeline run"
+        )
+        return {**change, "sync_requested": synced, "detail": detail}
+
+    @app.get("/api/context/layers")
+    def list_context_layers(session: SessionDep) -> list[dict[str, Any]]:
+        """The context-layer registry with feature counts (E17)."""
+        rows = session.execute(
+            select(
+                ContextLayer.id,
+                ContextLayer.name,
+                ContextLayer.kind,
+                func.count(ContextFeature.id),
+            )
+            .outerjoin(ContextFeature, ContextFeature.context_layer_id == ContextLayer.id)
+            .group_by(ContextLayer.id)
+            .order_by(ContextLayer.kind, ContextLayer.name)
+        ).all()
+        return [
+            {"id": layer_id, "name": name, "kind": kind, "feature_count": feature_count}
+            for layer_id, name, kind, feature_count in rows
+        ]
+
+    @app.get("/api/context/layers/{layer_id}/features")
+    def context_layer_features(layer_id: int, session: SessionDep) -> dict[str, Any]:
+        """One layer's features as a GeoJSON FeatureCollection (map overlay)."""
+        layer = session.get(ContextLayer, layer_id)
+        if layer is None:
+            raise HTTPException(status_code=404, detail=f"context layer {layer_id} not found")
+        features = (
+            session.execute(
+                select(ContextFeature)
+                .where(ContextFeature.context_layer_id == layer_id)
+                .order_by(ContextFeature.id)
+            )
+            .scalars()
+            .all()
+        )
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": mapping(to_shape(feature.geometry)),
+                    "properties": {**feature.properties, "id": feature.id, "kind": layer.kind},
+                }
+                for feature in features
+            ],
+        }
+
+    @app.post("/api/context/layers", status_code=201)
+    def upload_context_layer(
+        session: SessionDep, payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Load (or replace) a context layer from an uploaded GeoJSON document.
+
+        Body: ``{"name": ..., "kind": ..., "document": <GeoJSON>}``. The file is
+        written to the context directory under the harvest convention
+        (``<kind>--<name>.geojson``) so pipeline runs keep it loaded, and the
+        layer is replaced in the database immediately (re-uploading a name
+        replaces its features — layers are reference data, not provenance, so
+        unlike AOIs there is no name conflict). JSON-only body: same structural
+        CSRF defense as the other POSTs; disabled on a world-open dashboard.
+        """
+        if os.environ.get(CONTEXT_UPLOADS_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="context uploads are disabled on this dashboard"
+            )
+        kind = payload.get("kind")
+        if kind not in CONTEXT_KINDS:
+            raise HTTPException(
+                status_code=422, detail=f"kind must be one of {', '.join(CONTEXT_KINDS)}"
+            )
+        raw_name = _optional_str(payload.get("name"))
+        if raw_name is None:
+            raise HTTPException(status_code=422, detail="a non-empty layer name is required")
+        try:
+            document = load_context_document(payload.get("document"))
+            # The sanitized form is BOTH the filename and the stored layer name,
+            # so the next harvest of the written file replaces this same layer
+            # instead of minting a near-duplicate under the raw spelling.
+            name = sanitize_path_component(raw_name)
+            filename = f"{kind}--{name}.geojson"
+        except (ContextConfigError, StorageError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        context_dir = Path(os.environ.get(CONTEXT_DIR_ENV_VAR, DEFAULT_CONTEXT_DIR))
+        context_dir.mkdir(parents=True, exist_ok=True)
+        target = context_dir / filename
+        target.write_text(json.dumps(payload.get("document"), indent=2) + "\n")
+        layer = replace_layer(
+            session, name=name, kind=kind, document=document, source_file=str(target)
+        )
+        session.commit()
+        synced = dispatch.request_sync(reason="context-upload")
+        return {
+            "id": layer.id,
+            "name": layer.name,
+            "kind": layer.kind,
+            "sync_requested": synced,
+            "feature_count": len(document.geometries),
+            "file": str(target),
+        }
+
     @app.get("/api/events/{event_id}")
     def event_detail(event_id: int, session: SessionDep) -> dict[str, Any]:
-        """One event with its measurement timeline and supporting evidence."""
+        """One event with its measurement timeline, supporting evidence, and reviews."""
         event = session.get(DisturbanceEvent, event_id)
         if event is None:
             raise HTTPException(status_code=404, detail=f"event {event_id} not found")
         timeline = _timeline(session, event_id)
+        reviews = _reviews(session, event_id)
+        assessments = _assessments(session, event_id)
+        # The lineage's methodology IS the "which method produced this" answer
+        # (README deliverable questions 7-8): events are methodology-scoped.
+        methodology = session.get(MethodologyVersion, event.methodology_version_id)
         return {
             "id": event.id,
             "aoi_id": event.aoi_id,
             "status": event.status,
+            "methodology": None
+            if methodology is None
+            else {
+                "id": methodology.id,
+                "name": methodology.name,
+                "display_version": methodology.display_version,
+            },
             "first_detected_at": event.first_detected_at,
             "last_detected_at": event.last_detected_at,
             "geometry": mapping(to_shape(event.geometry)),
             "footprint_area_m2": footprint_area_m2(session, event.geometry),
             "timeline": timeline,
             "evidence": _evidence(session, event_id),
+            # Newest first: the head is the current opinion (or None when unreviewed).
+            "reviews": reviews,
+            "latest_opinion": reviews[0]["opinion"] if reviews else None,
+            # Newest first; each row explains itself (full inputs recorded at
+            # assessment time — nothing is recomputed here).
+            "confidence": assessments,
+            # Detection basis from the newest assessment's agreement factor
+            # (fused-v2, #118): "optical-only" / "radar-only" / "both". Null
+            # before the first fused-rule assessment.
+            "basis": _assessment_basis(assessments),
+            # How this event relates to the loaded context layers (E17):
+            # recomputed per pipeline run, so this reads the current view.
+            "context": _event_context(session, event_id),
+        }
+
+    @app.post("/api/events/{event_id}/reviews", status_code=201)
+    def record_review(
+        event_id: int, session: SessionDep, payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Record a manual-review opinion for an event (append-only).
+
+        Opinions are a human judgment recorded ALONGSIDE the automatic status —
+        this endpoint never mutates ``disturbance_event.status``. Requires a JSON
+        body (CORS-preflight defense, like the other POSTs) and is disabled on a
+        world-open dashboard: tunnel-as-auth means whoever can reach the
+        dashboard can review, which must not include the open internet.
+        """
+        if os.environ.get(REVIEWS_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="manual review is disabled on this dashboard"
+            )
+        event = session.get(DisturbanceEvent, event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail=f"event {event_id} not found")
+        opinion = payload.get("opinion")
+        if opinion not in REVIEW_OPINIONS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"opinion must be one of {', '.join(REVIEW_OPINIONS)}",
+            )
+        review = ManualReview(
+            event_id=event.id,
+            opinion=opinion,
+            notes=_optional_str(payload.get("notes")),
+            reviewer=_optional_str(payload.get("reviewer")),
+        )
+        session.add(review)
+        session.commit()
+        return {
+            "id": review.id,
+            "event_id": review.event_id,
+            "opinion": review.opinion,
+            "notes": review.notes,
+            "reviewer": review.reviewer,
+            "created_at": review.created_at,
         }
 
     return app
+
+
+def _latest_opinion_subquery() -> Any:
+    """Correlated scalar subquery: the newest review's opinion per event, or NULL."""
+    return (
+        select(ManualReview.opinion)
+        .where(ManualReview.event_id == DisturbanceEvent.id)
+        .order_by(ManualReview.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
+def _latest_assessment_subquery(column: Any) -> Any:
+    """Correlated scalar subquery: a column of the newest assessment per event."""
+    return (
+        select(column)
+        .where(ConfidenceAssessment.event_id == DisturbanceEvent.id)
+        .order_by(ConfidenceAssessment.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
 
 
 def _event_feature(
@@ -328,6 +713,11 @@ def _event_feature(
     footprint_area: float,
     observation_count: int,
     latest_area: float | None,
+    latest_valid_fraction: float | None,
+    latest_opinion: str | None,
+    confidence_level: str | None,
+    confidence_score: float | None,
+    basis: str | None,
 ) -> dict[str, Any]:
     return {
         "type": "Feature",
@@ -335,34 +725,142 @@ def _event_feature(
         "properties": {
             "id": event.id,
             "status": event.status,
+            # The newest manual-review opinion — a human judgment held alongside
+            # (never mutating) the automatic status; null when unreviewed.
+            "latest_opinion": latest_opinion,
+            # The newest confidence assessment (E15); null before the first run
+            # under the rule.
+            "confidence_level": confidence_level,
+            "confidence_score": confidence_score,
+            # Detection basis from the newest assessment's agreement factor
+            # (fused-v2, #118): "optical-only" / "radar-only" / "both"; null
+            # before the first fused-rule assessment.
+            "basis": basis,
             "first_detected_at": event.first_detected_at,
             "last_detected_at": event.last_detected_at,
             "observation_count": observation_count,
             # Cumulative unioned footprint vs the latest single-scene detection.
             "footprint_area_m2": footprint_area,
             "latest_area_m2": latest_area,
+            # Pixel coverage of the latest detection (#95): obscured vs clear
+            # evidence at a glance. Null on pre-statistics candidates.
+            "latest_valid_fraction": latest_valid_fraction,
         },
     }
 
 
-def _timeline(session: Session, event_id: int) -> list[dict[str, Any]]:
-    observations = (
+def _reviews(session: Session, event_id: int) -> list[dict[str, Any]]:
+    rows = (
         session.execute(
-            select(EventObservation)
-            .where(EventObservation.event_id == event_id)
-            .order_by(EventObservation.observed_at)
+            select(ManualReview)
+            .where(ManualReview.event_id == event_id)
+            .order_by(ManualReview.id.desc())
         )
         .scalars()
         .all()
     )
     return [
         {
+            "id": review.id,
+            "opinion": review.opinion,
+            "notes": review.notes,
+            "reviewer": review.reviewer,
+            "created_at": review.created_at,
+        }
+        for review in rows
+    ]
+
+
+def _assessments(session: Session, event_id: int) -> list[dict[str, Any]]:
+    rows = (
+        session.execute(
+            select(ConfidenceAssessment)
+            .where(ConfidenceAssessment.event_id == event_id)
+            .order_by(ConfidenceAssessment.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": assessment.id,
+            "level": assessment.level,
+            "score": assessment.score,
+            "rule_version": assessment.rule_version,
+            "inputs": assessment.inputs,
+            "created_at": assessment.created_at,
+        }
+        for assessment in rows
+    ]
+
+
+def _event_context(session: Session, event_id: int) -> list[dict[str, Any]]:
+    """The event's context relations: touching features first, then nearby."""
+    rows = session.execute(
+        select(EventContext, ContextFeature, ContextLayer)
+        .join(ContextFeature, ContextFeature.id == EventContext.context_feature_id)
+        .join(ContextLayer, ContextLayer.id == ContextFeature.context_layer_id)
+        .where(EventContext.event_id == event_id)
+        .order_by(EventContext.distance_m.asc().nulls_first(), EventContext.id)
+    ).all()
+    return [
+        {
+            "relation": relation.relation,
+            "distance_m": relation.distance_m,
+            "kind": layer.kind,
+            "layer": layer.name,
+            "feature_id": feature.id,
+            # The feature's own display name when its properties carry one.
+            "name": _optional_str(feature.properties.get("name")),
+        }
+        for relation, feature, layer in rows
+    ]
+
+
+def _assessment_basis(assessments: list[dict[str, Any]]) -> str | None:
+    """Detection basis recorded by the newest assessment's agreement factor.
+
+    Mirrors the feature subquery: only the latest row is consulted, so the
+    detail view and the map never disagree. Null on pre-fused-rule history.
+    """
+    if not assessments:
+        return None
+    agreement = assessments[0]["inputs"].get("factors", {}).get("agreement") or {}
+    basis = agreement.get("basis")
+    return str(basis) if basis is not None else None
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _timeline(session: Session, event_id: int) -> list[dict[str, Any]]:
+    # Each measurement carries its source candidate's extraction-time ΔNBR
+    # statistics and pixel coverage (#95), so the dashboard can distinguish
+    # strong evidence from obscured observations (E14). Null on pre-#95 rows.
+    rows = session.execute(
+        select(EventObservation, DisturbanceCandidate)
+        .join(
+            DisturbanceCandidate,
+            DisturbanceCandidate.id == EventObservation.disturbance_candidate_id,
+        )
+        .where(EventObservation.event_id == event_id)
+        .order_by(EventObservation.observed_at)
+    ).all()
+    return [
+        {
             "observed_at": obs.observed_at,
             "area_m2": obs.area_m2,
             "growth_m2": obs.growth_m2,
             "candidate_id": obs.disturbance_candidate_id,
+            "delta_mean": candidate.delta_mean,
+            "delta_min": candidate.delta_min,
+            "valid_pixel_fraction": candidate.valid_pixel_fraction,
         }
-        for obs in observations
+        for obs, candidate in rows
     ]
 
 
@@ -380,7 +878,12 @@ def _run_summary(
         "summary": run.summary,
         "last_event_at": last_event_at,
         "methodology": (
-            {"id": methodology.id, "name": methodology.name, "version": methodology.version}
+            {
+                "id": methodology.id,
+                "name": methodology.name,
+                "version": methodology.version,
+                "display_version": methodology.display_version,
+            }
             if methodology is not None
             else None
         ),
@@ -450,7 +953,12 @@ def _run_events(session: Session, run_id: int) -> list[dict[str, Any]]:
 
 def _evidence(session: Session, event_id: int) -> list[dict[str, Any]]:
     rows = session.execute(
-        select(ChangeRaster.change_type, ChangeRaster.cog_path, DisturbanceCandidate.id)
+        select(
+            ChangeRaster.change_type,
+            ChangeRaster.cog_path,
+            ChangeRaster.valid_pixel_fraction,
+            DisturbanceCandidate.id,
+        )
         .join(
             DisturbanceCandidate,
             DisturbanceCandidate.change_raster_id == ChangeRaster.id,
@@ -463,8 +971,14 @@ def _evidence(session: Session, event_id: int) -> list[dict[str, Any]]:
         .order_by(DisturbanceCandidate.id)
     ).all()
     return [
-        {"change_type": change_type, "cog_path": cog_path, "candidate_id": candidate_id}
-        for change_type, cog_path, candidate_id in rows
+        {
+            "change_type": change_type,
+            "cog_path": cog_path,
+            # Scene coverage of the source raster ("how much was observable").
+            "valid_pixel_fraction": fraction,
+            "candidate_id": candidate_id,
+        }
+        for change_type, cog_path, fraction, candidate_id in rows
     ]
 
 

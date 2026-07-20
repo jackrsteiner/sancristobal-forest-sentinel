@@ -34,8 +34,8 @@ counterpart: how to configure, provision, secure, and automate it.
 - **Dashboard** — a read-only FastAPI + Leaflet web app over the PostGIS catalog.
 - **Scheduling** — run the pipeline unattended on the VM via a systemd timer (this guide).
 
-**Intended direction** (see [`docs/work-plan.md`](docs/work-plan.md)): a native
-GitHub Actions cron scheduler and manual review (Slice 3), QA/confidence hardening
+**Intended direction** (see [`docs/work-plan.md`](docs/work-plan.md)): manual
+review (Slice 3), QA/confidence hardening
 (Slice 4), Sentinel-1 radar augmentation (Slice 5), context layers (Slice 6), and a
 future move to Cloud SQL / GCS-as-canonical storage. Forward-looking pieces in this
 guide are labelled as such.
@@ -307,12 +307,13 @@ re-run `vm_setup.sh` to reinstall it. (Editing the repo copy alone does nothing:
 the unit is *copied* to `/etc/systemd/system` at install time, and `daemon-reload`
 only re-reads installed units.)
 
-### From GitHub Actions (intended direction — E11)
+### From GitHub Actions (manual trigger)
 
-[`.github/workflows/scheduled-run.yml`](.github/workflows/scheduled-run.yml) is the
-GitHub-Actions-cron path from the architecture. It SSHes to the VM and triggers the
-same systemd run, authenticating via Workload Identity Federation — no keys in CI.
-It ships **disabled** (guarded by `if: false` and a commented `schedule`). To enable it:
+[`.github/workflows/scheduled-run.yml`](.github/workflows/scheduled-run.yml) is a
+manual `workflow_dispatch` trigger: it SSHes to the VM and starts the same systemd
+run, authenticating via Workload Identity Federation — no keys in CI. (The
+Actions-**cron** path was retired when E11 closed: the on-VM systemd timer owns
+scheduling.) To use it:
 
 1. Run `scripts/setup_wif.sh` (once per instance) and add the repo **variables**
    `WIF_PROVIDER` and `PROVISIONER_SA` it prints (see
@@ -320,7 +321,8 @@ It ships **disabled** (guarded by `if: false` and a commented `schedule`). To en
    have these after their first deploy).
 2. Make sure `PROJECT_ID` (and, if not default, `INSTANCE_NAME`/`ZONE`) are set
    in `config/instance.env`.
-3. Remove the `if: ${{ false }}` guard and uncomment the `schedule:` trigger.
+3. Trigger it from the repo's *Actions* tab → **Run pipeline now (manual)** →
+   *Run workflow*.
 
 > The pipeline currently runs **synchronously** (it submits each Earth Engine export
 > and polls it to completion). A submit-and-return mode is future work; until then,
@@ -345,6 +347,28 @@ It ships **disabled** (guarded by `if: false` and a commented `schedule`). To en
   **database rows are never deleted** — they are the reproduction recipe, and the
   pipeline's missing-file path re-exports a pruned raster on demand. Preview with
   `./scripts/prune_cogs.sh --dry-run`.
+- **Reproducing a pruned raster.** The pipeline only re-exports missing COGs
+  *inside* the active window; for anything older (e.g. evidence for an old event),
+  `forest-sentinel cogs reproduce {index|change} <raster-id>` (#94) rebuilds the
+  raster in Earth Engine from its recorded provenance — the scene id, methodology
+  parameters, and (for change rasters) the exact recorded baseline sources — and
+  re-exports it to its recorded `cog_path`. Two caveats: the export region is
+  re-derived (scene ∩ AOI is not stored), so output is "same conclusions" rather
+  than bit-identical; and a row whose recorded `ee_script_version` differs from
+  the running build is refused unless `--force-version` is passed.
+- **Running from the published image.** CI publishes the app as a container
+  image on every `main` push (#96): `ghcr.io/jackrsteiner/open-forest-sentinel`,
+  tagged `latest` and with the commit SHA, smoke-tested (CLI, migrations,
+  dashboard import) before pushing. Setting `APP_IMAGE` in `config/instance.env`
+  switches the VM to that image: `vm_setup.sh` pulls it and runs migrations in
+  the container, and the systemd wrappers (`run_pipeline.sh`, `prune_cogs.sh`,
+  `serve_dashboard.sh`) run the CLI/uvicorn via `docker run` — no `uv sync` /
+  source build on the e2-micro, and a pinned SHA tag means the instance runs a
+  released, CI-tested artifact. Blank `APP_IMAGE` (the default) keeps the
+  from-source path exactly as before. The container joins the host network (the
+  compose-published Postgres port and the metadata server both resolve) and
+  mounts the COG root at its host path plus `config/` read-write, so catalog
+  paths and AOI uploads behave identically in both modes.
 - **Database backups.** `pg_dump` the `forest_sentinel` database on a schedule;
   store dumps off-VM.
 - **Logs.** `journalctl -u forest-sentinel-pipeline` and
