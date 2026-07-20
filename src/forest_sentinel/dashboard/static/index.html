@@ -102,6 +102,20 @@
       }
       .run-event-failed { color: #c0392b; }
       .run-event-warning { color: #e67e22; }
+      /* Map controls (#145): basemap toggle button + click-to-copy toast. */
+      .basemap-toggle {
+        font: inherit; font-size: 12px; padding: 4px 8px; cursor: pointer;
+        background: #fff; border: 2px solid rgba(0, 0, 0, 0.25); border-radius: 4px;
+      }
+      .basemap-toggle:hover { background: #f4f4f4; }
+      .coord-toast {
+        position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+        z-index: 1100; /* above Leaflet panes and controls */
+        background: rgba(0, 0, 0, 0.75); color: #fff; font-size: 12px;
+        padding: 5px 10px; border-radius: 4px; pointer-events: none;
+        opacity: 0; transition: opacity 0.3s; white-space: pre-line; text-align: center;
+      }
+      .coord-toast.visible { opacity: 1; }
     </style>
   </head>
   <body>
@@ -196,10 +210,148 @@
     ></script>
     <script>
       const map = L.map("map").setView([0, 0], 2);
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "&copy; OpenStreetMap contributors",
-        maxZoom: 19,
-      }).addTo(map);
+      // Basemap toggle (#145): streets (OSM), free satellite imagery (Esri
+      // World Imagery — keyless XYZ, free with attribution, high-res but a
+      // STATIC mosaic that may be years old), or NASA GIBS daily true color
+      // (VIIRS, ~375 m — coarse, but refreshed every day, so it can show
+      // yesterday's smoke/clearing that the Esri mosaic predates). Overlays
+      // are unaffected: tile layers render below all vector panes.
+      // GIBS tiles are per-day; request yesterday (UTC) since today's swaths
+      // are still filling in. Computed once at page load — good enough.
+      const gibsDate = new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 10);
+      const baseLayers = {
+        streets: {
+          label: "Streets",
+          layer: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: "&copy; OpenStreetMap contributors",
+            maxZoom: 19,
+          }),
+        },
+        satellite: {
+          label: "Satellite",
+          layer: L.tileLayer(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            {
+              attribution:
+                "Imagery &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+              maxZoom: 19,
+            },
+          ),
+        },
+        gibs: {
+          label: "Daily satellite",
+          layer: L.tileLayer(
+            `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/${gibsDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`,
+            {
+              attribution: `NASA EOSDIS GIBS &mdash; VIIRS true color, ${gibsDate}, updated daily (~375 m)`,
+              maxNativeZoom: 9, // GIBS serves to z9; Leaflet upscales beyond
+              maxZoom: 19,
+            },
+          ),
+        },
+      };
+      const baseOrder = ["streets", "satellite", "gibs"];
+      let activeBase = "streets";
+      baseLayers[activeBase].layer.addTo(map);
+
+      const BasemapToggle = L.Control.extend({
+        options: { position: "topleft" },
+        onAdd() {
+          const button = L.DomUtil.create("button", "basemap-toggle");
+          button.type = "button";
+          button.title =
+            "Switch base map: Streets → Satellite (high-res, static) → Daily satellite (NASA GIBS, updated daily)";
+          const nextBase = () =>
+            baseOrder[(baseOrder.indexOf(activeBase) + 1) % baseOrder.length];
+          button.textContent = baseLayers[nextBase()].label; // labels the layer you'd switch TO
+          // A control click must not fall through to the map (and copy coords).
+          L.DomEvent.disableClickPropagation(button);
+          L.DomEvent.on(button, "click", () => {
+            const next = nextBase();
+            map.removeLayer(baseLayers[activeBase].layer);
+            baseLayers[next].layer.addTo(map);
+            activeBase = next;
+            button.textContent = baseLayers[nextBase()].label;
+          });
+          return button;
+        },
+      });
+      map.addControl(new BasemapToggle());
+
+      // Click-to-copy coordinates (#145). Also fires when a click opens a
+      // feature popup — harmless, the clicked point is still what's copied.
+      const coordToast = L.DomUtil.create("div", "coord-toast", map.getContainer());
+      let coordToastTimer = null;
+      function showCoordToast(text) {
+        coordToast.textContent = text;
+        coordToast.classList.add("visible");
+        clearTimeout(coordToastTimer);
+        coordToastTimer = setTimeout(() => coordToast.classList.remove("visible"), 4000);
+      }
+
+      // Esri World Imagery is a static best-available mosaic, so the backdrop's
+      // age matters when eyeballing a detection. The service's citation layers
+      // expose per-source capture date/provider/resolution; `identify` with the
+      // live map extent + pixel size picks the citation matching the imagery
+      // actually rendered at this zoom (metadata is scale-dependent).
+      async function esriCaptureInfo(latlng) {
+        const size = map.getSize();
+        const bounds = map.getBounds();
+        const params = new URLSearchParams({
+          f: "json",
+          geometry: JSON.stringify({ x: latlng.lng, y: latlng.lat, spatialReference: { wkid: 4326 } }),
+          geometryType: "esriGeometryPoint",
+          sr: "4326",
+          tolerance: "1",
+          returnGeometry: "false",
+          layers: "all",
+          mapExtent: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(","),
+          imageDisplay: `${size.x},${size.y},96`,
+        });
+        const response = await fetch(
+          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/identify?" + params,
+        );
+        const attrs = ((await response.json()).results || [])
+          .map((result) => result.attributes)
+          .find((a) => a && (a.SRC_DATE2 || a.SRC_DATE));
+        if (!attrs) return null;
+        const parts = [];
+        const provider = attrs.NICE_DESC || attrs.SRC_DESC;
+        if (provider && provider !== "99999") parts.push(provider);
+        const date = String(attrs.SRC_DATE2 || attrs.SRC_DATE);
+        if (/^\d{8}$/.test(date)) {
+          // SRC_DATE2 is yyyymmdd; 99999 (in any field) means "not recorded".
+          parts.push(`captured ${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6)}`);
+        }
+        const res = Number(attrs.SRC_RES);
+        if (res && res !== 99999) parts.push(`${res} m`);
+        return parts.length ? parts.join(" · ") : null;
+      }
+
+      map.on("click", async (e) => {
+        const point = e.latlng.wrap(); // longitude in [-180, 180] after panning
+        const coords = `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
+        let message;
+        try {
+          // Secure contexts only (https or the localhost SSH tunnel).
+          await navigator.clipboard.writeText(coords);
+          message = `Copied ${coords}`;
+        } catch {
+          // No clipboard (e.g. world-open plain-http): still show the value.
+          message = coords;
+        }
+        showCoordToast(message);
+        if (activeBase !== "satellite") return;
+        try {
+          const info = await esriCaptureInfo(e.latlng);
+          // Only append while this click's toast is still the one showing.
+          if (info && coordToast.textContent === message) {
+            showCoordToast(`${message}\nImagery: ${info}`);
+          }
+        } catch {
+          // Metadata is best-effort garnish; the copy already succeeded.
+        }
+      });
 
       let eventsLayer = null;
       const layersById = {};
