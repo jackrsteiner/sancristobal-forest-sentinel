@@ -23,9 +23,11 @@ from forest_sentinel import earthengine
 
 COG_ROOT_ENV_VAR = "FOREST_SENTINEL_COG_ROOT"
 GCS_STAGING_BUCKET_ENV_VAR = "FOREST_SENTINEL_GCS_STAGING_BUCKET"
+EXPORT_TIMEOUT_ENV_VAR = "FOREST_SENTINEL_EXPORT_TIMEOUT_SECONDS"
 DEFAULT_COG_ROOT = "data/cogs/"
 # A stuck (non-terminal) EE task must not wedge the pipeline forever; generous
-# because large-AOI exports can legitimately take a long time.
+# because large-AOI exports can legitimately take a long time. Tunable per
+# instance via EXPORT_TIMEOUT_ENV_VAR (bead 7.4, #138).
 DEFAULT_EXPORT_TIMEOUT_SECONDS = 3600.0
 
 _SAFE_COMPONENT = re.compile(r"[^a-z0-9._-]+")
@@ -259,4 +261,20 @@ def local_disk_storage_from_env(staging: StagingBucket | None = None) -> LocalDi
         raise StorageConfigurationError(f"{GCS_STAGING_BUCKET_ENV_VAR} is not set")
     if staging is None:
         staging = GcsStagingBucket(bucket_name)
-    return LocalDiskStorage(root, bucket_name, staging)
+    return LocalDiskStorage(
+        root, bucket_name, staging, timeout_seconds=_export_timeout_from_env()
+    )
+
+
+def _export_timeout_from_env() -> float:
+    """The per-export timeout, defaulting on unset/garbage/non-positive values.
+
+    Mirrors ``cli._max_concurrent_exports``: a broken tuning value must degrade
+    to the documented default, never crash a scheduled run.
+    """
+    raw = os.environ.get(EXPORT_TIMEOUT_ENV_VAR, "")
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return DEFAULT_EXPORT_TIMEOUT_SECONDS
+    return timeout if timeout > 0 else DEFAULT_EXPORT_TIMEOUT_SECONDS

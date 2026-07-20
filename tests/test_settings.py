@@ -85,3 +85,27 @@ def test_overrides_file_parsing_skips_comments_and_blanks(tmp_path: Path) -> Non
     path = tmp_path / "overrides.env"
     path.write_text("# comment\n\nWINDOW_DAYS=45\nbroken line\nTHRESHOLD=-0.3\n")
     assert settings.read_overrides() == {"WINDOW_DAYS": "45", "THRESHOLD": "-0.3"}
+
+
+def test_export_timeout_env_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bead 7.4 (#138): unset/garbage/non-positive fall back to the default."""
+    from forest_sentinel.storage import EXPORT_TIMEOUT_ENV_VAR, _export_timeout_from_env
+
+    monkeypatch.delenv(EXPORT_TIMEOUT_ENV_VAR, raising=False)
+    assert _export_timeout_from_env() == 3600.0
+    monkeypatch.setenv(EXPORT_TIMEOUT_ENV_VAR, "7200")
+    assert _export_timeout_from_env() == 7200.0
+    monkeypatch.setenv(EXPORT_TIMEOUT_ENV_VAR, "not-a-number")
+    assert _export_timeout_from_env() == 3600.0
+    monkeypatch.setenv(EXPORT_TIMEOUT_ENV_VAR, "-5")
+    assert _export_timeout_from_env() == 3600.0
+
+
+def test_export_timeout_is_an_editable_pipeline_knob(db_session: Session) -> None:
+    entry = _by_key(catalogue(db_session))["FOREST_SENTINEL_EXPORT_TIMEOUT_SECONDS"]
+    assert entry["category"] == "pipeline-tuning"
+    assert entry["editability"] == "editable"
+    changed = settings.apply_change(
+        db_session, key="FOREST_SENTINEL_EXPORT_TIMEOUT_SECONDS", value="7200"
+    )
+    assert changed["new"] == "7200"

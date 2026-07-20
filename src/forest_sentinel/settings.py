@@ -166,6 +166,20 @@ def _registry() -> tuple[Setting, ...]:
             maximum=64,
         ),
         Setting(
+            key="FOREST_SENTINEL_EXPORT_TIMEOUT_SECONDS",
+            category=CATEGORY_PIPELINE,
+            purpose="Seconds to wait for one Earth Engine export before giving up.",
+            implications=(
+                "Robustness only; applies on the next run. A timed-out export marks just "
+                "its observation failed — the next run retries it."
+            ),
+            editability=EDITABLE,
+            default="3600",
+            value_type="int",
+            minimum=60,
+            maximum=86_400,
+        ),
+        Setting(
             key="PIPELINE_TIMEOUT",
             category=CATEGORY_PIPELINE,
             purpose="systemd budget for one pipeline run (TimeoutStartSec).",
