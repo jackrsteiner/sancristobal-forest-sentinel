@@ -64,6 +64,12 @@ aoi_files=()
 [ -f "${AOI_PATH}" ] && aoi_files+=("${AOI_PATH}")
 if [ -d "${AOIS_DIR}" ]; then
     while IFS= read -r file; do
+        # Dashboard-disabled AOIs (#149): a sidecar marker skips the AOI while
+        # keeping its file, row, and event history in place.
+        if [ -e "${file}.disabled" ]; then
+            echo "==> Skipping disabled AOI ${file}"
+            continue
+        fi
         aoi_files+=("${file}")
     done < <(find "${AOIS_DIR}" -maxdepth 1 -name '*.geojson' | sort)
 fi

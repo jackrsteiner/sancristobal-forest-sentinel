@@ -152,11 +152,28 @@ jobs:
           mkdir -p config/aois
           # No uploads (or no directory yet) is a clean no-op — scp's failure is
           # expected then, and `git diff --cached` decides whether to commit.
+          # The glob also harvests *.geojson.disabled markers (#149).
           gcloud compute scp \
             --zone "${ZONE:-us-west1-a}" \
-            "${INSTANCE_NAME:-forest-sentinel-vm}:/home/ofs/open-forest-sentinel/config/aois/*.geojson" \
+            "${INSTANCE_NAME:-forest-sentinel-vm}:/home/ofs/open-forest-sentinel/config/aois/*.geojson*" \
             config/aois/ 2>/dev/null || true
-          git add config/aois
+          # Disabled markers are state, not uploads: re-enabling an AOI deletes
+          # its marker on the VM, and scp never deletes — mirror the VM's
+          # marker set so the repo can't resurrect a re-enabled AOI's marker
+          # on the next redeploy (#149).
+          vm_markers="$(gcloud compute ssh \
+            --zone "${ZONE:-us-west1-a}" \
+            "${INSTANCE_NAME:-forest-sentinel-vm}" \
+            --command 'ls /home/ofs/open-forest-sentinel/config/aois/*.geojson.disabled 2>/dev/null | xargs -rn1 basename' \
+            2>/dev/null || true)"
+          for marker in config/aois/*.geojson.disabled; do
+            [ -e "$marker" ] || continue
+            case "$vm_markers" in
+              *"$(basename "$marker")"*) ;;
+              *) rm -f "$marker" ;;
+            esac
+          done
+          git add -A config/aois
           if git diff --cached --quiet; then
             echo "No uploaded AOIs to commit." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0

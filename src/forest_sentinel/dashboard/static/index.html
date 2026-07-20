@@ -61,6 +61,9 @@
       }
       #add-context input, #add-context select { margin: 2px 0; font-size: 12px; }
       body.context-uploads-disabled #add-context { display: none; }
+      /* AOI mutations (#149): uploads and the disable toggle share one guard. */
+      body.aoi-uploads-disabled #add-aoi, body.aoi-uploads-disabled #aoi-toggle { display: none; }
+      #aoi-toggle { font-size: 11px; padding: 2px 6px; margin-left: 4px; }
       .conf-explain { font-size: 12px; color: #555; margin: 2px 0 2px 12px; }
       .conf-history { font-size: 12px; color: #888; margin: 2px 0 2px 12px; }
       #event-filters { margin: 8px 0 2px; font-size: 12px; }
@@ -94,7 +97,12 @@
       .progress-track { height: 6px; background: #e4e4e4; border-radius: 3px; overflow: hidden; }
       .progress-fill { height: 100%; background: #2980b9; transition: width 0.5s; }
       .run-progress-counters { font-size: 12px; margin-top: 4px; }
-      .run-events { margin-top: 8px; border-top: 1px solid #eee; padding-top: 4px; }
+      /* Fixed-height scrollable console (#150): older messages stay reachable
+         without the card growing as events accumulate. */
+      .run-events {
+        margin-top: 8px; border-top: 1px solid #eee; padding-top: 4px;
+        max-height: 150px; overflow-y: auto;
+      }
       /* Hanging indent: a wrapped event reads as one entry, not garbled lines. */
       .run-event {
         font-size: 12px; color: #555; margin: 4px 0; padding-left: 14px; text-indent: -14px;
@@ -102,7 +110,8 @@
       }
       .run-event-failed { color: #c0392b; }
       .run-event-warning { color: #e67e22; }
-      /* Map controls (#145): basemap toggle button + click-to-copy toast. */
+      /* Map controls (#145/#153): basemap buttons + click-to-copy toast. */
+      .basemap-switcher { display: flex; gap: 4px; }
       .basemap-toggle {
         font: inherit; font-size: 12px; padding: 4px 8px; cursor: pointer;
         background: #fff; border: 2px solid rgba(0, 0, 0, 0.25); border-radius: 4px;
@@ -116,12 +125,34 @@
         opacity: 0; transition: opacity 0.3s; white-space: pre-line; text-align: center;
       }
       .coord-toast.visible { opacity: 1; }
+      /* Settings slide-out (#151): full height over the map area only — the
+         sidebar stays usable; the map stays mounted underneath. */
+      #sidebar-header { display: flex; align-items: baseline; justify-content: space-between; }
+      #settings-open {
+        font-size: 16px; padding: 2px 6px; background: none; border: none; cursor: pointer;
+      }
+      #settings-panel {
+        position: fixed; top: 0; right: 0; bottom: 0; left: 360px; /* sidebar width */
+        z-index: 1200; /* above Leaflet panes and controls */
+        background: #fff; border-left: 1px solid #ddd; padding: 16px;
+        overflow-y: auto; transform: translateX(100%); transition: transform 0.25s;
+      }
+      body.settings-visible #settings-panel { transform: translateX(0); }
+      #settings-header { display: flex; align-items: baseline; justify-content: space-between; }
+      #settings-header h2 { margin: 0 0 6px; }
+      #settings-close {
+        font-size: 14px; padding: 2px 8px; background: none; border: none; cursor: pointer;
+      }
     </style>
   </head>
   <body>
     <div id="sidebar">
-      <h1>Open Forest Sentinel</h1>
+      <div id="sidebar-header">
+        <h1>Open Forest Sentinel</h1>
+        <button id="settings-open" title="Settings" aria-label="Open settings">&#9881;&#65039;</button>
+      </div>
       <label>AOI: <select id="aoi-select"></select></label>
+      <button id="aoi-toggle" hidden></button>
       <div id="summary" class="muted"></div>
       <div id="pipeline-controls">
         <button id="run-now">Run pipeline now</button>
@@ -187,14 +218,6 @@
         <h2>Methodologies</h2>
         <div id="methodology-list"></div>
       </div>
-      <div id="settings-panel">
-        <h2>Settings</h2>
-        <div class="muted">
-          Live values as the next run will resolve them. Changes are recorded without a
-          user identity (tunnel-as-auth).
-        </div>
-        <div id="settings-list" class="muted">Loading…</div>
-      </div>
       <div id="add-aoi">
         <h2>Add AOI</h2>
         <input type="file" id="aoi-file" accept=".geojson,.json" />
@@ -203,13 +226,30 @@
       </div>
     </div>
     <div id="map"></div>
+    <!-- Settings slide-out (#151): covers the map area, opened by the sidebar
+         gear. Content and behavior are unchanged from the old sidebar section —
+         the catalogue just gets the room it needs. -->
+    <div id="settings-panel" aria-hidden="true">
+      <div id="settings-header">
+        <h2>Settings</h2>
+        <button id="settings-close" title="Close settings" aria-label="Close settings">&#10005;</button>
+      </div>
+      <div class="muted">
+        Live values as the next run will resolve them. Changes are recorded without a
+        user identity (tunnel-as-auth).
+      </div>
+      <div id="settings-list" class="muted">Loading…</div>
+    </div>
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
       crossorigin=""
     ></script>
     <script>
-      const map = L.map("map").setView([0, 0], 2);
+      // Zoom lives bottom-right (#152); the top-left corner belongs to the
+      // basemap switcher.
+      const map = L.map("map", { zoomControl: false }).setView([0, 0], 2);
+      L.control.zoom({ position: "bottomright" }).addTo(map);
       // Basemap toggle (#145): streets (OSM), free satellite imagery (Esri
       // World Imagery — keyless XYZ, free with attribution, high-res but a
       // STATIC mosaic that may be years old), or NASA GIBS daily true color
@@ -254,29 +294,36 @@
       let activeBase = "streets";
       baseLayers[activeBase].layer.addTo(map);
 
-      const BasemapToggle = L.Control.extend({
+      // One button per NOT-displayed basemap (#153): any of the three layers
+      // is a single click away, instead of cycling through the wrong one.
+      const BasemapSwitcher = L.Control.extend({
         options: { position: "topleft" },
         onAdd() {
-          const button = L.DomUtil.create("button", "basemap-toggle");
-          button.type = "button";
-          button.title =
-            "Switch base map: Streets → Satellite (high-res, static) → Daily satellite (NASA GIBS, updated daily)";
-          const nextBase = () =>
-            baseOrder[(baseOrder.indexOf(activeBase) + 1) % baseOrder.length];
-          button.textContent = baseLayers[nextBase()].label; // labels the layer you'd switch TO
-          // A control click must not fall through to the map (and copy coords).
-          L.DomEvent.disableClickPropagation(button);
-          L.DomEvent.on(button, "click", () => {
-            const next = nextBase();
-            map.removeLayer(baseLayers[activeBase].layer);
-            baseLayers[next].layer.addTo(map);
-            activeBase = next;
-            button.textContent = baseLayers[nextBase()].label;
-          });
-          return button;
+          const box = L.DomUtil.create("div", "basemap-switcher");
+          // Control clicks must not fall through to the map (and copy coords).
+          L.DomEvent.disableClickPropagation(box);
+          const render = () => {
+            box.textContent = "";
+            baseOrder
+              .filter((key) => key !== activeBase)
+              .forEach((key) => {
+                const button = L.DomUtil.create("button", "basemap-toggle", box);
+                button.type = "button";
+                button.textContent = baseLayers[key].label;
+                button.title = `Switch base map to ${baseLayers[key].label}`;
+                L.DomEvent.on(button, "click", () => {
+                  map.removeLayer(baseLayers[activeBase].layer);
+                  baseLayers[key].layer.addTo(map);
+                  activeBase = key;
+                  render();
+                });
+              });
+          };
+          render();
+          return box;
         },
       });
-      map.addControl(new BasemapToggle());
+      map.addControl(new BasemapSwitcher());
 
       // Click-to-copy coordinates (#145). Also fires when a click opens a
       // feature popup — harmless, the clicked point is still what's copied.
@@ -366,18 +413,60 @@
       let runsRenderKey = null;
       const methodologyOpen = {};
 
-      async function loadAois() {
+      const aoisById = {};
+      async function loadAois(preferredId) {
         const aois = await (await fetch("/api/aois")).json();
         const select = document.getElementById("aoi-select");
         select.innerHTML = "";
         aois.forEach((aoi) => {
           aoiBboxById[aoi.id] = aoi.bbox;
+          aoisById[aoi.id] = aoi;
           const option = document.createElement("option");
           option.value = aoi.id;
-          option.textContent = `${aoi.name} (${aoi.event_count} events)`;
+          option.textContent =
+            `${aoi.name} (${aoi.event_count} events)` + (aoi.enabled ? "" : " — disabled");
           select.appendChild(option);
         });
-        if (aois.length) loadEvents(aois[0].id);
+        if (!aois.length) return;
+        // Keep the current selection across a toggle-triggered reload.
+        const selected = aois.some((aoi) => String(aoi.id) === String(preferredId))
+          ? preferredId
+          : aois[0].id;
+        select.value = selected;
+        updateAoiToggle();
+        loadEvents(selected);
+      }
+
+      // Disable/re-enable the selected AOI for future pipeline runs (#149).
+      // History stays browsable — only the run loop skips it. The button is
+      // hidden for AOIs with no file to mark (the primary AOI) and, via the
+      // aoi-uploads-disabled body class, on world-open dashboards.
+      function updateAoiToggle() {
+        const button = document.getElementById("aoi-toggle");
+        const aoi = aoisById[document.getElementById("aoi-select").value];
+        button.hidden = !aoi || !aoi.can_disable;
+        if (aoi) button.textContent = aoi.enabled ? "Disable AOI" : "Enable AOI";
+        button.title = aoi && aoi.enabled
+          ? "Skip this AOI on future pipeline runs (events stay visible)"
+          : "Include this AOI in future pipeline runs again";
+      }
+
+      async function toggleAoiEnabled() {
+        const select = document.getElementById("aoi-select");
+        const aoi = aoisById[select.value];
+        if (!aoi || !aoi.can_disable) return;
+        const response = await fetch(`/api/aois/${aoi.id}/enabled`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: !aoi.enabled }),
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          document.getElementById("summary").textContent =
+            body.detail || `Toggle failed (HTTP ${response.status})`;
+          return;
+        }
+        await loadAois(select.value);
       }
 
       // Zoom to the selected AOI: [min_lon, min_lat, max_lon, max_lat] → Leaflet's
@@ -656,12 +745,16 @@
         // Engine queue waits stay visible from the browser.
         if (latest.status === "running") {
           if (detail.progress) card.appendChild(progressSection(detail.progress));
-          const tail = collapseEvents(detail.events).slice(-4);
-          if (tail.length) {
+          // All fetched events (server caps at RUN_EVENTS_LIMIT) in a scrollable
+          // console (#150), pinned to the newest at the bottom.
+          const events = collapseEvents(detail.events);
+          if (events.length) {
             const eventsBox = document.createElement("div");
             eventsBox.className = "run-events";
-            tail.forEach((ev) => eventsBox.appendChild(eventLine(ev)));
+            events.forEach((ev) => eventsBox.appendChild(eventLine(ev)));
             card.appendChild(eventsBox);
+            // Scroll after insertion into the document below.
+            requestAnimationFrame(() => (eventsBox.scrollTop = eventsBox.scrollHeight));
           }
         } else if (latest.summary) {
           const s = latest.summary;
@@ -1371,6 +1464,7 @@
       async function loadCapabilities() {
         try {
           const caps = await (await fetch("/api/capabilities")).json();
+          document.body.classList.toggle("aoi-uploads-disabled", !caps.aoi_uploads);
           document.body.classList.toggle("reviews-disabled", !caps.reviews);
           document.body.classList.toggle("context-uploads-disabled", !caps.context_uploads);
           document.body.classList.toggle("settings-edit-disabled", !caps.settings_edit);
@@ -1387,9 +1481,27 @@
       document.getElementById("filter-basis").addEventListener("change", renderEvents);
       document.getElementById("aoi-upload").addEventListener("click", uploadAoi);
       document.getElementById("context-upload").addEventListener("click", uploadContextLayer);
-      document.getElementById("aoi-select").addEventListener("change", (e) =>
-        loadEvents(e.target.value),
+      // Settings slide-out (#151): refresh the catalogue on every open so the
+      // values shown are current, not boot-time.
+      function setSettingsVisible(visible) {
+        document.body.classList.toggle("settings-visible", visible);
+        document.getElementById("settings-panel").setAttribute("aria-hidden", String(!visible));
+        if (visible) loadSettings();
+      }
+      document.getElementById("settings-open").addEventListener("click", () =>
+        setSettingsVisible(true),
       );
+      document.getElementById("settings-close").addEventListener("click", () =>
+        setSettingsVisible(false),
+      );
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") setSettingsVisible(false);
+      });
+      document.getElementById("aoi-toggle").addEventListener("click", toggleAoiEnabled);
+      document.getElementById("aoi-select").addEventListener("change", (e) => {
+        updateAoiToggle();
+        loadEvents(e.target.value);
+      });
       // Only the runs panel refreshes itself: it is the live view of an executing
       // run, while events/map stay event-driven off the selector and clicks.
       setInterval(() => {
@@ -1398,7 +1510,7 @@
       loadAois();
       loadMethodologies();
       loadContextLayers();
-      loadSettings();
+      // Settings load on slide-out open (#151), not at boot.
       loadCapabilities();
     </script>
   </body>

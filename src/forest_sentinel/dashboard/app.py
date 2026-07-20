@@ -89,6 +89,33 @@ CONTEXT_UPLOADS_ENV_VAR = "FOREST_SENTINEL_CONTEXT_UPLOADS"
 # Set to "0" to disable settings edits (vm_setup.sh does this when the
 # dashboard port is opened to the world — the fifth write guard, Slice 7).
 SETTINGS_EDIT_ENV_VAR = "FOREST_SENTINEL_SETTINGS_EDIT"
+
+
+def _aoi_files_by_name() -> dict[str, Path]:
+    """AOI GeoJSONs in the AOIs directory, keyed by the name INSIDE each file.
+
+    Uploads are written as ``sanitize_path_component(name).geojson``, but
+    committed seed files can be named anything — the config name is the join
+    key to ``aoi`` rows, not the filename. Unparseable files are skipped.
+    """
+    aois_dir = Path(os.environ.get(AOIS_DIR_ENV_VAR, DEFAULT_AOIS_DIR))
+    files: dict[str, Path] = {}
+    if not aois_dir.is_dir():
+        return files
+    for path in sorted(aois_dir.glob("*.geojson")):
+        try:
+            config = load_aoi_config_document(json.loads(path.read_text()))
+        except (AoiConfigError, ValueError, OSError):
+            continue
+        files[config.name] = path
+    return files
+
+
+def _disabled_marker(aoi_file: Path) -> Path:
+    """The sidecar that excludes ``aoi_file`` from pipeline runs (#149)."""
+    return aoi_file.with_name(aoi_file.name + ".disabled")
+
+
 # The same systemd unit the daily timer fires; --no-block returns immediately
 # and systemd merges a start into an already-running job, so repeated clicks
 # are harmless (the per-AOI advisory lock backstops everything else). The `ofs`
@@ -150,24 +177,79 @@ def create_app() -> FastAPI:
 
     @app.get("/api/aois")
     def list_aois(session: SessionDep) -> list[dict[str, Any]]:
-        """AOIs with summary metrics (event counts)."""
+        """AOIs with summary metrics (event counts) and enablement (#149)."""
+        files = _aoi_files_by_name()
         rows = session.execute(
             select(Aoi.id, Aoi.name, Aoi.geometry, func.count(DisturbanceEvent.id))
             .outerjoin(DisturbanceEvent, DisturbanceEvent.aoi_id == Aoi.id)
             .group_by(Aoi.id)
             .order_by(Aoi.name)
         ).all()
-        return [
-            {
-                "id": aoi_id,
-                "name": name,
-                "event_count": event_count,
-                # [min_lon, min_lat, max_lon, max_lat] — enough for the map to
-                # zoom to the AOI without shipping its full boundary.
-                "bbox": list(to_shape(geometry).bounds),
-            }
-            for aoi_id, name, geometry, event_count in rows
-        ]
+        listing = []
+        for aoi_id, name, geometry, event_count in rows:
+            aoi_file = files.get(name)
+            listing.append(
+                {
+                    "id": aoi_id,
+                    "name": name,
+                    "event_count": event_count,
+                    # [min_lon, min_lat, max_lon, max_lat] — enough for the map to
+                    # zoom to the AOI without shipping its full boundary.
+                    "bbox": list(to_shape(geometry).bounds),
+                    "enabled": aoi_file is None or not _disabled_marker(aoi_file).exists(),
+                    # The primary AOI (config/aoi.geojson) and rows whose file is
+                    # gone have nothing to mark — no dashboard toggle for them.
+                    "can_disable": aoi_file is not None,
+                }
+            )
+        return listing
+
+    @app.post("/api/aois/{aoi_id}/enabled")
+    def set_aoi_enabled(
+        aoi_id: int, session: SessionDep, payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Exclude an AOI from (or return it to) future pipeline runs (#149).
+
+        The state is a sidecar marker next to the AOI's GeoJSON
+        (``<file>.geojson.disabled``): ``run_pipeline.sh`` skips marked AOIs, and
+        the Update-instance sync harvests markers into the repo, so a disabled
+        AOI stays disabled across an instance reset. The AOI row and its events
+        are untouched — history remains browsable; only future runs skip it.
+        Guarded by the same toggle as AOI uploads (the AOI-mutation guard;
+        world-open dashboards force it off). The mandatory JSON body is the same
+        structural CSRF defense as the other write endpoints.
+        """
+        if os.environ.get(AOI_UPLOADS_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="AOI management is disabled on this dashboard"
+            )
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(
+                status_code=422, detail='body must be {"enabled": true} or {"enabled": false}'
+            )
+        aoi = session.get(Aoi, aoi_id)
+        if aoi is None:
+            raise HTTPException(status_code=404, detail="unknown AOI")
+        aoi_file = _aoi_files_by_name().get(aoi.name)
+        if aoi_file is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"AOI {aoi.name!r} has no file in the AOIs directory (the primary "
+                    "AOI, or a removed file) — it cannot be toggled from the dashboard"
+                ),
+            )
+        marker = _disabled_marker(aoi_file)
+        if enabled:
+            marker.unlink(missing_ok=True)
+        else:
+            marker.write_text(
+                "Disabled from the dashboard: run_pipeline.sh skips this AOI while "
+                "this marker exists. Re-enable from the dashboard or delete this file.\n"
+            )
+        synced = dispatch.request_sync(reason="aoi-toggle")
+        return {"id": aoi_id, "enabled": enabled, "sync_requested": synced}
 
     @app.post("/api/aois", status_code=201)
     def upload_aoi(session: SessionDep, document: Annotated[Any, Body()]) -> dict[str, Any]:

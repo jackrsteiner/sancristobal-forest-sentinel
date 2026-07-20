@@ -51,6 +51,9 @@ def test_list_aois_reports_event_counts(client: TestClient, db_session: Session)
             "event_count": 1,
             # The unit-square fixture AOI, as [min_lon, min_lat, max_lon, max_lat].
             "bbox": [0.0, 0.0, 1.0, 1.0],
+            # No file in the AOIs dir → runs normally, but not toggleable (#149).
+            "enabled": True,
+            "can_disable": False,
         }
     ]
 
@@ -392,6 +395,93 @@ def test_upload_aoi_can_be_disabled(client: TestClient, monkeypatch: pytest.Monk
     response = client.post("/api/aois", json=_UPLOAD_SQUARE)
     assert response.status_code == 403
     assert "disabled" in response.json()["detail"]
+
+
+# --- POST /api/aois/{id}/enabled: disable/re-enable for future runs (#149) ---
+
+
+def _aoi_row(client: TestClient, name: str) -> dict[str, Any]:
+    return next(aoi for aoi in client.get("/api/aois").json() if aoi["name"] == name)
+
+
+def test_aoi_disable_writes_marker_and_reenable_removes_it(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+    aoi_id = client.post("/api/aois", json=_UPLOAD_SQUARE).json()["id"]
+    marker = tmp_path / "aois" / "uploaded-aoi.geojson.disabled"
+
+    row = _aoi_row(client, "Uploaded AOI")
+    assert (row["enabled"], row["can_disable"]) == (True, True)
+
+    response = client.post(f"/api/aois/{aoi_id}/enabled", json={"enabled": False})
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+    assert marker.exists()
+    assert _aoi_row(client, "Uploaded AOI")["enabled"] is False
+
+    response = client.post(f"/api/aois/{aoi_id}/enabled", json={"enabled": True})
+    assert response.status_code == 200
+    assert not marker.exists()
+    assert _aoi_row(client, "Uploaded AOI")["enabled"] is True
+
+
+def test_aoi_toggle_matches_by_config_name_not_filename(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Committed seed files can be named anything; the config name is the key."""
+    aois_dir = tmp_path / "aois"
+    aois_dir.mkdir()
+    document = {**_UPLOAD_SQUARE, "properties": {"name": "Seeded AOI"}}
+    (aois_dir / "some-committed-file.geojson").write_text(json.dumps(document))
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(aois_dir))
+    aoi = _seed_event(db_session)
+    db_session.commit()
+
+    response = client.post(f"/api/aois/{aoi.id}/enabled", json={"enabled": False})
+    assert response.status_code == 200
+    assert (aois_dir / "some-committed-file.geojson.disabled").exists()
+    # Events of a disabled AOI remain browsable — only future runs skip it.
+    assert client.get(f"/api/aois/{aoi.id}/events").json()["features"]
+
+
+def test_aoi_toggle_without_file_is_409(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+    aoi = make_aoi(db_session, name="No File AOI")
+    db_session.commit()
+    row = _aoi_row(client, "No File AOI")
+    assert row["can_disable"] is False
+    response = client.post(f"/api/aois/{aoi.id}/enabled", json={"enabled": False})
+    assert response.status_code == 409
+    assert "cannot be toggled" in response.json()["detail"]
+
+
+def test_aoi_toggle_guard_and_validation(
+    client: TestClient, db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_AOIS_DIR", str(tmp_path / "aois"))
+    aoi_id = client.post("/api/aois", json=_UPLOAD_SQUARE).json()["id"]
+
+    assert client.post(f"/api/aois/{aoi_id}/enabled", json={}).status_code == 422
+    assert client.post("/api/aois/999999/enabled", json={"enabled": False}).status_code == 404
+
+    monkeypatch.setenv("FOREST_SENTINEL_AOI_UPLOADS", "0")
+    response = client.post(f"/api/aois/{aoi_id}/enabled", json={"enabled": False})
+    assert response.status_code == 403
+
+
+def test_run_pipeline_and_sync_honor_disabled_markers() -> None:
+    """Contract: the run loop skips marked AOIs and the sync harvests markers."""
+    root = Path(__file__).resolve().parents[1]
+    runner = (root / "scripts" / "run_pipeline.sh").read_text()
+    assert '[ -e "${file}.disabled" ]' in runner
+
+    workflow = (root / ".github" / "workflows" / "update-instance.yml").read_text()
+    assert "config/aois/*.geojson*" in workflow  # markers ride the harvest
+    assert "*.geojson.disabled" in workflow  # ...and removals are reconciled
+    assert "git add -A config/aois" in workflow
 
 
 # --- POST /api/pipeline/run: the dashboard run-now trigger ---
