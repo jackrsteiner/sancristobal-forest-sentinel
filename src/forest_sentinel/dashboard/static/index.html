@@ -97,7 +97,12 @@
       .progress-track { height: 6px; background: #e4e4e4; border-radius: 3px; overflow: hidden; }
       .progress-fill { height: 100%; background: #2980b9; transition: width 0.5s; }
       .run-progress-counters { font-size: 12px; margin-top: 4px; }
-      .run-events { margin-top: 8px; border-top: 1px solid #eee; padding-top: 4px; }
+      /* Fixed-height scrollable console (#150): older messages stay reachable
+         without the card growing as events accumulate. */
+      .run-events {
+        margin-top: 8px; border-top: 1px solid #eee; padding-top: 4px;
+        max-height: 150px; overflow-y: auto;
+      }
       /* Hanging indent: a wrapped event reads as one entry, not garbled lines. */
       .run-event {
         font-size: 12px; color: #555; margin: 4px 0; padding-left: 14px; text-indent: -14px;
@@ -702,12 +707,16 @@
         // Engine queue waits stay visible from the browser.
         if (latest.status === "running") {
           if (detail.progress) card.appendChild(progressSection(detail.progress));
-          const tail = collapseEvents(detail.events).slice(-4);
-          if (tail.length) {
+          // All fetched events (server caps at RUN_EVENTS_LIMIT) in a scrollable
+          // console (#150), pinned to the newest at the bottom.
+          const events = collapseEvents(detail.events);
+          if (events.length) {
             const eventsBox = document.createElement("div");
             eventsBox.className = "run-events";
-            tail.forEach((ev) => eventsBox.appendChild(eventLine(ev)));
+            events.forEach((ev) => eventsBox.appendChild(eventLine(ev)));
             card.appendChild(eventsBox);
+            // Scroll after insertion into the document below.
+            requestAnimationFrame(() => (eventsBox.scrollTop = eventsBox.scrollHeight));
           }
         } else if (latest.summary) {
           const s = latest.summary;
