@@ -251,6 +251,7 @@ Slices 0–2 are complete: Slice 1 shipped as beads #35–#42 (plus QA masking, 
 | **Slice 4 — QA & confidence hardening** | A transparent confidence model on outputs, plus the remaining QA hardening (Fmask masking itself shipped early, inside Slice 1 — see E14; what remains is surfacing quality metadata in the dashboard). | E14 (residual), E15 | Detections show honest quality metadata and an explained confidence level in the dashboard. |
 | **Slice 5 — Radar augmentation** | Sentinel-1 GRD backscatter change feeding the existing event model. | E16, E13 | The pipeline produces radar change products and radar-derived candidates for a configured AOI. |
 | **Slice 6 — Context layers** | Concessions, roads, rivers, and other context joined to disturbance events. | E17, E10 | The dashboard shows how a detection relates to concessions, protected areas, roads, and rivers. |
+| **Slice 7 — Settings tab** | A dashboard settings catalogue over the four config categories (see `docs/config-inventory.md`), guarded editing for the safe subset, and near-real-time durability of instance changes (settings + AOI uploads) via a VM-triggered repo sync. | E10, E18, E13 | Open the settings tab and see every config value's live resolved value, purpose, and change implications; edit a lifecycle knob and watch it committed to the instance repo within a minute, surviving a VM rebuild. |
 
 Every epic appears in at least one slice. E1, E2, E11, E12, and E13 are touched by multiple slices because foundational and infrastructure epics are deepened incrementally rather than completed up front.
 
@@ -366,6 +367,86 @@ containment/intersection + nearest-distance within a configurable buffer (defaul
   after event tracking; rows replaced per event per run. Depends on 6.1.
 - **6.3** Context in the dashboard (E17, E10) — map layer toggles, per-event context
   relations, guarded layer upload. Depends on 6.2.
+
+### Slice 7 — bead breakdown (planned)
+
+Depends on the config-inventory audit + implementation stack (the inventory doc is the
+catalogue's content; the raster/detection split is what makes methodology edits cheap enough
+to expose in a UI). Decisions, recorded here from the 2026-07-20 planning discussion:
+
+- **Catalogue first, then writes.** The read-only settings tab ships on its own and is
+  valuable alone; the write path is a separate bead behind a separate guard.
+- **Editability is an allowlist by category** (`docs/config-inventory.md` categories).
+  Instance config is display-only, and the two silent-re-export footguns
+  (`FOREST_SENTINEL_DATABASE_URL`, `FOREST_SENTINEL_COG_ROOT`) plus provisioning identity
+  (`PROJECT_ID`, zones, buckets) are **absent from the write path entirely**, not merely
+  restricted. Pipeline tuning and lifecycle knobs are freely editable; methodology knobs are
+  editable behind a confirmation step that shows the Finding 7 consequence copy (new
+  content-addressed version; existing events stop growing and auto-resolve; rasters are
+  reused — candidates re-extract locally).
+- **Tunnel-as-auth continuity.** No app-level auth, so restrictions are per-deployment
+  policy, not per-user roles: one new env guard (`FOREST_SENTINEL_SETTINGS_EDIT`), forced to
+  `0` by `vm_setup.sh` when `OPEN_DASHBOARD=1`, exactly like the other four write guards.
+- **The repo stays the source of truth.** Web edits land in a VM-side
+  `config/overrides.env`, which `vm_setup.sh` appends **last** when regenerating `.env`
+  ("last assignment wins" is already the rule), so edits survive `update_vm` re-runs; the
+  pipeline reads `.env` per run, so most changes take effect on the next run with no
+  restart. Durability across VM rebuilds comes from committing the file back to the instance
+  repo (bead 7.3), mirroring how `sync_aois` makes dashboard AOI uploads durable.
+- **Push model: dispatch-triggered sync, not a VM push credential.** The VM keeps its
+  keyless-for-contents posture: it never holds a `contents: write` credential (which could
+  push to any branch and, via the deploy workflows, escalate to the WIF provisioner's GCP
+  permissions). Instead the VM fires the existing sync workflow on demand.
+  **Implementation note:** `repository_dispatch` is *not* usable here — GitHub requires
+  `contents: write` for that endpoint, defeating the purpose. Use **`workflow_dispatch`**
+  (`POST /repos/{owner}/{repo}/actions/workflows/update-instance.yml/dispatches`), which
+  needs only a fine-grained PAT scoped to the single instance repo with **Actions:
+  read/write**. Known residual: an Actions-write token can trigger any
+  `workflow_dispatch`-able workflow in the repo (deploy / update-instance — both
+  version-controlled and idempotent) and re-run runs; it cannot read secrets or change
+  contents. Accepted as the low-value credential this design wants.
+- **Audit trail.** Settings changes are append-only rows (old → new, category, timestamp);
+  with tunnel-as-auth there is no "who", and the UI says so instead of pretending. The
+  synced commits give the same history in git.
+
+Beads:
+
+- **7.1** Settings catalogue API + tab (E10, E18) — `GET /api/settings`: every inventoried
+  value with category, purpose, live resolved value (env → default → what the *current
+  methodology row* actually recorded), allowed values/range, editability class
+  (`editable` / `guarded` / `display-only`), and implications text sourced from
+  `docs/config-inventory.md`; a read-only *Settings* tab rendering the four categories.
+  No write surface. Depends on the config-inventory stack; no other upstream beads.
+- **7.2** Guarded settings writes + overrides file + audit log (E10, E18, E13) —
+  `POST /api/settings` under `FOREST_SENTINEL_SETTINGS_EDIT` (mandatory-JSON body, forced
+  off when `OPEN_DASHBOARD=1`); server-side allowlist per the decisions above with
+  per-value validation (types, ranges, the retention floor rule); writes
+  `config/overrides.env`; `vm_setup.sh` appends overrides last; migration adds the
+  append-only `settings_change` table; methodology edits require the confirmation payload
+  echoing the consequence copy. Depends on 7.1.
+- **7.3** Dispatch-triggered repo sync — settings and AOIs durable in ~a minute (E18) —
+  the "option 1" bead:
+  - *Provisioning:* operator creates a fine-grained PAT (instance repo only, Actions:
+    read/write), stored on the VM outside the repo tree (e.g.
+    `/etc/forest-sentinel/dispatch-token`, `0600`, referenced from `.env` as
+    `FOREST_SENTINEL_SYNC_TOKEN_FILE`); `GITHUB_REPO` recorded in `config/instance.env`;
+    setup documented in the deployment docs. Absent token = feature off, current behavior
+    (changes stay VM-local until a manual sync) — never an error.
+  - *Workflow:* `update-instance.yml` gains a `sync_settings` job committing
+    `config/overrides.env` from the VM exactly like `sync_aois` commits AOI GeoJSONs
+    (ordering: sync jobs push before `update_vm` pulls, so the VM's untracked files become
+    tracked with identical content).
+  - *VM client:* after a successful settings write, AOI upload, or context upload, the
+    dashboard fires `workflow_dispatch` on `update-instance.yml` with inputs
+    `{sync_upstream: false, sync_aois: true, sync_settings: true, update_vm: false}` —
+    best-effort and **after** the local write commits (a dispatch failure logs a
+    `settings_change`-visible notice and never rolls back the edit); debounced so a burst
+    of edits fires one dispatch.
+  - *Tests:* token-absent no-op; dispatch payload + debounce against a stubbed HTTP
+    client; dispatch-failure leaves the edit intact; `vm_setup.sh` / workflow contract
+    tests extended per the existing pattern.
+  - Depends on 7.2 (settings writes exist); the AOI half only needs the existing upload
+    endpoints. Blocks nothing.
 
 ## Open questions
 
