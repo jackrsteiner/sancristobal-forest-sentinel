@@ -124,11 +124,32 @@
         opacity: 0; transition: opacity 0.3s; white-space: pre-line; text-align: center;
       }
       .coord-toast.visible { opacity: 1; }
+      /* Settings slide-out (#151): full height over the map area only — the
+         sidebar stays usable; the map stays mounted underneath. */
+      #sidebar-header { display: flex; align-items: baseline; justify-content: space-between; }
+      #settings-open {
+        font-size: 16px; padding: 2px 6px; background: none; border: none; cursor: pointer;
+      }
+      #settings-panel {
+        position: fixed; top: 0; right: 0; bottom: 0; left: 360px; /* sidebar width */
+        z-index: 1200; /* above Leaflet panes and controls */
+        background: #fff; border-left: 1px solid #ddd; padding: 16px;
+        overflow-y: auto; transform: translateX(100%); transition: transform 0.25s;
+      }
+      body.settings-visible #settings-panel { transform: translateX(0); }
+      #settings-header { display: flex; align-items: baseline; justify-content: space-between; }
+      #settings-header h2 { margin: 0 0 6px; }
+      #settings-close {
+        font-size: 14px; padding: 2px 8px; background: none; border: none; cursor: pointer;
+      }
     </style>
   </head>
   <body>
     <div id="sidebar">
-      <h1>Open Forest Sentinel</h1>
+      <div id="sidebar-header">
+        <h1>Open Forest Sentinel</h1>
+        <button id="settings-open" title="Settings" aria-label="Open settings">&#9881;&#65039;</button>
+      </div>
       <label>AOI: <select id="aoi-select"></select></label>
       <button id="aoi-toggle" hidden></button>
       <div id="summary" class="muted"></div>
@@ -196,14 +217,6 @@
         <h2>Methodologies</h2>
         <div id="methodology-list"></div>
       </div>
-      <div id="settings-panel">
-        <h2>Settings</h2>
-        <div class="muted">
-          Live values as the next run will resolve them. Changes are recorded without a
-          user identity (tunnel-as-auth).
-        </div>
-        <div id="settings-list" class="muted">Loading…</div>
-      </div>
       <div id="add-aoi">
         <h2>Add AOI</h2>
         <input type="file" id="aoi-file" accept=".geojson,.json" />
@@ -212,6 +225,20 @@
       </div>
     </div>
     <div id="map"></div>
+    <!-- Settings slide-out (#151): covers the map area, opened by the sidebar
+         gear. Content and behavior are unchanged from the old sidebar section —
+         the catalogue just gets the room it needs. -->
+    <div id="settings-panel" aria-hidden="true">
+      <div id="settings-header">
+        <h2>Settings</h2>
+        <button id="settings-close" title="Close settings" aria-label="Close settings">&#10005;</button>
+      </div>
+      <div class="muted">
+        Live values as the next run will resolve them. Changes are recorded without a
+        user identity (tunnel-as-auth).
+      </div>
+      <div id="settings-list" class="muted">Loading…</div>
+    </div>
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
       integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
@@ -1443,6 +1470,22 @@
       document.getElementById("filter-basis").addEventListener("change", renderEvents);
       document.getElementById("aoi-upload").addEventListener("click", uploadAoi);
       document.getElementById("context-upload").addEventListener("click", uploadContextLayer);
+      // Settings slide-out (#151): refresh the catalogue on every open so the
+      // values shown are current, not boot-time.
+      function setSettingsVisible(visible) {
+        document.body.classList.toggle("settings-visible", visible);
+        document.getElementById("settings-panel").setAttribute("aria-hidden", String(!visible));
+        if (visible) loadSettings();
+      }
+      document.getElementById("settings-open").addEventListener("click", () =>
+        setSettingsVisible(true),
+      );
+      document.getElementById("settings-close").addEventListener("click", () =>
+        setSettingsVisible(false),
+      );
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") setSettingsVisible(false);
+      });
       document.getElementById("aoi-toggle").addEventListener("click", toggleAoiEnabled);
       document.getElementById("aoi-select").addEventListener("change", (e) => {
         updateAoiToggle();
@@ -1456,7 +1499,7 @@
       loadAois();
       loadMethodologies();
       loadContextLayers();
-      loadSettings();
+      // Settings load on slide-out open (#151), not at boot.
       loadCapabilities();
     </script>
   </body>
