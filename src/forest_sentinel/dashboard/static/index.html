@@ -210,42 +210,68 @@
     ></script>
     <script>
       const map = L.map("map").setView([0, 0], 2);
-      // Basemap toggle (#145): streets (OSM) or free satellite imagery (Esri
-      // World Imagery — keyless XYZ, free with attribution; alternatives like
-      // EOX Sentinel-2 cloudless top out around z14). Overlays are unaffected:
-      // tile layers render in Leaflet's tile pane, below all vector panes.
+      // Basemap toggle (#145): streets (OSM), free satellite imagery (Esri
+      // World Imagery — keyless XYZ, free with attribution, high-res but a
+      // STATIC mosaic that may be years old), or NASA GIBS daily true color
+      // (VIIRS, ~375 m — coarse, but refreshed every day, so it can show
+      // yesterday's smoke/clearing that the Esri mosaic predates). Overlays
+      // are unaffected: tile layers render below all vector panes.
+      // GIBS tiles are per-day; request yesterday (UTC) since today's swaths
+      // are still filling in. Computed once at page load — good enough.
+      const gibsDate = new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 10);
       const baseLayers = {
-        streets: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-          attribution: "&copy; OpenStreetMap contributors",
-          maxZoom: 19,
-        }),
-        satellite: L.tileLayer(
-          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-          {
-            attribution:
-              "Imagery &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+        streets: {
+          label: "Streets",
+          layer: L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: "&copy; OpenStreetMap contributors",
             maxZoom: 19,
-          },
-        ),
+          }),
+        },
+        satellite: {
+          label: "Satellite",
+          layer: L.tileLayer(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            {
+              attribution:
+                "Imagery &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+              maxZoom: 19,
+            },
+          ),
+        },
+        gibs: {
+          label: "Daily satellite",
+          layer: L.tileLayer(
+            `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/${gibsDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`,
+            {
+              attribution: `NASA EOSDIS GIBS &mdash; VIIRS true color, ${gibsDate}, updated daily (~375 m)`,
+              maxNativeZoom: 9, // GIBS serves to z9; Leaflet upscales beyond
+              maxZoom: 19,
+            },
+          ),
+        },
       };
+      const baseOrder = ["streets", "satellite", "gibs"];
       let activeBase = "streets";
-      baseLayers[activeBase].addTo(map);
+      baseLayers[activeBase].layer.addTo(map);
 
       const BasemapToggle = L.Control.extend({
         options: { position: "topleft" },
         onAdd() {
           const button = L.DomUtil.create("button", "basemap-toggle");
           button.type = "button";
-          button.title = "Switch base map";
-          button.textContent = "Satellite"; // labels the layer you'd switch TO
+          button.title =
+            "Switch base map: Streets → Satellite (high-res, static) → Daily satellite (NASA GIBS, updated daily)";
+          const nextBase = () =>
+            baseOrder[(baseOrder.indexOf(activeBase) + 1) % baseOrder.length];
+          button.textContent = baseLayers[nextBase()].label; // labels the layer you'd switch TO
           // A control click must not fall through to the map (and copy coords).
           L.DomEvent.disableClickPropagation(button);
           L.DomEvent.on(button, "click", () => {
-            const next = activeBase === "streets" ? "satellite" : "streets";
-            map.removeLayer(baseLayers[activeBase]);
-            baseLayers[next].addTo(map);
+            const next = nextBase();
+            map.removeLayer(baseLayers[activeBase].layer);
+            baseLayers[next].layer.addTo(map);
             activeBase = next;
-            button.textContent = next === "streets" ? "Satellite" : "Streets";
+            button.textContent = baseLayers[nextBase()].label;
           });
           return button;
         },
