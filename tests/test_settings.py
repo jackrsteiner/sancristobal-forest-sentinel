@@ -150,7 +150,16 @@ def test_vm_setup_renders_timers_from_env() -> None:
     setup = (root / "scripts" / "vm_setup.sh").read_text()
     assert "s#@PIPELINE_SCHEDULE@#${PIPELINE_SCHEDULE}#g" in setup
     assert "s#@PRUNE_SCHEDULE@#${PRUNE_SCHEDULE}#g" in setup
-    assert 'PIPELINE_SCHEDULE="${PIPELINE_SCHEDULE:-03:00:00}"' in setup
-    assert 'PRUNE_SCHEDULE="${PRUNE_SCHEDULE:-02:30:00}"' in setup
     # Overrides are sourced for the unit-rendering vars, after instance.env.
     assert setup.index('. "${INSTANCE_ENV}"') < setup.index('. "${OVERRIDES_ENV}"')
+    # Regression: instance.env's blank schedule entries ride into the generated
+    # .env verbatim, and re-sourcing it (for alembic) sets them back to empty —
+    # so the defaults must be applied AFTER that line, or the timers render an
+    # empty OnCalendar= (a bad unit file setting that fails the whole setup).
+    env_resource = setup.index('set -a; . "${APP_DIR}/.env"; set +a')
+    for default in (
+        'PIPELINE_TIMEOUT="${PIPELINE_TIMEOUT:-20h}"',
+        'PIPELINE_SCHEDULE="${PIPELINE_SCHEDULE:-03:00:00}"',
+        'PRUNE_SCHEDULE="${PRUNE_SCHEDULE:-02:30:00}"',
+    ):
+        assert setup.index(default) > env_resource

@@ -75,11 +75,6 @@ if [ -z "${PROJECT_ID:-}" ]; then
         http://metadata.google.internal/computeMetadata/v1/project/project-id 2>/dev/null || true)"
 fi
 DASHBOARD_PORT="${DASHBOARD_PORT:-8000}"
-PIPELINE_TIMEOUT="${PIPELINE_TIMEOUT:-20h}"
-# Timer schedules (bead 7.5): a time of day (renders as daily) or a systemd
-# shorthand (hourly/daily/weekly). Space-free by construction — see above.
-PIPELINE_SCHEDULE="${PIPELINE_SCHEDULE:-03:00:00}"
-PRUNE_SCHEDULE="${PRUNE_SCHEDULE:-02:30:00}"
 # Image mode (#96): blank (the default) builds from source with uv; a
 # published image reference (e.g. ghcr.io/<owner>/open-forest-sentinel:<sha>)
 # runs the pipeline/dashboard/prune from that container instead.
@@ -147,6 +142,15 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 set -a; . "${APP_DIR}/.env"; set +a
+# Default the systemd-rendering knobs AFTER sourcing .env: the generated file
+# carries instance.env verbatim, where these are legitimately blank (= use the
+# default), so defaulting earlier gets clobbered back to empty here — and an
+# empty OnCalendar=/TimeoutStartSec= is a bad unit file setting that fails the
+# whole setup. Schedules (bead 7.5): a time of day (renders as daily) or a
+# systemd shorthand (hourly/daily/weekly). Space-free by construction.
+PIPELINE_TIMEOUT="${PIPELINE_TIMEOUT:-20h}"
+PIPELINE_SCHEDULE="${PIPELINE_SCHEDULE:-03:00:00}"
+PRUNE_SCHEDULE="${PRUNE_SCHEDULE:-02:30:00}"
 if [ -n "${APP_IMAGE}" ]; then
     echo "==> Image mode: pulling ${APP_IMAGE} (no source build on the VM)"
     sudo docker pull "${APP_IMAGE}"
