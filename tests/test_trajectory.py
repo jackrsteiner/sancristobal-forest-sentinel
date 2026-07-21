@@ -168,6 +168,63 @@ def test_cloudy_scene_is_skipped_not_misread(db_session: Session, tmp_path: Path
     assert result.state == trajectory.STATE_PERSISTENT
 
 
+def _write_nbr_ee_style(path: Path, data: np.ndarray) -> None:
+    """Earth Engine convention: masked pixels are NaN and there is NO nodata tag."""
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=20,
+        width=20,
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(0.1, 0.9, _PIXEL, _PIXEL),
+    ) as dst:
+        dst.write(data.astype("float32"), 1)
+
+
+def test_ee_style_nan_pixels_never_poison_the_trajectory(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """Regression (observed live): EE-exported COGs carry NaN for masked pixels
+    with no nodata tag. Unmasked, they turned every mean into NaN — which the
+    classifier fell through to "recovering" and pydantic serialized as null,
+    crashing the sparkline. NaNs must count as invalid pixels instead."""
+    from forest_sentinel.models import Aoi
+
+    event = _setup(db_session, tmp_path, post={})
+    aoi = db_session.get(Aoi, event.aoi_id)
+
+    # Day 10: footprint half NaN (cloud), half still cleared -> a usable point
+    # with valid_fraction ~= 0.5 and a finite low mean.
+    half = np.full((20, 20), 0.6, dtype="float32")
+    half[5:10, 5:10] = 0.12
+    half[5:10, 5:7] = np.nan  # 2 of 5 footprint columns masked
+    half_path = tmp_path / "nbr-ee-10.tif"
+    _write_nbr_ee_style(half_path, half)
+    _add_nbr_raster(db_session, event, aoi=aoi, day=10, scene="traj-ee-10", cog_path=half_path)
+
+    # Day 15: footprint entirely NaN -> skipped, not a null/NaN point.
+    blank = np.full((20, 20), 0.6, dtype="float32")
+    blank[5:10, 5:10] = np.nan
+    blank_path = tmp_path / "nbr-ee-15.tif"
+    _write_nbr_ee_style(blank_path, blank)
+    _add_nbr_raster(db_session, event, aoi=aoi, day=15, scene="traj-ee-15", cog_path=blank_path)
+
+    result = trajectory.event_trajectory(db_session, event=event)
+    assert [p.date for p in result.points] == ["2026-06-05", "2026-06-10"]
+    day10 = result.points[-1]
+    assert day10.mean_nbr == pytest.approx(0.12, abs=1e-3)
+    assert day10.valid_fraction == pytest.approx(0.6, abs=0.05)  # 3 of 5 columns clear
+    assert result.state == trajectory.STATE_PERSISTENT
+    # Nothing non-finite may ever reach the payload.
+    payload = result.as_dict()
+    import math as _math
+
+    assert all(_math.isfinite(p["mean_nbr"]) for p in payload["points"])
+
+
 def test_same_day_granules_merge_pixel_weighted(db_session: Session, tmp_path: Path) -> None:
     from forest_sentinel.models import Aoi
 

@@ -101,7 +101,10 @@ def _build_mask(
                 resampling=rasterio.enums.Resampling.nearest,
             )
         for _, window in _windows(delta, window_size):
-            block = delta.read(1, window=window, masked=True)
+            # Earth Engine exports masked pixels as NaN with NO nodata tag, so
+            # the masked read alone does not exclude them — mask non-finite
+            # values or they count as valid data (same fix as trajectory.py).
+            block = np.ma.masked_invalid(delta.read(1, window=window, masked=True))
             rows, cols = window.toslices()
             valid[rows, cols] = ~np.ma.getmaskarray(block)
             hits = np.ma.filled(block < threshold, False)
@@ -171,7 +174,10 @@ def _polygon_statistics(
     persisted at extraction time because the source COG is prunable.
     """
     window = rasterio.features.geometry_window(delta, [geometry])
-    block = delta.read(1, window=window, masked=True)
+    # NaN-as-masked (no nodata tag) is the EE export convention: unmasked NaNs
+    # here would inflate valid_pixels and turn delta_mean/delta_min into NaN —
+    # which downstream confidence factors would ingest as recorded evidence.
+    block = np.ma.masked_invalid(delta.read(1, window=window, masked=True))
     rows, cols = window.toslices()
     polygon_mask = rasterio.features.geometry_mask(
         [geometry],

@@ -15,6 +15,7 @@ lifecycle, or confidence scoring.
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -117,6 +118,8 @@ def event_trajectory(session: Session, *, event: DisturbanceEvent) -> Trajectory
         if total == 0 or valid / total < MIN_FOOTPRINT_COVERAGE:
             continue
         mean = sum(m * v for m, v, _ in samples) / valid
+        if not math.isfinite(mean):  # belt-and-braces: never emit NaN/null
+            continue
         if date < detected_date:
             reference_values.append(mean)
             continue
@@ -178,7 +181,11 @@ def _footprint_statistics(
                 else rasterio.warp.transform_geom(_WGS84, src.crs, footprint)
             )
             window = rasterio.features.geometry_window(src, [geom])
-            data = src.read(1, window=window, masked=True)
+            # Earth Engine exports masked pixels as NaN with NO nodata tag, so
+            # the masked read alone does not exclude them: unmasked NaNs would
+            # poison the mean (NaN -> serialized null -> broken client) and
+            # inflate the valid count so cloudy looks stop being skipped.
+            data = np.ma.masked_invalid(src.read(1, window=window, masked=True))
             transform = src.window_transform(window)
     except (rasterio.errors.RasterioError, ValueError, OSError) as exc:
         logger.debug("trajectory read skipped for %s: %s", cog_path, exc)
