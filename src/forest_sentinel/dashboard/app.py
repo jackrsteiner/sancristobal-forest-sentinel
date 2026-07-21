@@ -29,7 +29,7 @@ from sqlalchemy import Engine, cast, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from forest_sentinel import dispatch, settings
+from forest_sentinel import dispatch, settings, trajectory
 from forest_sentinel.aoi import (
     AOIS_DIR_ENV_VAR,
     DEFAULT_AOIS_DIR,
@@ -712,6 +712,19 @@ def create_app() -> FastAPI:
             "feature_count": len(document.geometries),
             "file": str(target),
         }
+
+    @app.get("/api/events/{event_id}/trajectory")
+    def event_trajectory(event_id: int, session: SessionDep) -> dict[str, Any]:
+        """Post-detection footprint NBR trajectory + persistence state (#165).
+
+        Computed on demand from the retained NBR index COGs (local rasterio,
+        zero Earth Engine) — see ``trajectory.py``. Served separately from the
+        event detail so the detail stays cheap; the UI fetches it lazily.
+        """
+        event = session.get(DisturbanceEvent, event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="unknown event")
+        return trajectory.event_trajectory(session, event=event).as_dict()
 
     @app.get("/api/events/{event_id}")
     def event_detail(event_id: int, session: SessionDep) -> dict[str, Any]:
