@@ -7,8 +7,8 @@ the storage seam and recorded as a ``change_raster`` with provenance to the sour
 the methodology version, and every contributing ``index_raster`` (current + baseline).
 """
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +64,35 @@ class ChangeProduct:
     region: Any = None
 
 
+@dataclass
+class PendingDelta:
+    """One delta awaiting export: the request plus what its persistence needs."""
+
+    change_type: str
+    index_type: str
+    delta_image: Any
+    request: ExportRequest
+    baseline: list[Observation]
+
+
+@dataclass
+class ChangePlan:
+    """Pass-1 outcome for one observation (#156).
+
+    ``settled`` products (frozen/reused) are final; ``pending`` deltas still need
+    their exports run. The pipeline collects many plans' requests into ONE
+    ``storage.export_images`` batch so the Earth Engine queue waits overlap
+    across observations, then lands each plan with ``persist_change_products``
+    — keeping the per-observation checkpoint commits of the serial design.
+    """
+
+    observation: Observation
+    baseline_window: int
+    settled: list[ChangeProduct] = field(default_factory=list)
+    pending: list[PendingDelta] = field(default_factory=list)
+    region: Any = None  # scene ∩ AOI (#78); set iff ``pending`` is non-empty
+
+
 def compute_change_products_for_observation(
     session: Session,
     *,
@@ -87,10 +116,49 @@ def compute_change_products_for_observation(
     ``on_export_submit`` (if given) is called with the number of export requests
     immediately before they are handed to Earth Engine — only when this observation
     actually submits work (frozen/reused deltas submit nothing).
+
+    This is the single-observation convenience over the plan/persist split (#156):
+    the pipeline batches many observations' plans into one export submission.
+    """
+    plan = plan_change_products(
+        session,
+        aoi=aoi,
+        observation=observation,
+        methodology=methodology,
+        baseline_window=baseline_window,
+        scale=scale,
+        ee_module=ee_module,
+    )
+    export_results: list[Path | StorageError] = []
+    if plan.pending:
+        if on_export_submit is not None:
+            on_export_submit(len(plan.pending))
+        export_results = storage.export_images([item.request for item in plan.pending])
+    return persist_change_products(
+        session, methodology=methodology, plan=plan, export_results=export_results
+    )
+
+
+def plan_change_products(
+    session: Session,
+    *,
+    aoi: Aoi,
+    observation: Observation,
+    methodology: MethodologyVersion,
+    baseline_window: int = DEFAULT_BASELINE_WINDOW,
+    scale: int = indices.DEFAULT_SCALE_METERS,
+    ee_module: Any = earthengine,
+) -> ChangePlan:
+    """Pass 1: classify each change type and build its export request (#156).
+
+    Frozen and reused rasters land in ``settled``; anything needing an export
+    lands in ``pending`` with its delta image and request already built. Nothing
+    is exported or persisted here, so many observations' plans can be submitted
+    to Earth Engine together.
     """
     region = mapping(to_shape(aoi.geometry))
     date = observation.acquired_at.date().isoformat()
-    results: list[ChangeProduct] = []
+    plan = ChangePlan(observation=observation, baseline_window=baseline_window)
 
     # Masked source images are shared across change types and built lazily (a fully
     # frozen observation needs none). The baseline is per index type: only prior
@@ -128,9 +196,8 @@ def compute_change_products_for_observation(
         nd_bands = indices.index_bands(obs.sensor)[index_type]
         return ee_module.normalized_difference(masked_image(obs), nd_bands)
 
-    # Pass 1: decide per change type — frozen / reused / needs export — and build
-    # the pending export requests so both deltas go to Earth Engine as one batch.
-    pending: list[tuple[str, str, Any, CogKey, list[Observation]]] = []
+    # Decide per change type — frozen / reused / needs export — and build the
+    # pending export requests.
     for change_type, index_type in CHANGE_TYPES.items():
         # Frozen: the existing raster is evidence for tracked candidates. Recomputing
         # would overwrite its COG (same path) and rewrite its recorded sources with a
@@ -142,7 +209,7 @@ def compute_change_products_for_observation(
             raster_lineage_id=methodology.raster_lineage_id,
         )
         if existing is not None and change_raster_is_frozen(session, existing.id):
-            results.append(
+            plan.settled.append(
                 ChangeProduct(change_type=change_type, change_raster=existing, delta_image=None)
             )
             continue
@@ -151,7 +218,7 @@ def compute_change_products_for_observation(
         # The recorded baseline (change_raster_source) stands — it is not
         # recomputed as new prior observations arrive.
         if existing is not None and Path(existing.cog_path).exists():
-            results.append(
+            plan.settled.append(
                 ChangeProduct(
                     change_type=change_type,
                     change_raster=existing,
@@ -180,70 +247,84 @@ def compute_change_products_for_observation(
             date=date,
             filename=f"{change_type}-{observation.source_scene_id}.tif",
         )
-        pending.append((change_type, index_type, delta, key, baseline_obs))
-
-    # Pass 2: batch-export, then persist each success. Successes are recorded even
-    # when a sibling delta failed (rows are consistent under upserts and resume on
-    # the next run); the first failure is re-raised so the pipeline counts this
-    # observation as failed, matching the pre-batch behavior.
-    export_error: StorageError | None = None
-    if pending:
-        # Both deltas derive from the current observation, so one scene ∩ AOI
-        # clip (#78) covers the batch; the same region feeds candidate
-        # extraction via ChangeProduct.region.
-        observation_region = indices.clipped_region(
-            masked_image(observation), region, ee_module=ee_module
-        )
-        if on_export_submit is not None:
-            on_export_submit(len(pending))
-        export_results = storage.export_images(
-            [
-                ExportRequest(delta, key, scale=scale, region=observation_region)
-                for (_, _, delta, key, _) in pending
-            ]
-        )
-        for (change_type, index_type, delta, _key, baseline_obs), export_result in zip(
-            pending, export_results, strict=True
-        ):
-            if isinstance(export_result, StorageError):
-                export_error = export_error or export_result
-                continue
-
-            source_obs_ids = [observation.id, *(prior.id for prior in baseline_obs)]
-            index_rows = (
-                session.execute(
-                    select(IndexRaster)
-                    .where(IndexRaster.observation_id.in_(source_obs_ids))
-                    .where(IndexRaster.index_type == index_type)
-                    .where(IndexRaster.raster_lineage_id == methodology.raster_lineage_id)
-                )
-                .scalars()
-                .all()
+        if plan.region is None:
+            # Both deltas derive from the current observation, so one scene ∩ AOI
+            # clip (#78) covers them; the same region feeds candidate extraction
+            # via ChangeProduct.region.
+            plan.region = indices.clipped_region(
+                masked_image(observation), region, ee_module=ee_module
             )
-            current_index = next(
-                (row for row in index_rows if row.observation_id == observation.id), None
-            )
-            fraction = current_index.valid_pixel_fraction if current_index is not None else None
-
-            change = _upsert_change_raster(
-                session,
-                observation_id=observation.id,
-                raster_lineage_id=methodology.raster_lineage_id,
+        plan.pending.append(
+            PendingDelta(
                 change_type=change_type,
-                cog_path=str(export_result),
-                baseline_window=baseline_window,
-                valid_pixel_fraction=fraction,
+                index_type=index_type,
+                delta_image=delta,
+                request=ExportRequest(delta, key, scale=scale, region=plan.region),
+                baseline=baseline_obs,
             )
-            session.flush()
-            _replace_sources(session, change.id, [row.id for row in index_rows])
-            results.append(
-                ChangeProduct(
-                    change_type=change_type,
-                    change_raster=change,
-                    delta_image=delta,
-                    region=observation_region,
-                )
+        )
+
+    return plan
+
+
+def persist_change_products(
+    session: Session,
+    *,
+    methodology: MethodologyVersion,
+    plan: ChangePlan,
+    export_results: Sequence[Path | StorageError],
+) -> list[ChangeProduct]:
+    """Pass 2: record ``plan``'s exported deltas (#156).
+
+    ``export_results`` must be ``plan.pending``'s results, in order. Successes
+    are persisted even when a sibling delta failed (rows are consistent under
+    upserts and resume on the next run); the first failure is re-raised after,
+    so the pipeline counts the observation as failed — matching the pre-split
+    behavior — while siblings' committed work stands.
+    """
+    observation = plan.observation
+    results = list(plan.settled)
+    export_error: StorageError | None = None
+    for pending, export_result in zip(plan.pending, export_results, strict=True):
+        if isinstance(export_result, StorageError):
+            export_error = export_error or export_result
+            continue
+
+        source_obs_ids = [observation.id, *(prior.id for prior in pending.baseline)]
+        index_rows = (
+            session.execute(
+                select(IndexRaster)
+                .where(IndexRaster.observation_id.in_(source_obs_ids))
+                .where(IndexRaster.index_type == pending.index_type)
+                .where(IndexRaster.raster_lineage_id == methodology.raster_lineage_id)
             )
+            .scalars()
+            .all()
+        )
+        current_index = next(
+            (row for row in index_rows if row.observation_id == observation.id), None
+        )
+        fraction = current_index.valid_pixel_fraction if current_index is not None else None
+
+        change = _upsert_change_raster(
+            session,
+            observation_id=observation.id,
+            raster_lineage_id=methodology.raster_lineage_id,
+            change_type=pending.change_type,
+            cog_path=str(export_result),
+            baseline_window=plan.baseline_window,
+            valid_pixel_fraction=fraction,
+        )
+        session.flush()
+        _replace_sources(session, change.id, [row.id for row in index_rows])
+        results.append(
+            ChangeProduct(
+                change_type=pending.change_type,
+                change_raster=change,
+                delta_image=pending.delta_image,
+                region=plan.region,
+            )
+        )
 
     session.flush()
     if export_error is not None:

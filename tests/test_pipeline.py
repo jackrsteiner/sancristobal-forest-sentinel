@@ -728,13 +728,24 @@ def test_run_is_recorded_with_labelled_batch_events(
         if event.stage == "index" and event.outcome == "succeeded"
     ]
     assert succeeded == [(1, 2), (2, 2)]
-    # Change stage: one batch per observation; scene-1 has no baseline (no submit).
+    # Change stage (#156): 3 observations in chunks of 2 -> 2 batches. Scene-1
+    # (no baseline yet) submits nothing, so chunk 1 carries only scene-2's two
+    # deltas and chunk 2 carries scene-3's.
     change_submitted = [
         (event.batch_index, event.batch_total, event.exports)
         for event in events
         if event.stage == "change" and event.outcome == "submitted"
     ]
-    assert change_submitted == [(2, 3, 2), (3, 3, 2)]
+    assert change_submitted == [(1, 2, 2), (2, 2, 2)]
+    # Commits stay per-observation: one succeeded event per observation, labelled
+    # with its chunk and scene id, in chronological order.
+    change_succeeded = [
+        (event.batch_index, event.batch_total, event.message)
+        for event in events
+        if event.stage == "change" and event.outcome == "succeeded"
+    ]
+    assert [entry[:2] for entry in change_succeeded] == [(1, 2), (1, 2), (2, 2)]
+    assert ["scene-1" in entry[2] for entry in change_succeeded] == [True, False, False]
     # Stage transitions are recorded too.
     assert {event.stage for event in events if event.outcome == "info"} == {
         "discovery",
@@ -756,6 +767,60 @@ def test_run_is_recorded_with_labelled_batch_events(
         )
         for record in caplog.records
     )
+
+
+def test_chunked_change_stage_isolates_a_failed_sibling(
+    db_session: Session, tmp_path: Path
+) -> None:
+    """#156: one observation's failed export inside a chunk loses only that
+    observation — chunk siblings' rasters and candidates persist, and the chunk's
+    exports were genuinely submitted together."""
+    from forest_sentinel.models import PipelineRun
+
+    class SceneTwoFailsStorage(FakeStorage):
+        def export_images(self, requests: Any) -> list[Path | StorageError]:
+            results = super().export_images(requests)
+            return [
+                StorageError("forced failure for scene-2")
+                if "scene-2" in request.key.filename and request.key.product.startswith("delta")
+                else result
+                for request, result in zip(requests, results, strict=True)
+            ]
+
+    aoi = make_aoi(db_session, name="Hallway AOI")
+    methodology = make_methodology(db_session)
+    storage = SceneTwoFailsStorage(tmp_path)
+    summary = run_pipeline(
+        db_session,
+        aoi=aoi,
+        since=date(2026, 1, 1),
+        until=date(2026, 2, 1),
+        methodology=methodology,
+        storage=storage,
+        max_concurrent_exports=6,  # chunk of 3 -> all observations in ONE chunk
+        ee_module=_fake_ee((1, 2, 3)),
+    )
+    db_session.commit()
+
+    # scene-1 has no baseline (nothing to export); scene-2's deltas fail;
+    # scene-3 lands with rasters + candidates despite sharing scene-2's chunk.
+    assert summary.export_failures == 1
+    assert db_session.execute(select(PipelineRun)).scalar_one().status == "partial"
+    per_scene = {
+        scene: db_session.execute(
+            select(func.count())
+            .select_from(ChangeRaster)
+            .join(Observation, ChangeRaster.observation_id == Observation.id)
+            .where(Observation.source_scene_id == scene)
+        ).scalar_one()
+        for scene in ("scene-1", "scene-2", "scene-3")
+    }
+    assert per_scene == {"scene-1": 0, "scene-2": 0, "scene-3": 2}
+    assert db_session.execute(select(func.count()).select_from(DisturbanceCandidate)).scalar_one()
+    # The change chunk submitted both observations' deltas as one batch (2 + 2);
+    # the index stage batched all three observations (6 exports) before it.
+    assert 6 in storage.batch_sizes
+    assert 4 in storage.batch_sizes
 
 
 def test_failed_change_batch_records_failure_and_partial_status(
