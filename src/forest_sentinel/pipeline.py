@@ -41,7 +41,7 @@ from forest_sentinel import (
 from forest_sentinel.earthengine import EarthEngineError
 from forest_sentinel.hls import discover_observations
 from forest_sentinel.models import Aoi, ChangeRaster, IndexRaster, MethodologyVersion, Observation
-from forest_sentinel.storage import CogKey, Storage, StorageError
+from forest_sentinel.storage import CogKey, ExportRequest, Storage, StorageError
 
 logger = logging.getLogger(__name__)
 
@@ -500,77 +500,130 @@ def _run_pipeline_locked(
     change_reused = 0
     candidate_count = 0
     surviving = [obs for obs in observations if obs.id not in failed_observation_ids]
-    change_batches = len(surviving)
-    recorder.record("change", "info", message=f"{change_batches} batches (one per observation)")
-    for batch_index, observation in enumerate(surviving, start=1):
-        try:
-            products = change.compute_change_products_for_observation(
-                session,
-                aoi=aoi,
-                observation=observation,
-                methodology=methodology,
-                storage=storage,
-                baseline_window=baseline_window,
-                scale=scale,
-                ee_module=ee_module,
-                on_export_submit=_submit_event(recorder, "change", batch_index, change_batches),
-            )
-            observation_candidates = 0
-            for product in products:
-                if product.change_type != CANDIDATE_CHANGE_TYPE:
-                    continue
-                # Vectorize over the same scene ∩ AOI region the delta was
-                # exported with (#78); whole-AOI is the defensive fallback.
-                observation_candidates += _candidates_for_product(
+    # Chunked like the index stage (#156): plan a chunk of observations, submit
+    # ALL their delta exports as one batch so the EE queue waits overlap, then
+    # land each observation chronologically — persist, extract candidates,
+    # checkpoint-commit — exactly the serial per-observation invariants, just
+    # after a shared wait instead of a private one. An interruption loses at
+    # most one chunk; everything landed before it is committed.
+    change_chunks = _chunked(surviving, chunk_size)
+    change_batches = len(change_chunks)
+    recorder.record(
+        "change",
+        "info",
+        message=(
+            f"{change_batches} batches over {len(surviving)} observations "
+            f"(chunks of {chunk_size}; commits stay per-observation)"
+        ),
+    )
+    for batch_index, chunk in enumerate(change_chunks, start=1):
+        plans: list[change.ChangePlan | None] = []
+        chunk_requests: list[ExportRequest] = []
+        for observation in chunk:
+            try:
+                plan = change.plan_change_products(
                     session,
-                    product=product,
-                    methodology=methodology,
                     aoi=aoi,
-                    storage=storage,
-                    fallback_region=region,
+                    observation=observation,
+                    methodology=methodology,
+                    baseline_window=baseline_window,
                     scale=scale,
-                    threshold=threshold,
-                    min_area_m2=min_area_m2,
                     ee_module=ee_module,
                 )
-            change_count += len(products)
-            observation_reused = sum(1 for product in products if product.reused)
-            change_reused += observation_reused
-            candidate_count += observation_candidates
-            # Checkpoint the rasters together with their candidates: reuse of a
-            # change raster on a later run therefore implies its candidates exist.
-            # The batch outcome event rides the same commit via recorder.record.
-            exported = sum(1 for product in products if product.delta_image is not None)
-            recorder.record(
-                "change",
-                "succeeded",
-                batch_index=batch_index,
-                batch_total=change_batches,
-                exports=exported,
-                message=(
-                    f"{exported} exported, {observation_reused} reused, "
-                    f"{observation_candidates} candidates"
-                ),
-            )
-        except (StorageError, EarthEngineError) as exc:
-            export_failures += 1
-            logger.warning(
-                "skipping observation %s: change/candidate stage failed (%s)",
-                observation.source_scene_id,
-                exc,
-            )
-            # Discard this observation's partial change-stage state so a committed
-            # (non-frozen) change raster always implies extracted candidates; its
-            # orphaned COGs are re-exported on retry (the exists-check needs the row).
-            # Rollback happens BEFORE recording so the failure event survives it.
-            session.rollback()
-            recorder.record(
-                "change",
-                "failed",
-                batch_index=batch_index,
-                batch_total=change_batches,
-                message=str(exc),
-            )
+            except (StorageError, EarthEngineError) as exc:
+                plans.append(None)
+                export_failures += 1
+                failed_observation_ids.add(observation.id)
+                logger.warning(
+                    "skipping observation %s: change planning failed (%s)",
+                    observation.source_scene_id,
+                    exc,
+                )
+                recorder.record(
+                    "change",
+                    "failed",
+                    batch_index=batch_index,
+                    batch_total=change_batches,
+                    message=f"{observation.source_scene_id}: {exc}",
+                )
+                continue
+            plans.append(plan)
+            chunk_requests.extend(item.request for item in plan.pending)
+        if chunk_requests:
+            _submit_event(recorder, "change", batch_index, change_batches)(len(chunk_requests))
+        chunk_results = storage.export_images(chunk_requests) if chunk_requests else []
+
+        offset = 0
+        for observation, obs_plan in zip(chunk, plans, strict=True):
+            if obs_plan is None:
+                continue
+            observation_results = chunk_results[offset : offset + len(obs_plan.pending)]
+            offset += len(obs_plan.pending)
+            try:
+                products = change.persist_change_products(
+                    session,
+                    methodology=methodology,
+                    plan=obs_plan,
+                    export_results=observation_results,
+                )
+                observation_candidates = 0
+                for product in products:
+                    if product.change_type != CANDIDATE_CHANGE_TYPE:
+                        continue
+                    # Vectorize over the same scene ∩ AOI region the delta was
+                    # exported with (#78); whole-AOI is the defensive fallback.
+                    observation_candidates += _candidates_for_product(
+                        session,
+                        product=product,
+                        methodology=methodology,
+                        aoi=aoi,
+                        storage=storage,
+                        fallback_region=region,
+                        scale=scale,
+                        threshold=threshold,
+                        min_area_m2=min_area_m2,
+                        ee_module=ee_module,
+                    )
+                change_count += len(products)
+                observation_reused = sum(1 for product in products if product.reused)
+                change_reused += observation_reused
+                candidate_count += observation_candidates
+                # Checkpoint the rasters together with their candidates: reuse of a
+                # change raster on a later run therefore implies its candidates exist.
+                # The batch outcome event rides the same commit via recorder.record.
+                exported = sum(1 for product in products if product.delta_image is not None)
+                recorder.record(
+                    "change",
+                    "succeeded",
+                    batch_index=batch_index,
+                    batch_total=change_batches,
+                    exports=exported,
+                    message=(
+                        f"{observation.source_scene_id}: {exported} exported, "
+                        f"{observation_reused} reused, {observation_candidates} candidates"
+                    ),
+                )
+            except (StorageError, EarthEngineError) as exc:
+                export_failures += 1
+                logger.warning(
+                    "skipping observation %s: change/candidate stage failed (%s)",
+                    observation.source_scene_id,
+                    exc,
+                )
+                # Discard this observation's partial change-stage state so a committed
+                # (non-frozen) change raster always implies extracted candidates; its
+                # orphaned COGs are re-exported on retry (the exists-check needs the
+                # row). Rollback happens BEFORE recording so the failure event survives
+                # it — and it only spans THIS observation: chunk siblings landed
+                # earlier already committed with their own events.
+                session.rollback()
+                recorder.record(
+                    "change",
+                    "failed",
+                    batch_index=batch_index,
+                    batch_total=change_batches,
+                    message=f"{observation.source_scene_id}: {exc}",
+                )
 
     radar_count = radar_reused = radar_candidates = 0
     if radar_methodology is not None:
