@@ -112,6 +112,14 @@
       .run-event-warning { color: #e67e22; }
       /* Map controls (#145/#153): basemap buttons + click-to-copy toast. */
       .basemap-switcher { display: flex; gap: 4px; }
+      /* GIBS date slider (#158): shown only while Daily satellite is active. */
+      .gibs-slider {
+        display: flex; flex-direction: column; gap: 2px; padding: 6px 10px;
+        background: #fff; border: 2px solid rgba(0, 0, 0, 0.25); border-radius: 4px;
+      }
+      .gibs-slider[hidden] { display: none; }
+      .gibs-slider input[type="range"] { width: 190px; margin: 0; }
+      .gibs-slider-label { font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
       .basemap-toggle {
         font: inherit; font-size: 12px; padding: 4px 8px; cursor: pointer;
         background: #fff; border: 2px solid rgba(0, 0, 0, 0.25); border-radius: 4px;
@@ -256,9 +264,20 @@
       // (VIIRS, ~375 m — coarse, but refreshed every day, so it can show
       // yesterday's smoke/clearing that the Esri mosaic predates). Overlays
       // are unaffected: tile layers render below all vector panes.
-      // GIBS tiles are per-day; request yesterday (UTC) since today's swaths
-      // are still filling in. Computed once at page load — good enough.
-      const gibsDate = new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 10);
+      // GIBS tiles are per-day; default to yesterday (UTC) since today's swaths
+      // are still filling in. A slider (#158) scrubs the past month: the date
+      // is baked into the tile URL, so changing days is just layer.setUrl().
+      const GIBS_SLIDER_DAYS = 30;
+      function gibsDateForDaysAgo(daysAgo) {
+        return new Date(Date.now() - daysAgo * 24 * 3600 * 1000).toISOString().slice(0, 10);
+      }
+      function gibsUrl(date) {
+        return `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/${date}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`;
+      }
+      function gibsAttribution(date) {
+        return `NASA EOSDIS GIBS &mdash; VIIRS true color, ${date}, updated daily (~375 m)`;
+      }
+      let gibsDate = gibsDateForDaysAgo(1);
       const baseLayers = {
         streets: {
           label: "Streets",
@@ -280,16 +299,31 @@
         },
         gibs: {
           label: "Daily satellite",
-          layer: L.tileLayer(
-            `https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_SNPP_CorrectedReflectance_TrueColor/default/${gibsDate}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg`,
-            {
-              attribution: `NASA EOSDIS GIBS &mdash; VIIRS true color, ${gibsDate}, updated daily (~375 m)`,
-              maxNativeZoom: 9, // GIBS serves to z9; Leaflet upscales beyond
-              maxZoom: 19,
-            },
-          ),
+          layer: L.tileLayer(gibsUrl(gibsDate), {
+            attribution: gibsAttribution(gibsDate),
+            maxNativeZoom: 9, // GIBS serves to z9; Leaflet upscales beyond
+            maxZoom: 19,
+          }),
         },
       };
+
+      // Scrub the GIBS day (#158): swap the tile URL in place and keep the
+      // attribution's date honest. Leaflet only auto-manages attribution on
+      // layer add/remove, so an in-place change updates the control manually.
+      function setGibsDate(date) {
+        const clampedOldest = gibsDateForDaysAgo(GIBS_SLIDER_DAYS);
+        const clampedNewest = gibsDateForDaysAgo(1);
+        const clamped = date < clampedOldest ? clampedOldest : date > clampedNewest ? clampedNewest : date;
+        if (clamped === gibsDate) return;
+        const previous = gibsAttribution(gibsDate);
+        gibsDate = clamped;
+        baseLayers.gibs.layer.setUrl(gibsUrl(gibsDate));
+        baseLayers.gibs.layer.options.attribution = gibsAttribution(gibsDate);
+        if (activeBase === "gibs") {
+          map.attributionControl.removeAttribution(previous);
+          map.attributionControl.addAttribution(gibsAttribution(gibsDate));
+        }
+      }
       const baseOrder = ["streets", "satellite", "gibs"];
       let activeBase = "streets";
       baseLayers[activeBase].layer.addTo(map);
@@ -316,6 +350,7 @@
                   baseLayers[key].layer.addTo(map);
                   activeBase = key;
                   render();
+                  syncGibsSlider();
                 });
               });
           };
@@ -324,6 +359,65 @@
         },
       });
       map.addControl(new BasemapSwitcher());
+
+      // Date slider for the Daily satellite basemap (#158): visible only while
+      // GIBS is active. Sliding right moves forward in time (rightmost =
+      // yesterday); the label updates instantly, the tile swap is debounced.
+      let gibsSliderBox = null;
+      let gibsSliderInput = null;
+      let gibsSliderLabel = null;
+      let gibsSliderDebounce = null;
+      const GibsSlider = L.Control.extend({
+        options: { position: "bottomleft" },
+        onAdd() {
+          const box = L.DomUtil.create("div", "gibs-slider");
+          // Slider interaction must neither pan the map nor copy coordinates.
+          L.DomEvent.disableClickPropagation(box);
+          L.DomEvent.disableScrollPropagation(box);
+          const label = L.DomUtil.create("div", "gibs-slider-label", box);
+          const input = L.DomUtil.create("input", "", box);
+          input.type = "range";
+          input.min = "1";
+          input.max = String(GIBS_SLIDER_DAYS);
+          input.value = String(GIBS_SLIDER_DAYS);
+          input.title = "Imagery date (past month)";
+          L.DomEvent.on(input, "input", () => {
+            const daysAgo = GIBS_SLIDER_DAYS + 1 - Number(input.value);
+            label.textContent = gibsDateForDaysAgo(daysAgo);
+            clearTimeout(gibsSliderDebounce);
+            gibsSliderDebounce = setTimeout(() => setGibsDate(gibsDateForDaysAgo(daysAgo)), 150);
+          });
+          gibsSliderBox = box;
+          gibsSliderInput = input;
+          gibsSliderLabel = label;
+          label.textContent = gibsDate;
+          box.hidden = activeBase !== "gibs";
+          return box;
+        },
+      });
+      map.addControl(new GibsSlider());
+
+      function syncGibsSlider() {
+        if (!gibsSliderBox) return;
+        gibsSliderBox.hidden = activeBase !== "gibs";
+        let daysAgo = 1;
+        for (let d = 1; d <= GIBS_SLIDER_DAYS; d += 1) {
+          if (gibsDateForDaysAgo(d) === gibsDate) {
+            daysAgo = d;
+            break;
+          }
+        }
+        gibsSliderInput.value = String(GIBS_SLIDER_DAYS + 1 - daysAgo);
+        gibsSliderLabel.textContent = gibsDate;
+      }
+
+      // Review-tool hook (#158): clicking an event jumps the imagery to its
+      // first-detected day (clamped into the slider's month) while GIBS is up.
+      function jumpGibsToDate(iso) {
+        if (activeBase !== "gibs" || !iso) return;
+        setGibsDate(iso.slice(0, 10));
+        syncGibsSlider();
+      }
 
       // Click-to-copy coordinates (#145). Also fires when a click opens a
       // feature popup — harmless, the clicked point is still what's copied.
@@ -430,6 +524,7 @@
 
       let eventsLayer = null;
       const layersById = {};
+      const eventFirstDetectedById = {};
       const aoiBboxById = {};
       let currentAoiId = null;
       let currentCollection = null;
@@ -565,6 +660,7 @@
             }),
             onEachFeature: (feature, layer) => {
               layersById[feature.properties.id] = layer;
+              eventFirstDetectedById[feature.properties.id] = feature.properties.first_detected_at;
               // Attribution at a glance (#119): the popup carries the same
               // status / basis badges as the card. Server-enumerated values
               // only — no free text — so innerHTML is safe here.
@@ -1189,6 +1285,7 @@
         const card = document.getElementById(`event-${eventId}`);
         if (card) card.classList.add("selected");
         if (layersById[eventId]) map.fitBounds(layersById[eventId].getBounds(), { maxZoom: 14 });
+        jumpGibsToDate(eventFirstDetectedById[eventId]);
 
         const detail = await (await fetch(`/api/events/${eventId}`)).json();
         const rows = detail.timeline
