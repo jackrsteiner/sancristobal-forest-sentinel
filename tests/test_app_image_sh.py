@@ -34,8 +34,16 @@ def _run_wrapper(
         # VM) — point HOME elsewhere so the stubs win.
         HOME=str(tmp_path),
         ENV_FILE=str(env_file),
+        # Hermetic against INSTANCE repos: their CI checkouts carry committed
+        # AOIs in config/aois/ (harvested uploads) and a committed
+        # config/overrides.env (synced settings edits). Without this isolation
+        # the wrapper loops over the real AOIs — observed as instance-CI-only
+        # failures — and sources real overrides into the assertions.
+        FOREST_SENTINEL_AOIS_DIR=str(tmp_path / "aois"),
+        OVERRIDES_FILE=str(tmp_path / "overrides.env"),
     )
     env.pop("APP_IMAGE", None)
+    env.pop("WINDOW_DAYS", None)
     result = subprocess.run(
         ["bash", str(SCRIPTS / script), *args],
         env=env,
