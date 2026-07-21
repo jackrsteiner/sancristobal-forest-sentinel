@@ -176,7 +176,10 @@ rollout, with four toggles (all on by default):
   VM itself holds no GitHub credentials for repo contents, so this workflow is
   what turns an upload into a committed file.
 - **sync_settings** — same, for dashboard settings edits
-  (`config/overrides.env` on the VM).
+  (`config/overrides.env` on the VM). Settings marked "next-run" take effect
+  at the start of the next pipeline/prune run directly from that file — no
+  update_vm needed; only "update-instance" settings (systemd-rendered values
+  like schedules and the pipeline timeout) wait for an update_vm.
 - **update_vm** — authenticates via Workload Identity Federation and SSHes to
   the VM (no keys, nothing to install locally) to `git pull` and re-run
   `vm_setup.sh`: migrations applied, `.env` regenerated, systemd units

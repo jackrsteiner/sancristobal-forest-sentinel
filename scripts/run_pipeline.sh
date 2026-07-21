@@ -31,6 +31,17 @@ if [ -f "${ENV_FILE}" ]; then
     . "${ENV_FILE}"
     set +a
 fi
+# Dashboard settings edits (#162): sourced AFTER .env so "next-run" settings
+# genuinely apply on the next run — .env only embeds a snapshot of this file
+# from the last vm_setup.sh regeneration. Safe to source: the settings write
+# path only emits space-free, shell-inert KEY=value lines (bead 7.5).
+OVERRIDES_FILE="${OVERRIDES_FILE:-config/overrides.env}"
+if [ -f "${OVERRIDES_FILE}" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "${OVERRIDES_FILE}"
+    set +a
+fi
 
 AOI_PATH="${AOI_PATH:-examples/aoi-sample.geojson}"
 AOIS_DIR="${FOREST_SENTINEL_AOIS_DIR:-config/aois}"
@@ -46,6 +57,9 @@ app_run() {
         local cog_root="${FOREST_SENTINEL_COG_ROOT:-/data/cogs}"
         local docker_args=(run --rm --network host)
         [ -f "${ENV_FILE}" ] && docker_args+=(--env-file "${ENV_FILE}")
+        # Overrides ride as a second --env-file: docker's last-file-wins gives
+        # the same precedence as the shell sourcing above (#162).
+        [ -f "${OVERRIDES_FILE}" ] && docker_args+=(--env-file "${OVERRIDES_FILE}")
         docker_args+=(-v "${cog_root}:${cog_root}" -v "$(pwd)/config:/app/config")
         docker "${docker_args[@]}" "${APP_IMAGE}" "$@"
     else

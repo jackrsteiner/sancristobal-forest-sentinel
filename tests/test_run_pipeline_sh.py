@@ -11,7 +11,14 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_pipeline.sh"
 
 
-def _run(tmp_path: Path, *, aoi_path: str, fail_marker: str = "@@none@@") -> tuple[int, list[str]]:
+def _run(
+    tmp_path: Path,
+    *,
+    aoi_path: str,
+    fail_marker: str = "@@none@@",
+    env_file_lines: str = "",
+    overrides_lines: str | None = None,
+) -> tuple[int, list[str]]:
     """Run the wrapper with a recording `uv` stub; returns (exit code, invocations)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -31,11 +38,16 @@ def _run(tmp_path: Path, *, aoi_path: str, fail_marker: str = "@@none@@") -> tup
         # The script prepends $HOME/.local/bin (where the real uv lives on the
         # VM) — point HOME elsewhere so the stub wins.
         HOME=str(tmp_path),
-        ENV_FILE=str(tmp_path / "empty.env"),
+        ENV_FILE=str(tmp_path / "test.env"),
+        # Isolated from any real config/overrides.env in the checkout (#162).
+        OVERRIDES_FILE=str(tmp_path / "overrides.env"),
         AOI_PATH=aoi_path,
         FOREST_SENTINEL_AOIS_DIR=str(tmp_path / "aois"),
     )
-    (tmp_path / "empty.env").touch()
+    env.pop("WINDOW_DAYS", None)
+    (tmp_path / "test.env").write_text(env_file_lines)
+    if overrides_lines is not None:
+        (tmp_path / "overrides.env").write_text(overrides_lines)
     result = subprocess.run(
         ["bash", str(SCRIPT)], env=env, capture_output=True, text=True, check=False
     )
@@ -79,6 +91,54 @@ def test_one_failing_aoi_does_not_stop_the_loop_but_fails_the_run(tmp_path: Path
     code, calls = _run(tmp_path, aoi_path=str(tmp_path / "nope.geojson"), fail_marker="alpha")
     assert code == 1  # the scheduler still learns something failed...
     assert len(calls) == 2  # ...but beta ran after alpha's failure
+
+
+def _since_of(call: str) -> str:
+    return call.split("--since ")[1].split(" ")[0]
+
+
+def _since_candidates(days: int) -> set[str]:
+    # Computed on both sides of the subprocess call, so a run straddling UTC
+    # midnight cannot flake the assertion.
+    from datetime import UTC, datetime, timedelta
+
+    return {(datetime.now(UTC) - timedelta(days=days)).date().isoformat()}
+
+
+def test_env_file_window_days_reaches_the_cli(tmp_path: Path) -> None:
+    _geojson(tmp_path / "aois" / "alpha.geojson")
+    before = _since_candidates(30)
+    code, calls = _run(
+        tmp_path, aoi_path=str(tmp_path / "nope.geojson"), env_file_lines="WINDOW_DAYS=30\n"
+    )
+    after = _since_candidates(30)
+    assert code == 0
+    assert _since_of(calls[0]) in before | after
+
+
+def test_overrides_beat_the_env_file_on_the_very_next_run(tmp_path: Path) -> None:
+    """#162: a dashboard WINDOW_DAYS edit applies without an update-instance."""
+    _geojson(tmp_path / "aois" / "alpha.geojson")
+    before = _since_candidates(120)
+    code, calls = _run(
+        tmp_path,
+        aoi_path=str(tmp_path / "nope.geojson"),
+        env_file_lines="WINDOW_DAYS=30\n",
+        overrides_lines="WINDOW_DAYS=120\n",
+    )
+    after = _since_candidates(120)
+    assert code == 0
+    assert _since_of(calls[0]) in before | after
+
+
+def test_scripts_pass_overrides_to_image_mode() -> None:
+    """Contract: docker invocations carry overrides.env as the LAST --env-file."""
+    scripts_dir = SCRIPT.parent
+    for script in ("run_pipeline.sh", "prune_cogs.sh"):
+        text = (scripts_dir / script).read_text()
+        env_pos = text.index('--env-file "${ENV_FILE}"')
+        override_pos = text.index('--env-file "${OVERRIDES_FILE}"')
+        assert override_pos > env_pos, script
 
 
 def test_no_aoi_files_falls_back_to_single_aoi_path(tmp_path: Path) -> None:
