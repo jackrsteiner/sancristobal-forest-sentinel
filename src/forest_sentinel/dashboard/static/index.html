@@ -77,6 +77,17 @@
       .setting { margin: 6px 0; }
       .setting-edit input, .setting-edit select { width: 110px; }
       .timeline { font-size: 13px; margin: 6px 0; }
+      /* Persistence trajectory (#165): state pill reuses the dashboard's
+         status hues; the sparkline is a single neutral-blue series with values
+         carried by muted text, never by the series color. */
+      .persistence-state {
+        border-radius: 3px; padding: 0 5px; font-size: 11px; margin-left: 6px; color: #fff;
+      }
+      .state-persistent { background: #c0392b; }
+      .state-recovering { background: #e67e22; }
+      .state-transient { background: #7f8c8d; }
+      .trajectory-svg { display: block; width: 100%; height: 56px; margin: 2px 0; }
+      .trajectory-note { font-size: 12px; margin: 2px 0 2px 12px; }
       .evidence { font-size: 12px; color: #555; }
       .muted { color: #888; }
       #runs { margin: 12px 0; }
@@ -1181,6 +1192,108 @@
 
       // How the event relates to the loaded layers — recomputed per run, so
       // this is display only. Feature names are operator data: text nodes only.
+      // Persistence trajectory (#165): the onset detector goes quiet once its
+      // trailing baseline absorbs a clearing, so this answers "still bare,
+      // regenerating, or one-look transient?" from the retained NBR COGs.
+      // Fetched lazily per event; values are rendered as text/tooltips (DOM
+      // APIs only), never innerHTML.
+      const _SVG = "http://www.w3.org/2000/svg";
+
+      function _svg(tag, attrs) {
+        const el = document.createElementNS(_SVG, tag);
+        Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, String(value)));
+        return el;
+      }
+
+      function trajectorySparkline(data) {
+        const width = 300;
+        const height = 56;
+        const pad = { left: 6, right: 6, top: 8, bottom: 8 };
+        const values = data.points.map((p) => p.mean_nbr);
+        if (data.reference_nbr != null) values.push(data.reference_nbr);
+        const lo = Math.min(...values);
+        const hi = Math.max(...values);
+        const span = hi - lo || 1;
+        const t0 = Date.parse(data.points[0].date);
+        const t1 = Date.parse(data.points[data.points.length - 1].date) || t0 + 1;
+        const x = (date) =>
+          pad.left +
+          ((Date.parse(date) - t0) / (t1 - t0 || 1)) * (width - pad.left - pad.right);
+        const y = (v) => pad.top + (1 - (v - lo) / span) * (height - pad.top - pad.bottom);
+
+        const svg = _svg("svg", {
+          viewBox: `0 0 ${width} ${height}`,
+          class: "trajectory-svg",
+          role: "img",
+          "aria-label": "Footprint mean NBR over time",
+        });
+        if (data.reference_nbr != null) {
+          // Pre-event reference: the level a full recovery returns to.
+          svg.appendChild(
+            _svg("line", {
+              x1: pad.left, x2: width - pad.right,
+              y1: y(data.reference_nbr), y2: y(data.reference_nbr),
+              stroke: "#95a5a6", "stroke-width": 1, "stroke-dasharray": "4 3",
+            }),
+          );
+        }
+        const line = _svg("polyline", {
+          points: data.points.map((p) => `${x(p.date)},${y(p.mean_nbr)}`).join(" "),
+          fill: "none", stroke: "#2980b9", "stroke-width": 2,
+          "stroke-linejoin": "round", "stroke-linecap": "round",
+        });
+        svg.appendChild(line);
+        data.points.forEach((p, i) => {
+          const dot = _svg("circle", {
+            cx: x(p.date), cy: y(p.mean_nbr), r: i === 0 ? 3.5 : 2.5,
+            fill: i === 0 ? "#c0392b" : "#2980b9",
+          });
+          const title = document.createElementNS(_SVG, "title");
+          title.textContent =
+            `${p.date}: mean NBR ${p.mean_nbr.toFixed(3)} · ` +
+            `${Math.round(p.valid_fraction * 100)}% of footprint observed` +
+            (i === 0 ? " (detection)" : "");
+          dot.appendChild(title);
+          svg.appendChild(dot);
+        });
+        return svg;
+      }
+
+      async function renderTrajectory(eventId, container) {
+        let data;
+        try {
+          data = await (await fetch(`/api/events/${eventId}/trajectory`)).json();
+        } catch (e) {
+          return; // advisory panel — an unreachable endpoint renders nothing
+        }
+        const heading = document.createElement("div");
+        heading.className = "timeline";
+        const label = document.createElement("em");
+        label.textContent = "Persistence:";
+        heading.appendChild(label);
+        container.appendChild(heading);
+        if (data.state === "insufficient-data" || !data.points.length) {
+          const note = document.createElement("div");
+          note.className = "muted trajectory-note";
+          note.textContent =
+            "insufficient data — no clear post-detection looks with retained NBR rasters";
+          container.appendChild(note);
+          return;
+        }
+        const pill = document.createElement("span");
+        pill.className = `persistence-state state-${data.state}`;
+        pill.textContent = data.state;
+        heading.appendChild(pill);
+        container.appendChild(trajectorySparkline(data));
+        const caption = document.createElement("div");
+        caption.className = "muted trajectory-note";
+        const latest = data.points[data.points.length - 1];
+        caption.textContent =
+          `footprint mean NBR · pre-event ${data.reference_nbr.toFixed(2)} · ` +
+          `latest ${latest.mean_nbr.toFixed(2)} (${latest.date})`;
+        container.appendChild(caption);
+      }
+
       function contextSection(detail) {
         const wrap = document.createElement("div");
         const heading = document.createElement("div");
@@ -1403,6 +1516,9 @@
             `<div class="timeline"><em>Timeline (expansion):</em></div>${rows}` +
             `<div class="timeline"><em>Evidence:</em></div>${evidence}`;
           detailDiv.prepend(detectionSection(detail));
+          const trajectoryBox = document.createElement("div");
+          detailDiv.appendChild(trajectoryBox);
+          renderTrajectory(eventId, trajectoryBox); // async fill (#165)
           detailDiv.appendChild(contextSection(detail));
           detailDiv.appendChild(confidenceSection(detail));
           detailDiv.appendChild(reviewSection(detail));
