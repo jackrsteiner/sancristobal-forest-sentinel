@@ -124,6 +124,14 @@
         background: #fff; border: 1px solid #bbb; border-radius: 3px;
       }
       .gibs-step:hover { background: #f4f4f4; }
+      .gibs-slider-mid { display: flex; flex-direction: column; gap: 1px; }
+      /* Observation-quality ticks (#160): the horizontal padding approximates
+         the range thumb's half-width so slots align with slider positions. */
+      .gibs-ticks { display: flex; height: 5px; padding: 0 7px; }
+      .gibs-tick { flex: 1; margin: 0 0.5px; border-radius: 1px; }
+      .tick-good { background: #27ae60; }
+      .tick-mid { background: #e67e22; }
+      .tick-poor { background: #95a5a6; }
       .gibs-slider input[type="range"] { width: 170px; margin: 0; }
       .gibs-slider-label { font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
       .basemap-toggle {
@@ -373,6 +381,8 @@
       let gibsSliderInput = null;
       let gibsSliderLabel = null;
       let gibsSliderDebounce = null;
+      let gibsTicksBox = null;
+      let qualityByDate = {};
       const GibsSlider = L.Control.extend({
         options: { position: "bottomleft" },
         onAdd() {
@@ -386,7 +396,11 @@
           back.type = "button";
           back.textContent = "‹";
           back.title = "Previous day";
-          const input = L.DomUtil.create("input", "", row);
+          const mid = L.DomUtil.create("div", "gibs-slider-mid", row);
+          // Observation-quality ticks (#160): one slot per slider day, dotted
+          // and colored on days the detector itself had a (clear) look.
+          gibsTicksBox = L.DomUtil.create("div", "gibs-ticks", mid);
+          const input = L.DomUtil.create("input", "", mid);
           input.type = "range";
           input.min = "1";
           input.max = String(GIBS_SLIDER_DAYS);
@@ -418,6 +432,7 @@
           gibsSliderLabel = label;
           label.textContent = gibsDate;
           box.hidden = activeBase !== "gibs";
+          renderGibsTicks();
           return box;
         },
       });
@@ -435,6 +450,51 @@
         }
         gibsSliderInput.value = String(GIBS_SLIDER_DAYS + 1 - daysAgo);
         gibsSliderLabel.textContent = gibsDate;
+      }
+
+      // Observation-quality ticks (#160): color each slider day by the best
+      // Fmask valid fraction among that day's HLS observations for the current
+      // AOI — the days the detector itself could see are the ones worth
+      // scrubbing to. Purely advisory; scrubbing behavior is unchanged.
+      function renderGibsTicks() {
+        if (!gibsTicksBox) return;
+        gibsTicksBox.textContent = "";
+        for (let value = 1; value <= GIBS_SLIDER_DAYS; value += 1) {
+          const date = gibsDateForDaysAgo(GIBS_SLIDER_DAYS + 1 - value);
+          const slot = document.createElement("span");
+          slot.className = "gibs-tick";
+          const quality = qualityByDate[date];
+          if (quality) {
+            slot.classList.add(
+              quality.valid_fraction >= 0.7
+                ? "tick-good"
+                : quality.valid_fraction >= 0.3
+                  ? "tick-mid"
+                  : "tick-poor",
+            );
+            slot.title =
+              `${date}: ${Math.round(quality.valid_fraction * 100)}% clear ` +
+              `(${quality.observations} observation${quality.observations === 1 ? "" : "s"})`;
+          } else {
+            slot.title = `${date}: no observation`;
+          }
+          gibsTicksBox.appendChild(slot);
+        }
+      }
+
+      async function loadObservationQuality(aoiId) {
+        try {
+          const data = await (
+            await fetch(`/api/aois/${aoiId}/observation-quality?days=${GIBS_SLIDER_DAYS}`)
+          ).json();
+          qualityByDate = {};
+          data.days.forEach((day) => {
+            qualityByDate[day.date] = day;
+          });
+        } catch (e) {
+          qualityByDate = {}; // advisory only — an unreachable API just clears the dots
+        }
+        renderGibsTicks();
       }
 
       // Review-tool hook (#158): clicking an event jumps the imagery to its
@@ -636,6 +696,7 @@
         currentAoiId = aoiId;
         zoomToAoi(aoiId);
         loadRuns(aoiId);
+        loadObservationQuality(aoiId);
         currentCollection = await (await fetch(`/api/aois/${aoiId}/events`)).json();
         renderEvents();
         // The map frames the whole AOI (zoomToAoi above); clicking an event in
