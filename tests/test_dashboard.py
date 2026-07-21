@@ -397,6 +397,48 @@ def test_upload_aoi_can_be_disabled(client: TestClient, monkeypatch: pytest.Monk
     assert "disabled" in response.json()["detail"]
 
 
+# --- GET /api/aois/{id}/observation-quality: slider clear-day ticks (#160) ---
+
+
+def test_observation_quality_reports_best_fraction_per_day(
+    client: TestClient, db_session: Session
+) -> None:
+    from datetime import timedelta
+
+    from forest_sentinel.qa import record_quality_mask
+    from tests.fakes import make_observation
+
+    aoi = make_aoi(db_session, name="Quality AOI")
+    now = datetime.now(UTC)
+    # Two observations on the same recent day (best-of wins), one clearer day
+    # earlier, and one outside the 30-day window (must be absent).
+    for scene, days_ago, fraction in (
+        ("q-a", 3, 0.42),
+        ("q-b", 3, 0.81),
+        ("q-c", 10, 0.95),
+        ("q-old", 45, 0.99),
+    ):
+        obs = make_observation(
+            db_session, aoi, source_scene_id=scene, acquired_at=now - timedelta(days=days_ago)
+        )
+        record_quality_mask(db_session, observation_id=obs.id, valid_pixel_fraction=fraction)
+    db_session.commit()
+
+    payload = client.get(f"/api/aois/{aoi.id}/observation-quality?days=30").json()
+    by_date = {entry["date"]: entry for entry in payload["days"]}
+    assert len(by_date) == 2
+    same_day = by_date[(now - timedelta(days=3)).date().isoformat()]
+    assert (same_day["valid_fraction"], same_day["observations"]) == (0.81, 2)
+    clear_day = by_date[(now - timedelta(days=10)).date().isoformat()]
+    assert (clear_day["valid_fraction"], clear_day["observations"]) == (0.95, 1)
+
+
+def test_observation_quality_empty_aoi(client: TestClient, db_session: Session) -> None:
+    aoi = make_aoi(db_session, name="Empty AOI")
+    db_session.commit()
+    assert client.get(f"/api/aois/{aoi.id}/observation-quality").json() == {"days": []}
+
+
 # --- POST /api/aois/{id}/enabled: disable/re-enable for future runs (#149) ---
 
 

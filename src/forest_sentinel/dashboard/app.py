@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
@@ -59,8 +60,10 @@ from forest_sentinel.models import (
     EventObservation,
     ManualReview,
     MethodologyVersion,
+    Observation,
     PipelineRun,
     PipelineRunEvent,
+    QualityMask,
 )
 from forest_sentinel.runlog import STATUS_INTERRUPTED, STATUS_RUNNING
 from forest_sentinel.storage import StorageError, sanitize_path_component
@@ -203,6 +206,37 @@ def create_app() -> FastAPI:
                 }
             )
         return listing
+
+    @app.get("/api/aois/{aoi_id}/observation-quality")
+    def aoi_observation_quality(aoi_id: int, session: SessionDep, days: int = 30) -> dict[str, Any]:
+        """Per-day best observation clarity over the AOI's trailing window (#160).
+
+        Powers the Daily-satellite slider's tick marks: a reviewer scrubbing GIBS
+        imagery wants the days the detector itself could see. The fraction is the
+        Fmask-derived ``valid_pixel_fraction`` over scene ∩ AOI (``quality_mask``),
+        best-of per UTC date; dates with no observation are simply absent.
+        """
+        days = max(1, min(days, 366))
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        acquired_date = func.date(Observation.acquired_at)
+        rows = session.execute(
+            select(
+                acquired_date,
+                func.max(QualityMask.valid_pixel_fraction),
+                func.count(Observation.id),
+            )
+            .join(QualityMask, QualityMask.observation_id == Observation.id)
+            .where(Observation.aoi_id == aoi_id)
+            .where(Observation.acquired_at >= cutoff)
+            .group_by(acquired_date)
+            .order_by(acquired_date)
+        ).all()
+        return {
+            "days": [
+                {"date": day.isoformat(), "valid_fraction": fraction, "observations": count}
+                for day, fraction, count in rows
+            ]
+        }
 
     @app.post("/api/aois/{aoi_id}/enabled")
     def set_aoi_enabled(
