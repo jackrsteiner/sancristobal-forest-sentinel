@@ -397,6 +397,22 @@ def test_upload_aoi_can_be_disabled(client: TestClient, monkeypatch: pytest.Monk
     assert "disabled" in response.json()["detail"]
 
 
+# --- GET /api/events/{id}/trajectory: persistence sparkline data (#165) ---
+
+
+def test_event_trajectory_endpoint_shape_and_404(client: TestClient, db_session: Session) -> None:
+    aoi = _seed_event(db_session)
+    db_session.commit()
+    event_id = db_session.execute(select(DisturbanceEvent.id)).scalars().first()
+    payload = client.get(f"/api/events/{event_id}/trajectory").json()
+    # No index COGs on disk in this fixture: honest insufficiency, right shape.
+    assert payload["state"] == "insufficient-data"
+    assert payload["points"] == []
+    assert set(payload) == {"state", "reference_nbr", "detection_nbr", "points"}
+    assert client.get("/api/events/999999/trajectory").status_code == 404
+    del aoi
+
+
 # --- GET /api/aois/{id}/observation-quality: slider clear-day ticks (#160) ---
 
 
