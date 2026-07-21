@@ -1,0 +1,33 @@
+{
+  "type": "Feature",
+  "properties": {
+    "name": "Santa Isabel SE Tubi"
+  },
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          159.45,
+          -8.6
+        ],
+        [
+          159.9,
+          -8.6
+        ],
+        [
+          159.9,
+          -8.25
+        ],
+        [
+          159.45,
+          -8.25
+        ],
+        [
+          159.45,
+          -8.6
+        ]
+      ]
+    ]
+  }
+}
