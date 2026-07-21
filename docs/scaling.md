@@ -20,10 +20,13 @@ Four facts drive everything:
    NDVI, ΔNBR, ΔNDVI), submitted through `storage.py`. Per-task latency is
    **tier-dependent queue wait**, not compute: on the default noncommercial
    **Community tier we observed ~40 minutes per export** in production
-   (July 2026), far above the 1–5 minutes typical of higher tiers. Exports for
-   a scene are submitted **as one batch** so their queue waits overlap
-   (bounded by `FOREST_SENTINEL_MAX_CONCURRENT_EXPORTS`, default 4, and by the
-   tier's concurrent-task limit).
+   (July 2026), far above the 1–5 minutes typical of higher tiers. Both the
+   index and change stages chunk observations to
+   `FOREST_SENTINEL_MAX_CONCURRENT_EXPORTS ÷ 2` and submit each chunk's
+   exports **as one batch** so the queue waits overlap across observations
+   (#156; bounded by the tier's concurrent-task limit). Change-stage
+   checkpoints stay per-observation inside the chunk, so an interruption
+   loses at most one chunk's in-flight exports.
 3. **Only new work is exported.** An index/change raster whose catalog row and
    COG file already exist is **reused** (#77): a re-run over a processed window
    submits zero exports, and runs **checkpoint per observation chunk**, so a
