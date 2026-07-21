@@ -1209,13 +1209,18 @@
         const width = 300;
         const height = 56;
         const pad = { left: 6, right: 6, top: 8, bottom: 8 };
-        const values = data.points.map((p) => p.mean_nbr);
+        // Draw only what is drawable; a malformed point must not blank the chart.
+        const points = (data.points || []).filter(
+          (p) => Number.isFinite(p.mean_nbr) && Number.isFinite(Date.parse(p.date)),
+        );
+        if (!points.length) throw new Error("no drawable points");
+        const values = points.map((p) => p.mean_nbr);
         if (data.reference_nbr != null) values.push(data.reference_nbr);
         const lo = Math.min(...values);
         const hi = Math.max(...values);
         const span = hi - lo || 1;
-        const t0 = Date.parse(data.points[0].date);
-        const t1 = Date.parse(data.points[data.points.length - 1].date) || t0 + 1;
+        const t0 = Date.parse(points[0].date);
+        const t1 = Date.parse(points[points.length - 1].date) || t0 + 1;
         const x = (date) =>
           pad.left +
           ((Date.parse(date) - t0) / (t1 - t0 || 1)) * (width - pad.left - pad.right);
@@ -1238,12 +1243,12 @@
           );
         }
         const line = _svg("polyline", {
-          points: data.points.map((p) => `${x(p.date)},${y(p.mean_nbr)}`).join(" "),
+          points: points.map((p) => `${x(p.date)},${y(p.mean_nbr)}`).join(" "),
           fill: "none", stroke: "#2980b9", "stroke-width": 2,
           "stroke-linejoin": "round", "stroke-linecap": "round",
         });
         svg.appendChild(line);
-        data.points.forEach((p, i) => {
+        points.forEach((p, i) => {
           const dot = _svg("circle", {
             cx: x(p.date), cy: y(p.mean_nbr), r: i === 0 ? 3.5 : 2.5,
             fill: i === 0 ? "#c0392b" : "#2980b9",
@@ -1284,14 +1289,24 @@
         pill.className = `persistence-state state-${data.state}`;
         pill.textContent = data.state;
         heading.appendChild(pill);
-        container.appendChild(trajectorySparkline(data));
-        const caption = document.createElement("div");
-        caption.className = "muted trajectory-note";
-        const latest = data.points[data.points.length - 1];
-        caption.textContent =
-          `footprint mean NBR · pre-event ${data.reference_nbr.toFixed(2)} · ` +
-          `latest ${latest.mean_nbr.toFixed(2)} (${latest.date})`;
-        container.appendChild(caption);
+        // The state pill must never be orphaned by a chart bug: a payload the
+        // sparkline can't draw renders a visible diagnostic, not silence.
+        try {
+          container.appendChild(trajectorySparkline(data));
+          const caption = document.createElement("div");
+          caption.className = "muted trajectory-note";
+          const latest = data.points[data.points.length - 1];
+          caption.textContent =
+            `footprint mean NBR · pre-event ${
+              data.reference_nbr != null ? data.reference_nbr.toFixed(2) : "?"
+            } · latest ${latest.mean_nbr.toFixed(2)} (${latest.date})`;
+          container.appendChild(caption);
+        } catch (err) {
+          const note = document.createElement("div");
+          note.className = "muted trajectory-note";
+          note.textContent = `sparkline unavailable (${err && err.message ? err.message : err})`;
+          container.appendChild(note);
+        }
       }
 
       function contextSection(detail) {

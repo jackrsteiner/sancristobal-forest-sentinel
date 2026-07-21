@@ -27,7 +27,8 @@ def _write_delta(
     data: np.ndarray,
     *,
     crs: str = "EPSG:4326",
-    nodata: float = _NODATA,
+    # None = no nodata tag at all — the Earth Engine export convention.
+    nodata: float | None = _NODATA,
 ) -> None:
     height, width = data.shape
     with rasterio.open(
@@ -90,6 +91,28 @@ def test_nodata_pixels_are_neither_candidates_nor_valid(tmp_path: Path) -> None:
 
     assert len(features) == 1
     assert features[0]["properties"]["valid_pixels"] == 20 * 10
+
+
+def test_ee_style_nan_pixels_count_as_invalid_not_valid(tmp_path: Path) -> None:
+    """Regression: EE exports masked pixels as NaN with NO nodata tag. Unmasked,
+    they inflated valid_pixels and could turn delta_mean/delta_min into NaN —
+    values that get persisted and fed to confidence factors."""
+    import numpy as np
+
+    data = _grid()
+    data[5:10, 5:10] = -0.5  # the candidate patch
+    data[5:10, 5:7] = np.nan  # 10 of its 25 pixels are EE-masked (NaN)
+    cog = tmp_path / "delta.tif"
+    # EE convention: no nodata tag at all.
+    _write_delta(cog, data, nodata=None)
+
+    features = extract_features_from_cog(str(cog), threshold=-0.25, min_area_m2=1_000.0)
+
+    assert len(features) == 1
+    properties = features[0]["properties"]
+    assert properties["valid_pixels"] == 15  # NaN pixels are invalid, not valid
+    assert properties["delta_min"] == pytest.approx(-0.5)  # finite, never NaN
+    assert properties["delta_mean"] == pytest.approx(-0.5)
 
 
 def test_forest_mask_cog_clips_candidates(tmp_path: Path) -> None:
