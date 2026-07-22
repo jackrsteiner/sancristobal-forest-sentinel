@@ -81,6 +81,29 @@ def test_aoi_events_returns_geojson_feature_collection(
     )
 
 
+def test_events_are_ordered_by_id_even_with_tied_timestamps(
+    client: TestClient, db_session: Session
+) -> None:
+    """#172: a backfill mints many events sharing first_detected_at; ordering by
+    that column returned ties arbitrarily and the sidebar looked shuffled."""
+    aoi = make_aoi(db_session, name="Ordered AOI")
+    methodology = make_methodology(db_session)
+    # Two disjoint patches detected on the SAME day -> two events, tied timestamps.
+    far_patch = [(0.6, 0.6), (0.7, 0.6), (0.7, 0.7), (0.6, 0.7), (0.6, 0.6)]
+    make_candidate(db_session, aoi, methodology, day=2, ring=_PATCH, area_m2=10_000.0)
+    # Second sensor keeps the same-day scene ids distinct (fixture constraint).
+    make_candidate(
+        db_session, aoi, methodology, day=2, ring=far_patch, area_m2=10_000.0, sensor="HLSS30"
+    )
+    track_events_for_aoi(db_session, aoi=aoi)
+    db_session.flush()
+
+    features = client.get(f"/api/aois/{aoi.id}/events").json()["features"]
+    ids = [feature["properties"]["id"] for feature in features]
+    assert ids == sorted(ids)
+    assert len(ids) == 2
+
+
 def test_event_detail_has_timeline_and_evidence(client: TestClient, db_session: Session) -> None:
     _seed_event(db_session)
     event_id = db_session.execute(select(DisturbanceEvent.id)).scalar_one()
