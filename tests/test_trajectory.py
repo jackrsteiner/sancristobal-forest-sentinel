@@ -239,3 +239,60 @@ def test_same_day_granules_merge_pixel_weighted(db_session: Session, tmp_path: P
     result = trajectory.event_trajectory(db_session, event=event)
     day10 = next(p for p in result.points if p.date == "2026-06-10")
     assert day10.mean_nbr == pytest.approx(0.3, abs=1e-3)  # equal weights -> midpoint
+
+
+def test_batch_matches_single_event_results(db_session: Session, tmp_path: Path) -> None:
+    """#170: the inverted loop must be a pure optimization — identical output."""
+    from forest_sentinel.models import Aoi
+
+    event_a = _setup(db_session, tmp_path, post={10: 0.12, 15: 0.13})  # persistent
+    aoi = db_session.get(Aoi, event_a.aoi_id)
+    # A second event on the same AOI/lineage with a different footprint block:
+    # offset by 8 pixels, sharing the same COGs.
+    offset = box(0.1015 + 8 * _PIXEL, 0.897 - 8 * _PIXEL, 0.103 + 8 * _PIXEL, 0.8985 - 8 * _PIXEL)
+    event_b = DisturbanceEvent(
+        aoi_id=event_a.aoi_id,
+        methodology_version_id=event_a.methodology_version_id,
+        geometry=from_shape(MultiPolygon([offset]), srid=4326),
+        status="ongoing",
+        first_detected_at=_day(5),
+        last_detected_at=_day(5),
+    )
+    db_session.add(event_b)
+    db_session.flush()
+    del aoi
+
+    batch = trajectory.trajectories_for_events(db_session, events=[event_a, event_b])
+    for event in (event_a, event_b):
+        single = trajectory.event_trajectory(db_session, event=event)
+        assert batch[event.id] == single
+
+
+def test_batch_opens_each_cog_exactly_once(
+    db_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#170: opens scale with rasters, not events x rasters."""
+    event_a = _setup(db_session, tmp_path, post={10: 0.12, 15: 0.13})
+    event_b = DisturbanceEvent(
+        aoi_id=event_a.aoi_id,
+        methodology_version_id=event_a.methodology_version_id,
+        geometry=event_a.geometry,
+        status="ongoing",
+        first_detected_at=_day(5),
+        last_detected_at=_day(5),
+    )
+    db_session.add(event_b)
+    db_session.flush()
+
+    opened: list[str] = []
+    real_open = rasterio.open
+
+    def counting_open(path: object, *args: object, **kwargs: object) -> object:
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(rasterio, "open", counting_open)
+    trajectory.trajectories_for_events(db_session, events=[event_a, event_b])
+    # 5 COGs in the fixture (days 1, 3, 5, 10, 15), 2 events: 5 opens, not 10.
+    assert len(opened) == 5
+    assert len(set(opened)) == 5

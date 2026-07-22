@@ -8,6 +8,15 @@ User=@USER@
 WorkingDirectory=@APP_DIR@
 EnvironmentFile=@APP_DIR@/.env
 ExecStart=@APP_DIR@/scripts/run_assess.sh
+# Resource clamps (#170): re-scoring must be physically unable to starve the
+# dashboard/postgres on the shared-core 1 GB VM — under contention assess
+# slows down, everything else stays responsive; memory throttles then kills
+# assess long before the kernel OOM-killer picks a victim.
+Nice=10
+CPUWeight=20
+IOSchedulingClass=idle
+MemoryHigh=300M
+MemoryMax=400M
 # Local database + COG reads only; generous backstop for a whole-country
 # event list on the e2-micro. No timer: started on demand (dashboard button
 # or systemctl); scheduled runs re-assess in their own confidence stage.
