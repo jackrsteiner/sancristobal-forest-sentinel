@@ -1,6 +1,8 @@
 """The transparent confidence rule (E15 #106, fused agreement E16 #118)."""
 
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -81,23 +83,27 @@ def test_compute_assessment_records_every_input() -> None:
         days_since_last=0,
         agreement=1.0,
         agreement_details={"basis": "both", "matching_candidate_ids": [7]},
+        stability=1.0,
+        stability_details={"state": "persistent"},
     )
     # All factors maxed except coverage (0.8):
-    # 0.30 + 0.25 + 0.15*0.8 + 0.15 + 0.15 = 0.97.
-    assert assessment.score == pytest.approx(0.97)
+    # 0.25 + 0.20 + 0.10*0.8 + 0.10 + 0.15 + 0.20 = 0.98.
+    assert assessment.score == pytest.approx(0.98)
     assert assessment.level == "high"
     inputs = assessment.inputs
     assert inputs["rule_version"] == RULE_VERSION
     assert inputs["factors"]["magnitude"]["delta_min"] == -0.5
     assert inputs["factors"]["persistence"]["observation_count"] == 5
     assert inputs["factors"]["agreement"] == {"basis": "both", "matching_candidate_ids": [7]}
+    assert inputs["factors"]["stability"] == {"state": "persistent"}
     assert inputs["subscores"]["coverage"] == pytest.approx(0.8)
     assert inputs["missing"] == []
 
 
 def test_missing_statistics_degrade_with_renormalized_weights() -> None:
-    # Pre-#95 candidates with no radar coverage: no magnitude, no coverage, no
-    # agreement. Weights renormalize over persistence (0.25) + currency (0.15).
+    # Pre-#95 candidates with no radar coverage and no retained COGs: no
+    # magnitude, coverage, agreement, or stability. Weights renormalize over
+    # persistence (0.20) + currency (0.10).
     assessment = compute_assessment(
         delta_min=None,
         delta_mean=None,
@@ -106,11 +112,45 @@ def test_missing_statistics_degrade_with_renormalized_weights() -> None:
         days_since_last=0,
         agreement=None,
         agreement_details={"basis": "optical-only"},
+        stability=None,
+        stability_details={"state": "insufficient-data"},
     )
     assert assessment.score == pytest.approx(1.0)
-    assert sorted(assessment.inputs["missing"]) == ["agreement", "coverage", "magnitude"]
+    assert sorted(assessment.inputs["missing"]) == [
+        "agreement",
+        "coverage",
+        "magnitude",
+        "stability",
+    ]
     assert assessment.inputs["subscores"]["magnitude"] is None
     assert assessment.inputs["subscores"]["agreement"] is None
+
+
+def test_transient_stability_pulls_a_high_score_down() -> None:
+    """#168: the #254 profile — deep drop, clear look, same-day pair — scored
+    high under fused-v2; a transient (bounced-back) trajectory must sink it."""
+    common: dict[str, Any] = {
+        "delta_min": -0.47,
+        "delta_mean": -0.38,
+        "mean_valid_fraction": 1.0,
+        "observation_count": 2,
+        "days_since_last": 45.8,
+        "agreement": None,
+        "agreement_details": {"basis": "optical-only"},
+    }
+    without = compute_assessment(
+        **common, stability=None, stability_details={"state": "insufficient-data"}
+    )
+    transient = compute_assessment(
+        **common, stability=0.0, stability_details={"state": "transient"}
+    )
+    persistent = compute_assessment(
+        **common, stability=1.0, stability_details={"state": "persistent"}
+    )
+    assert without.level == "high"  # the fused-v2-equivalent verdict
+    assert transient.score < without.score
+    assert transient.level != "high"
+    assert persistent.score >= without.score
 
 
 def test_assess_events_appends_explained_rows(db_session: Session) -> None:
@@ -251,3 +291,26 @@ def test_other_kind_coverage_without_detection_scores_zero(db_session: Session) 
     assert agreement["other_kind_observations"] == 1
     assert row.inputs["subscores"]["agreement"] == 0.0
     assert "agreement" not in row.inputs["missing"]
+
+
+def test_assess_records_stability_from_retained_cogs(db_session: Session, tmp_path: Path) -> None:
+    """#168 end-to-end: the stability factor flows from real NBR COGs on disk
+    through trajectory into the recorded, explainable assessment inputs."""
+    from forest_sentinel.models import Aoi
+    from tests.test_trajectory import _setup
+
+    event = _setup(db_session, tmp_path, post={10: 0.55, 15: 0.58})  # bounce-back
+    aoi = db_session.get(Aoi, event.aoi_id)
+    assert aoi is not None
+
+    appended = confidence.assess_events_for_aoi(db_session, aoi=aoi)
+    assert appended == 1
+    from sqlalchemy import select as _select
+
+    from forest_sentinel.models import ConfidenceAssessment
+
+    row = db_session.execute(_select(ConfidenceAssessment)).scalar_one()
+    stability = row.inputs["factors"]["stability"]
+    assert stability["state"] == "transient"
+    assert stability["usable_dates"] == 3
+    assert row.inputs["subscores"]["stability"] == 0.0

@@ -74,6 +74,8 @@
       .review-entry { font-size: 12px; color: #555; margin: 2px 0; }
       body.reviews-disabled .review-form { display: none; }
       body.settings-edit-disabled .setting-edit { display: none; }
+      /* Run now / Stop / Re-assess share the compute-trigger guard (#168). */
+      body.pipeline-trigger-disabled #pipeline-controls { display: none; }
       .setting { margin: 6px 0; }
       .setting-edit input, .setting-edit select { width: 110px; }
       .timeline { font-size: 13px; margin: 6px 0; }
@@ -190,6 +192,7 @@
       <div id="pipeline-controls">
         <button id="run-now">Run pipeline now</button>
         <button id="stop-run">Stop run</button>
+        <button id="assess-now" title="Re-score event confidence from local data (no Earth Engine)">Re-assess</button>
         <span id="run-now-status" class="muted"></span>
       </div>
       <div id="runs"></div>
@@ -1608,6 +1611,35 @@
         loadEvents(body.id);
       }
 
+      // Offline confidence re-scoring (#168): local data only, minutes-scale,
+      // runs as a oneshot systemd unit — same shape as Run now.
+      async function runAssessNow() {
+        const button = document.getElementById("assess-now");
+        const status = document.getElementById("run-now-status");
+        status.className = "muted";
+        status.textContent = "Requesting…";
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/pipeline/assess", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const body = await response.json();
+          if (!response.ok) {
+            status.className = "muted upload-error";
+            status.textContent = body.detail || `Failed (${response.status}).`;
+            return;
+          }
+          status.textContent = body.detail || "Re-assessment started.";
+        } catch (e) {
+          status.className = "muted upload-error";
+          status.textContent = "Request failed — is the dashboard connected?";
+        } finally {
+          button.disabled = false;
+        }
+      }
+
       async function runPipelineNow() {
         const button = document.getElementById("run-now");
         const status = document.getElementById("run-now-status");
@@ -1808,6 +1840,7 @@
         try {
           const caps = await (await fetch("/api/capabilities")).json();
           document.body.classList.toggle("aoi-uploads-disabled", !caps.aoi_uploads);
+          document.body.classList.toggle("pipeline-trigger-disabled", !caps.pipeline_trigger);
           document.body.classList.toggle("reviews-disabled", !caps.reviews);
           document.body.classList.toggle("context-uploads-disabled", !caps.context_uploads);
           document.body.classList.toggle("settings-edit-disabled", !caps.settings_edit);
@@ -1817,6 +1850,7 @@
       }
 
       document.getElementById("run-now").addEventListener("click", runPipelineNow);
+      document.getElementById("assess-now").addEventListener("click", runAssessNow);
       document.getElementById("stop-run").addEventListener("click", stopPipelineRun);
       document.getElementById("filter-status").addEventListener("change", renderEvents);
       document.getElementById("filter-opinion").addEventListener("change", renderEvents);

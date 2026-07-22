@@ -173,6 +173,9 @@ sed "s#@PIPELINE_SCHEDULE@#${PIPELINE_SCHEDULE}#g" \
 sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g" \
     scripts/systemd/forest-sentinel-prune.service \
     | sudo tee /etc/systemd/system/forest-sentinel-prune.service >/dev/null
+sed "s#@APP_DIR@#${APP_DIR}#g; s#@USER@#${USER}#g" \
+    scripts/systemd/forest-sentinel-assess.service \
+    | sudo tee /etc/systemd/system/forest-sentinel-assess.service >/dev/null
 sed "s#@PRUNE_SCHEDULE@#${PRUNE_SCHEDULE}#g" \
     scripts/systemd/forest-sentinel-prune.timer \
     | sudo tee /etc/systemd/system/forest-sentinel-prune.timer >/dev/null

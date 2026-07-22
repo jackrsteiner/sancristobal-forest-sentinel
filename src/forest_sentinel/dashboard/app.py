@@ -130,6 +130,15 @@ PIPELINE_START_COMMAND = (
     "forest-sentinel-pipeline.service",
     "--no-block",
 )
+# Offline confidence re-scoring (#168): a oneshot unit, started fire-and-forget
+# like the pipeline. Minutes of local rasterio reads — never run in-request.
+PIPELINE_ASSESS_COMMAND = (
+    "sudo",
+    "systemctl",
+    "start",
+    "forest-sentinel-assess.service",
+    "--no-block",
+)
 # Stop is synchronous (no --no-block): SIGTERM is fast, and a blocking result
 # lets the endpoint report failures instead of guessing. The pipeline is
 # checkpoint-committed and resume-safe, so a deliberate stop is exactly the
@@ -368,6 +377,39 @@ def create_app() -> FastAPI:
                 ),
             )
         return {"detail": "pipeline run requested; progress appears in the runs panel"}
+
+    @app.post("/api/pipeline/assess", status_code=202)
+    def trigger_assess(_payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        """Re-score event confidence offline (#168) via the assess oneshot unit.
+
+        Local work only (database + retained COGs, zero Earth Engine), but
+        minutes-long at whole-AOI scale — so it runs as a systemd unit, not
+        in-request. Guarded like Run now (it is a compute trigger; world-open
+        forces it off), with the same mandatory-JSON-body CSRF posture. The
+        per-AOI advisory lock inside the CLI makes racing a live pipeline run
+        safe: locked AOIs are skipped, and that run assesses them itself.
+        """
+        if os.environ.get(PIPELINE_TRIGGER_ENV_VAR, "1") == "0":
+            raise HTTPException(
+                status_code=403, detail="pipeline triggering is disabled on this dashboard"
+            )
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed command, no user input
+                PIPELINE_ASSESS_COMMAND, capture_output=True, text=True, check=False, timeout=30
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HTTPException(
+                status_code=502, detail=f"could not start the assess service: {exc}"
+            ) from exc
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "could not start the assess service: "
+                    f"{result.stderr.strip() or f'exit code {result.returncode}'}"
+                ),
+            )
+        return {"detail": "re-assessment started; scores refresh as events re-render"}
 
     @app.post("/api/pipeline/stop", status_code=202)
     def stop_pipeline_run(

@@ -154,7 +154,7 @@ table below reflects the post-split behavior. Only `baseline_window` still re-ex
 | `RESOLVED_AFTER_DAYS` | `cli.py:585-587`, `events.py:51` | `90` days | No | Defensible as-is — see note | Mostly — see note | No | — |
 | `CLEAR_FRACTION_FLOOR` | constant `events.py:52` | `0.5` | No | Same as `RESOLVED_AFTER_DAYS` | Yes (code edit) | No | — |
 | `CONTEXT_BUFFER_M` | `context.py:48-49` | `5000` m | No | No — presentation, and relations are replaced per run | **Yes** | No | — |
-| Confidence tunables (`WEIGHTS`, cutoffs, horizons) | constants `confidence.py:57-74` | magnitude .30 / persistence .25 / coverage .15 / currency .15 / agreement .15; medium ≥ .4, high ≥ .65 | No — separate `rule_version` string (`fused-v2`, `confidence.py:54`) | Yes, via `rule_version` — but see note | Yes — assessments are append-only | No | — |
+| Confidence tunables (`WEIGHTS`, cutoffs, horizons, stability subscores) | constants `confidence.py` | magnitude .25 / persistence .20 / coverage .10 / currency .10 / agreement .15 / stability .20 (#168; trajectory-fed, local COGs, zero EE); medium ≥ .4, high ≥ .65 | No — separate content-addressed `rule_version` (`fused-v3+<hash>`) | Yes, via `rule_version` | Yes — assessments are append-only; offline re-score via `forest-sentinel assess` / dashboard Re-assess | No | — |
 
 **Notes**
 
@@ -289,7 +289,7 @@ files pruned? N rasters will be re-exported") before spending EE quota.
 
 ### 6. Confidence weights rely on manual version discipline
 
-> **Status: implemented.** `RULE_VERSION` is now `fused-v2+<hash>` over every weight,
+> **Status: implemented.** `RULE_VERSION` is now content-addressed (`fused-v3+<hash>` as of #168) over every weight,
 > cutoff, and normalization constant.
 
 Methodology parameters are content-addressed, but `confidence.py`'s weights/cutoffs are

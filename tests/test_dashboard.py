@@ -569,6 +569,37 @@ def test_trigger_pipeline_run_starts_the_service(
     assert recorded == [app_module.PIPELINE_START_COMMAND]
 
 
+def test_trigger_assess_starts_the_oneshot_unit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#168: the Re-assess button's endpoint starts the assess service."""
+    app_module = sys.modules["forest_sentinel.dashboard.app"]
+    recorded: list[tuple[str, ...]] = []
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> _Result:
+        recorded.append(tuple(command))
+        return _Result()
+
+    monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+    response = client.post("/api/pipeline/assess", json={})
+    assert response.status_code == 202
+    assert "re-assessment started" in response.json()["detail"].lower()
+    assert recorded == [app_module.PIPELINE_ASSESS_COMMAND]
+
+
+def test_trigger_assess_shares_the_pipeline_trigger_guard(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOREST_SENTINEL_PIPELINE_TRIGGER", "0")
+    response = client.post("/api/pipeline/assess", json={})
+    assert response.status_code == 403
+    assert "disabled" in response.json()["detail"]
+
+
 def test_trigger_pipeline_run_reports_a_failing_start(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

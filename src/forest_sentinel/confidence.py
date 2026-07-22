@@ -1,9 +1,10 @@
 """Transparent confidence scoring for disturbance events (E15).
 
 The rule is a **fully explained weighted average** over normalized factors —
-no learned weights, no hidden state. Rule ``fused-v2`` (superseding
-``optical-v1``, whose rows remain valid history) scores five factors, all of
-whose inputs are persisted at extraction time (docs/architecture.md §7):
+no learned weights, no hidden state. Rule ``fused-v3`` (superseding
+``fused-v2`` and ``optical-v1``, whose rows remain valid history) scores six
+factors, whose inputs are persisted at extraction time or computed from
+retained local rasters (docs/architecture.md §7):
 
 - **magnitude** — the deepest candidate ΔNBR drop across the event
   (``delta_min``, #95): a −0.5 drop is unambiguous clearing, −0.1 is noise-adjacent.
@@ -19,6 +20,14 @@ whose inputs are persisted at extraction time (docs/architecture.md §7):
   no overlap scores 0 (``optical-only``/``radar-only``); no other-kind
   observations in the window at all leaves the factor missing — absence of
   looking is not disagreement.
+- **stability** (#168) — the post-detection NBR trajectory inside the event
+  footprint (``trajectory.py``, local COG reads, zero Earth Engine). A
+  ``transient`` trajectory — the signal bounced back to the pre-event
+  reference — is the strongest single disconfirming evidence the system
+  measures (the unmasked-cloud-shadow profile) and scores 0; ``persistent``
+  scores 1; ``recovering`` sits between. ``insufficient-data`` (cloudy
+  aftermath, or index COGs pruned past retention) leaves the factor missing
+  and the weights renormalize, like ``agreement`` without radar.
 
 Every factor value, subscore, weight, and the rule version are recorded in the
 ``confidence_assessment.inputs`` JSONB, so a level is fully explainable from the
@@ -44,6 +53,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from forest_sentinel import trajectory
 from forest_sentinel.methodology import parameter_hash
 from forest_sentinel.models import (
     Aoi,
@@ -56,15 +66,16 @@ from forest_sentinel.models import (
     SensorSource,
 )
 
-RULE_NAME = "fused-v2"
+RULE_NAME = "fused-v3"
 
 # Factor weights (renormalized over available factors when inputs are null).
 WEIGHTS = {
-    "magnitude": 0.30,
-    "persistence": 0.25,
-    "coverage": 0.15,
-    "currency": 0.15,
+    "magnitude": 0.25,
+    "persistence": 0.20,
+    "coverage": 0.10,
+    "currency": 0.10,
     "agreement": 0.15,
+    "stability": 0.20,
 }
 
 # Normalization constants, recorded implicitly by the rule version.
@@ -73,6 +84,8 @@ MAGNITUDE_CEIL = 0.5  # |ΔNBR| at or above this scores 1 (unambiguous clearing)
 PERSISTENCE_CEIL = 5  # observations at or above this score 1
 CURRENCY_HORIZON_DAYS = 180  # this many days since last detection scores 0
 AGREEMENT_WINDOW_DAYS = 30  # other-lineage evidence within ± this window counts
+# Trajectory state -> stability subscore (#168): transient = disconfirming.
+STABILITY_SUBSCORES = {"persistent": 1.0, "recovering": 0.5, "transient": 0.0}
 
 # score >= HIGH_CUTOFF -> high; >= MEDIUM_CUTOFF -> medium; else low.
 MEDIUM_CUTOFF = 0.4
@@ -89,6 +102,7 @@ _TUNABLES = {
     "persistence_ceil": PERSISTENCE_CEIL,
     "currency_horizon_days": CURRENCY_HORIZON_DAYS,
     "agreement_window_days": AGREEMENT_WINDOW_DAYS,
+    "stability_subscores": STABILITY_SUBSCORES,
     "medium_cutoff": MEDIUM_CUTOFF,
     "high_cutoff": HIGH_CUTOFF,
 }
@@ -151,12 +165,14 @@ def compute_assessment(
     days_since_last: float,
     agreement: float | None,
     agreement_details: dict[str, Any],
+    stability: float | None,
+    stability_details: dict[str, Any],
 ) -> Assessment:
     """Apply the rule to raw factor inputs; pure and fully deterministic.
 
-    ``agreement`` is already 0..1 (or ``None`` when the other lineage never
-    looked); ``agreement_details`` is recorded verbatim as the factor's
-    explainable inputs (basis classification, matching evidence ids, window).
+    ``agreement`` and ``stability`` are already 0..1 (or ``None`` when their
+    evidence is unavailable); their details dicts are recorded verbatim as the
+    factors' explainable inputs.
     """
     subscores: dict[str, float | None] = {
         "magnitude": normalize_magnitude(delta_min),
@@ -164,6 +180,7 @@ def compute_assessment(
         "coverage": normalize_coverage(mean_valid_fraction),
         "currency": normalize_currency(days_since_last),
         "agreement": None if agreement is None else _clamp(agreement),
+        "stability": None if stability is None else _clamp(stability),
     }
     available = {name: value for name, value in subscores.items() if value is not None}
     total_weight = sum(WEIGHTS[name] for name in available)
@@ -185,6 +202,7 @@ def compute_assessment(
                 "coverage": {"mean_valid_fraction": mean_valid_fraction},
                 "currency": {"days_since_last": round(days_since_last, 2)},
                 "agreement": agreement_details,
+                "stability": stability_details,
             },
             "subscores": subscores,
             "missing": sorted(set(subscores) - set(available)),
@@ -248,6 +266,7 @@ def _assess_event(session: Session, event: DisturbanceEvent, now: datetime) -> A
     ).one()
     days_since_last = max(0.0, (now - event.last_detected_at).total_seconds() / 86_400)
     agreement, agreement_details = _assess_agreement(session, event)
+    stability, stability_details = _assess_stability(session, event)
     return compute_assessment(
         delta_min=delta_min,
         # Rounded: these are recorded verbatim in the explainable inputs, where
@@ -258,7 +277,35 @@ def _assess_event(session: Session, event: DisturbanceEvent, now: datetime) -> A
         days_since_last=days_since_last,
         agreement=agreement,
         agreement_details=agreement_details,
+        stability=stability,
+        stability_details=stability_details,
     )
+
+
+def _assess_stability(
+    session: Session, event: DisturbanceEvent
+) -> tuple[float | None, dict[str, Any]]:
+    """Post-detection trajectory for one event: (subscore, explainable details).
+
+    Local COG reads only (``trajectory.event_trajectory``) — never Earth
+    Engine. ``insufficient-data`` (cloudy aftermath, pruned COGs) leaves the
+    factor missing so the weights renormalize; a bounced-back ``transient``
+    trajectory scores 0 — the strongest disconfirming evidence available.
+    """
+    result = trajectory.event_trajectory(session, event=event)
+    latest = result.points[-1].mean_nbr if result.points else None
+    details: dict[str, Any] = {
+        "state": result.state,
+        "reference_nbr": _rounded(result.reference_nbr),
+        "detection_nbr": _rounded(result.detection_nbr),
+        "latest_mean_nbr": _rounded(latest),
+        "usable_dates": len(result.points),
+    }
+    return STABILITY_SUBSCORES.get(result.state), details
+
+
+def _rounded(value: float | None) -> float | None:
+    return None if value is None else round(value, 4)
 
 
 def _assess_agreement(

@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from forest_sentinel import (
+    confidence,
     context,
     earthengine,
     events,
@@ -109,6 +110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_aoi_command(args)
     if args.command == "context":
         return _run_context_command(args)
+    if args.command == "assess":
+        return _run_assess(args)
     if (args.since is None) != (args.until is None):
         # A lone window flag used to fall through to the Slice 0 load silently.
         parser.error("--since and --until must be provided together")
@@ -230,6 +233,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     reproduce_parser.add_argument("--gee-project", default=None)
+
+    assess_parser = subparsers.add_parser(
+        "assess",
+        help=(
+            "Re-score event confidence offline (#168): database + retained local "
+            "COGs only, no Earth Engine."
+        ),
+    )
+    assess_parser.add_argument(
+        "--aoi-name", default=None, help="Assess only this AOI (default: every AOI)."
+    )
     return parser
 
 
@@ -328,6 +342,52 @@ def _run_cogs_reproduce(args: argparse.Namespace) -> int:
             return 1
     print(f"Reproduced {args.kind}_raster {args.raster_id} -> {path}")
     return 0
+
+
+def _run_assess(args: argparse.Namespace) -> int:
+    """Re-score event confidence for AOIs — offline (#168).
+
+    Only the confidence stage runs: no Earth Engine initialization, no
+    discovery, no exports — the stability factor reads retained index COGs
+    from local disk. Each AOI is scored under its per-AOI advisory run lock
+    (try-lock: an AOI with a live pipeline run is skipped, not waited on;
+    that run's own confidence stage will assess it) and committed
+    independently. Re-running with unchanged inputs appends nothing.
+    """
+    with (
+        _disposing_engine() as engine,
+        engine.connect() as connection,
+        Session(bind=connection) as session,
+    ):
+        query = select(Aoi).order_by(Aoi.name)
+        if args.aoi_name is not None:
+            query = query.where(Aoi.name == args.aoi_name)
+        aois = session.execute(query).scalars().all()
+        if not aois:
+            target = f"AOI {args.aoi_name!r}" if args.aoi_name else "any AOI"
+            print(f"error: no {target} found", file=sys.stderr)
+            return 1
+        exit_code = 0
+        for aoi in aois:
+            locked = session.execute(
+                select(func.pg_try_advisory_lock(pipeline.AOI_RUN_LOCK_CLASS, aoi.id))
+            ).scalar_one()
+            if not locked:
+                print(f"{aoi.name}: skipped — a pipeline run holds the AOI lock")
+                exit_code = 1
+                continue
+            try:
+                appended = confidence.assess_events_for_aoi(session, aoi=aoi)
+                session.commit()
+                print(
+                    f"{aoi.name}: {appended} assessment(s) appended "
+                    f"(rule {confidence.RULE_VERSION}; unchanged conclusions skipped)"
+                )
+            finally:
+                session.execute(
+                    select(func.pg_advisory_unlock(pipeline.AOI_RUN_LOCK_CLASS, aoi.id))
+                )
+        return exit_code
 
 
 def _run_context_command(args: argparse.Namespace) -> int:

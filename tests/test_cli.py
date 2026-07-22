@@ -484,3 +484,73 @@ def test_cogs_reproduce_dispatches_by_kind(
     assert captured["current_script_version"] == EE_SCRIPT_VERSION
     assert captured["force_version"] is True
     assert f"Reproduced change_raster {change_id}" in capsys.readouterr().out
+
+
+# --- forest-sentinel assess: offline confidence re-scoring (#168) ---
+
+_ASSESS_PATCH = [(0.1, 0.1), (0.2, 0.1), (0.2, 0.2), (0.1, 0.2), (0.1, 0.1)]
+
+
+def _seed_assessable_event(engine: Engine) -> None:
+    from forest_sentinel.events import track_events_for_aoi
+    from tests.fakes import make_aoi, make_candidate, make_methodology
+
+    with Session(engine) as session:
+        aoi = make_aoi(session, name="Assess AOI")
+        methodology = make_methodology(session)
+        make_candidate(
+            session,
+            aoi,
+            methodology,
+            day=1,
+            ring=_ASSESS_PATCH,
+            area_m2=10_000.0,
+            delta_min=-0.5,
+            delta_mean=-0.3,
+            valid_pixel_fraction=0.9,
+        )
+        track_events_for_aoi(session, aoi=aoi)
+        session.commit()
+
+
+def test_assess_rescores_offline_with_zero_earthengine(
+    migrated_database: Engine, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from forest_sentinel import confidence
+    from forest_sentinel.models import ConfidenceAssessment
+
+    def _forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("assess must never touch Earth Engine")
+
+    monkeypatch.setattr(earthengine, "initialize", _forbidden)
+    _seed_assessable_event(migrated_database)
+
+    assert main(["assess"]) == 0
+    output = capsys.readouterr().out
+    assert f"rule {confidence.RULE_VERSION}" in output
+    assert "1 assessment(s) appended" in output
+
+    with Session(migrated_database) as session:
+        rows = session.execute(select(ConfidenceAssessment)).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].rule_version == confidence.RULE_VERSION
+    assert rows[0].pipeline_run_id is None  # offline pass, no run row
+    # No retained COGs in this fixture: stability honestly missing.
+    assert rows[0].inputs["factors"]["stability"]["state"] == "insufficient-data"
+    assert "stability" in rows[0].inputs["missing"]
+
+    # Unchanged inputs: the second pass appends nothing (existing skip logic).
+    assert main(["assess"]) == 0
+    assert "0 assessment(s) appended" in capsys.readouterr().out
+    with Session(migrated_database) as session:
+        assert (
+            session.execute(select(func.count()).select_from(ConfidenceAssessment)).scalar_one()
+            == 1
+        )
+
+
+def test_assess_unknown_aoi_exits_nonzero(
+    migrated_database: Engine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["assess", "--aoi-name", "No Such AOI"]) == 1
+    assert "no AOI 'No Such AOI' found" in capsys.readouterr().err

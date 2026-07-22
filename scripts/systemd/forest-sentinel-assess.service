@@ -1,0 +1,14 @@
+[Unit]
+Description=Open Forest Sentinel offline confidence re-scoring (no Earth Engine)
+After=docker.service
+
+[Service]
+Type=oneshot
+User=@USER@
+WorkingDirectory=@APP_DIR@
+EnvironmentFile=@APP_DIR@/.env
+ExecStart=@APP_DIR@/scripts/run_assess.sh
+# Local database + COG reads only; generous backstop for a whole-country
+# event list on the e2-micro. No timer: started on demand (dashboard button
+# or systemctl); scheduled runs re-assess in their own confidence stage.
+TimeoutStartSec=2h

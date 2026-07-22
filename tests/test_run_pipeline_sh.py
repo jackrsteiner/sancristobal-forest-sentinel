@@ -134,11 +134,22 @@ def test_overrides_beat_the_env_file_on_the_very_next_run(tmp_path: Path) -> Non
 def test_scripts_pass_overrides_to_image_mode() -> None:
     """Contract: docker invocations carry overrides.env as the LAST --env-file."""
     scripts_dir = SCRIPT.parent
-    for script in ("run_pipeline.sh", "prune_cogs.sh"):
+    for script in ("run_pipeline.sh", "prune_cogs.sh", "run_assess.sh"):
         text = (scripts_dir / script).read_text()
         env_pos = text.index('--env-file "${ENV_FILE}"')
         override_pos = text.index('--env-file "${OVERRIDES_FILE}"')
         assert override_pos > env_pos, script
+
+
+def test_vm_setup_installs_the_assess_unit() -> None:
+    """Contract (#168): the offline-assess oneshot unit is rendered on the VM."""
+    scripts_dir = SCRIPT.parent
+    setup = (scripts_dir / "vm_setup.sh").read_text()
+    assert "forest-sentinel-assess.service" in setup
+    unit = (scripts_dir / "systemd" / "forest-sentinel-assess.service").read_text()
+    assert "Type=oneshot" in unit
+    assert "ExecStart=@APP_DIR@/scripts/run_assess.sh" in unit
+    assert "User=@USER@" in unit
 
 
 def test_no_aoi_files_falls_back_to_single_aoi_path(tmp_path: Path) -> None:
