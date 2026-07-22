@@ -150,6 +150,9 @@ def test_vm_setup_installs_the_assess_unit() -> None:
     assert "Type=oneshot" in unit
     assert "ExecStart=@APP_DIR@/scripts/run_assess.sh" in unit
     assert "User=@USER@" in unit
+    # Resource clamps (#170): re-scoring must never starve the dashboard.
+    for clamp in ("Nice=10", "CPUWeight=20", "IOSchedulingClass=idle", "MemoryMax="):
+        assert clamp in unit, clamp
 
 
 def test_no_aoi_files_falls_back_to_single_aoi_path(tmp_path: Path) -> None:

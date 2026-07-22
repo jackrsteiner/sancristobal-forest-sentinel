@@ -506,7 +506,10 @@ def create_app() -> FastAPI:
             )
             .outerjoin(latest, latest.c.event_id == DisturbanceEvent.id)
             .where(DisturbanceEvent.aoi_id == aoi_id)
-            .order_by(DisturbanceEvent.first_detected_at)
+            # Numeric id order (#172): first_detected_at ties arbitrarily when a
+            # backfill mints many events with the same timestamp, making the
+            # sidebar order look random. Ids are mint-ordered and stable.
+            .order_by(DisturbanceEvent.id)
         ).all()
         return {
             "type": "FeatureCollection",

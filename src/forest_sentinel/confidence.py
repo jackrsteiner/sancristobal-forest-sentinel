@@ -230,9 +230,12 @@ def assess_events_for_aoi(
         .scalars()
         .all()
     )
+    # Batch the trajectories up front (#170): one pass over the AOI's COGs for
+    # ALL events, instead of an events x rasters open storm per event.
+    trajectories = trajectory.trajectories_for_events(session, events=events)
     appended = 0
     for event in events:
-        assessment = _assess_event(session, event, moment)
+        assessment = _assess_event(session, event, moment, trajectories[event.id])
         if not _conclusion_moved(session, event.id, assessment):
             continue
         session.add(
@@ -250,7 +253,12 @@ def assess_events_for_aoi(
     return appended
 
 
-def _assess_event(session: Session, event: DisturbanceEvent, now: datetime) -> Assessment:
+def _assess_event(
+    session: Session,
+    event: DisturbanceEvent,
+    now: datetime,
+    event_trajectory: trajectory.Trajectory,
+) -> Assessment:
     delta_min, delta_mean, mean_fraction, observation_count = session.execute(
         select(
             func.min(DisturbanceCandidate.delta_min),
@@ -266,7 +274,7 @@ def _assess_event(session: Session, event: DisturbanceEvent, now: datetime) -> A
     ).one()
     days_since_last = max(0.0, (now - event.last_detected_at).total_seconds() / 86_400)
     agreement, agreement_details = _assess_agreement(session, event)
-    stability, stability_details = _assess_stability(session, event)
+    stability, stability_details = _stability_from_trajectory(event_trajectory)
     return compute_assessment(
         delta_min=delta_min,
         # Rounded: these are recorded verbatim in the explainable inputs, where
@@ -282,17 +290,17 @@ def _assess_event(session: Session, event: DisturbanceEvent, now: datetime) -> A
     )
 
 
-def _assess_stability(
-    session: Session, event: DisturbanceEvent
+def _stability_from_trajectory(
+    result: trajectory.Trajectory,
 ) -> tuple[float | None, dict[str, Any]]:
-    """Post-detection trajectory for one event: (subscore, explainable details).
+    """Stability factor from a precomputed trajectory: (subscore, details).
 
-    Local COG reads only (``trajectory.event_trajectory``) — never Earth
-    Engine. ``insufficient-data`` (cloudy aftermath, pruned COGs) leaves the
-    factor missing so the weights renormalize; a bounced-back ``transient``
-    trajectory scores 0 — the strongest disconfirming evidence available.
+    Local COG reads only (batched in ``trajectories_for_events``, #170) —
+    never Earth Engine. ``insufficient-data`` (cloudy aftermath, pruned COGs)
+    leaves the factor missing so the weights renormalize; a bounced-back
+    ``transient`` trajectory scores 0 — the strongest disconfirming evidence
+    available.
     """
-    result = trajectory.event_trajectory(session, event=event)
     latest = result.points[-1].mean_nbr if result.points else None
     details: dict[str, Any] = {
         "state": result.state,

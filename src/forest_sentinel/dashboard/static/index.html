@@ -774,6 +774,13 @@
         document.getElementById("summary").textContent =
           `${features.length}${filtered} disturbance events`;
         renderEventList(features);
+        // A re-render (filter change) rebuilds layers with base styles: keep
+        // the selected event's emphasis while it remains listed (#172).
+        if (selectedEventId != null && layersById[selectedEventId]) {
+          layersById[selectedEventId].setStyle({ weight: SELECTED_WEIGHT });
+          const card = document.getElementById(`event-${selectedEventId}`);
+          if (card) card.classList.add("selected");
+        }
       }
 
       function runStatusLabel(run) {
@@ -1080,9 +1087,34 @@
           // Detection basis (#119): optical / radar / optical+radar, from the
           // agreement classification. Absent until the first fused assessment.
           if (p.basis) div.querySelector(".muted").before(basisBadge(p.basis));
-          div.onclick = () => showEvent(p.id);
+          // Toggle (#172): header click expands/collapses; clicks inside the
+          // expanded detail (review form, sparkline, links) never collapse.
+          div.onclick = (e) => {
+            if (e.target.closest(".detail")) return;
+            if (div.classList.contains("selected")) collapseEvent(p.id);
+            else showEvent(p.id);
+          };
           container.appendChild(div);
         });
+      }
+
+      // Selecting an event emphasizes its polygon without fighting the status
+      // (stroke color) and confidence (fill) encodings: weight only (#172).
+      const SELECTED_WEIGHT = 4;
+      let selectedEventId = null;
+
+      function collapseEvent(eventId) {
+        const card = document.getElementById(`event-${eventId}`);
+        if (card) {
+          card.classList.remove("selected");
+          card.querySelectorAll(".detail").forEach((el) => el.remove());
+        }
+        const layer = layersById[eventId];
+        if (layer) {
+          layer.closePopup();
+          if (eventsLayer) eventsLayer.resetStyle(layer);
+        }
+        if (selectedEventId === eventId) selectedEventId = null;
       }
 
       // Context layers (E17/#127): muted overlays per kind, off by default.
@@ -1502,7 +1534,19 @@
           .forEach((el) => el.classList.remove("selected"));
         const card = document.getElementById(`event-${eventId}`);
         if (card) card.classList.add("selected");
-        if (layersById[eventId]) map.fitBounds(layersById[eventId].getBounds(), { maxZoom: 14 });
+        // Full selection on the map too (#172): frame it, emphasize its
+        // polygon, and open its popup — one emphasized event at a time.
+        if (selectedEventId != null && selectedEventId !== eventId) {
+          const previous = layersById[selectedEventId];
+          if (previous && eventsLayer) eventsLayer.resetStyle(previous);
+        }
+        selectedEventId = eventId;
+        const layer = layersById[eventId];
+        if (layer) {
+          map.fitBounds(layer.getBounds(), { maxZoom: 14 });
+          layer.setStyle({ weight: SELECTED_WEIGHT });
+          layer.openPopup();
+        }
         jumpGibsToDate(eventFirstDetectedById[eventId]);
 
         const detail = await (await fetch(`/api/events/${eventId}`)).json();

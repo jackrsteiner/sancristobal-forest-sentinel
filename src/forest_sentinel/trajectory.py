@@ -16,6 +16,7 @@ lifecycle, or confidence scoring.
 
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,30 +85,65 @@ def event_trajectory(session: Session, *, event: DisturbanceEvent) -> Trajectory
     which observed under ``MIN_FOOTPRINT_COVERAGE`` of the footprint are
     skipped — absence degrades the answer to ``insufficient-data``, never to a
     wrong one.
+
+    Single-event convenience over ``trajectories_for_events`` (#170) — batch
+    callers (the confidence stage) must use the batch form, which opens each
+    COG once for ALL events instead of once per (event, raster) pair.
     """
-    footprint = mapping(to_shape(event.geometry))
-    methodology = session.get(MethodologyVersion, event.methodology_version_id)
-    if methodology is None:  # pragma: no cover - FK guarantees existence
-        return Trajectory(state=STATE_INSUFFICIENT)
-    rows = session.execute(
-        select(Observation.acquired_at, IndexRaster.cog_path)
-        .join(IndexRaster, IndexRaster.observation_id == Observation.id)
-        .where(Observation.aoi_id == event.aoi_id)
-        .where(IndexRaster.index_type == _INDEX_TYPE)
-        .where(IndexRaster.raster_lineage_id == methodology.raster_lineage_id)
-        .order_by(Observation.acquired_at)
-    ).all()
+    return trajectories_for_events(session, events=[event])[event.id]
 
-    # Pixel-weighted per-date aggregation: adjacent same-day granules (tile
-    # boundaries) merge into one honest look instead of two half-looks.
-    by_date: dict[str, list[tuple[float, int, int]]] = {}
-    for acquired_at, cog_path in rows:
-        stats = _footprint_statistics(cog_path, footprint)
-        if stats is None:
+
+def trajectories_for_events(
+    session: Session, *, events: Sequence[DisturbanceEvent]
+) -> dict[int, Trajectory]:
+    """Trajectories for many events with each COG opened exactly once (#170).
+
+    The incident that motivated this: per-event computation over a
+    whole-country AOI did opens ~ events × rasters (~270k header reads) and
+    starved the e2-micro. Here events are grouped by (AOI, raster lineage),
+    the raster list is fetched once per group, and the loop runs rasters
+    OUTER, events INNER — one open per file, a cheap bounds pre-check per
+    footprint, and a windowed read only on intersection.
+    """
+    results: dict[int, Trajectory] = {}
+    groups: dict[tuple[int, int], list[DisturbanceEvent]] = {}
+    for event in events:
+        methodology = session.get(MethodologyVersion, event.methodology_version_id)
+        if methodology is None:  # pragma: no cover - FK guarantees existence
+            results[event.id] = Trajectory(state=STATE_INSUFFICIENT)
             continue
-        mean, valid, total = stats
-        by_date.setdefault(_utc_date(acquired_at), []).append((mean, valid, total))
+        groups.setdefault((event.aoi_id, methodology.raster_lineage_id), []).append(event)
 
+    for (aoi_id, lineage_id), group in groups.items():
+        rows = session.execute(
+            select(Observation.acquired_at, IndexRaster.cog_path)
+            .join(IndexRaster, IndexRaster.observation_id == Observation.id)
+            .where(Observation.aoi_id == aoi_id)
+            .where(IndexRaster.index_type == _INDEX_TYPE)
+            .where(IndexRaster.raster_lineage_id == lineage_id)
+            .order_by(Observation.acquired_at)
+        ).all()
+        footprints = {event.id: mapping(to_shape(event.geometry)) for event in group}
+        # Pixel-weighted per-date aggregation per event: adjacent same-day
+        # granules (tile boundaries) merge into one honest look, not two.
+        by_date: dict[int, dict[str, list[tuple[float, int, int]]]] = {
+            event.id: {} for event in group
+        }
+        for acquired_at, cog_path in rows:
+            date = _utc_date(acquired_at)
+            for event_id, stats in _footprint_statistics_many(cog_path, footprints).items():
+                if stats is None:
+                    continue
+                by_date[event_id].setdefault(date, []).append(stats)
+        for event in group:
+            results[event.id] = _assemble(event, by_date[event.id])
+
+    return results
+
+
+def _assemble(
+    event: DisturbanceEvent, by_date: dict[str, list[tuple[float, int, int]]]
+) -> Trajectory:
     detected_date = _utc_date(event.first_detected_at)
     reference_values: list[float] = []
     points: list[TrajectoryPoint] = []
@@ -163,32 +199,56 @@ def _utc_date(moment: datetime) -> str:
     return moment.astimezone(UTC).date().isoformat()
 
 
-def _footprint_statistics(
-    cog_path: str, footprint: dict[str, Any]
-) -> tuple[float, int, int] | None:
-    """(mean NBR, valid pixels, total footprint pixels) for one COG, or None.
+def _footprint_statistics_many(
+    cog_path: str, footprints: dict[int, dict[str, Any]]
+) -> dict[int, tuple[float, int, int] | None]:
+    """Per-footprint (mean NBR, valid pixels, total pixels) from ONE open (#170).
 
-    ``None`` for a missing/unreadable file or a scene that does not intersect
-    the footprint at all — both are absences, not zeros.
+    ``None`` entries mean absence — a missing/unreadable file or a footprint
+    the scene does not cover — never zeros. The file is opened exactly once
+    for all footprints; non-intersecting footprints are rejected on bounds
+    before any pixel is read.
     """
+    results: dict[int, tuple[float, int, int] | None] = dict.fromkeys(footprints)
     if not Path(cog_path).exists():
-        return None
+        return results
     try:
         with rasterio.open(cog_path) as src:
-            geom = (
-                footprint
-                if src.crs is None or src.crs.to_string() == _WGS84
-                else rasterio.warp.transform_geom(_WGS84, src.crs, footprint)
-            )
-            window = rasterio.features.geometry_window(src, [geom])
-            # Earth Engine exports masked pixels as NaN with NO nodata tag, so
-            # the masked read alone does not exclude them: unmasked NaNs would
-            # poison the mean (NaN -> serialized null -> broken client) and
-            # inflate the valid count so cloudy looks stop being skipped.
-            data = np.ma.masked_invalid(src.read(1, window=window, masked=True))
-            transform = src.window_transform(window)
+            for event_id, footprint in footprints.items():
+                results[event_id] = _stats_in_open_dataset(src, footprint)
     except (rasterio.errors.RasterioError, ValueError, OSError) as exc:
         logger.debug("trajectory read skipped for %s: %s", cog_path, exc)
+    return results
+
+
+def _stats_in_open_dataset(
+    src: rasterio.DatasetReader, footprint: dict[str, Any]
+) -> tuple[float, int, int] | None:
+    try:
+        geom = (
+            footprint
+            if src.crs is None or src.crs.to_string() == _WGS84
+            else rasterio.warp.transform_geom(_WGS84, src.crs, footprint)
+        )
+        # Bounds pre-check: a tile that never sees this footprint costs a few
+        # float comparisons, not a windowed read.
+        left, bottom, right, top = rasterio.features.bounds(geom)
+        if (
+            right < src.bounds.left
+            or left > src.bounds.right
+            or top < src.bounds.bottom
+            or bottom > src.bounds.top
+        ):
+            return None
+        window = rasterio.features.geometry_window(src, [geom])
+        # Earth Engine exports masked pixels as NaN with NO nodata tag, so
+        # the masked read alone does not exclude them: unmasked NaNs would
+        # poison the mean (NaN -> serialized null -> broken client) and
+        # inflate the valid count so cloudy looks stop being skipped.
+        data = np.ma.masked_invalid(src.read(1, window=window, masked=True))
+        transform = src.window_transform(window)
+    except (rasterio.errors.RasterioError, ValueError, OSError) as exc:
+        logger.debug("trajectory read skipped for %s: %s", src.name, exc)
         return None
     inside = rasterio.features.geometry_mask(
         [geom], out_shape=data.shape, transform=transform, invert=True
